@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+
+# GitNexus
+.gitnexus/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Logs / temp
+*.log
+*.tmp
+
+# Large / generated files (adjust as needed)
+*.zip
+*.exe
+*.dll
+*.png
+*.jpg
+*.mp4
+*.xlsx
+*.xlx
+*.csv

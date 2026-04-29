@@ -1,0 +1,20 @@
+{
+  "current_profile": "Saskpower Cogen",
+  "profiles": [
+    {
+      "name": "Default",
+      "st_threshold": 40.0,
+      "ot_threshold": 10.0,
+      "dt_threshold": null
+    },
+    {
+      "name": "Saskpower Cogen",
+      "st_threshold": 40.0,
+      "ot_threshold": 10.0,
+      "dt_threshold": null
+    }
+  ],
+  "employee_groups": {
+    "Cogen Techs": []
+  }
+}

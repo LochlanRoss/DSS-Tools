@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dss-hours-tracker"
+version = "0.1.0"
+description = "Desktop DSS labour-hour tracker"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "openpyxl>=3.1,<4",
+  "pywin32>=306; platform_system == 'Windows'",
+]
+
+[project.gui-scripts]
+dss-hours-tracker = "dss_hours_tracker:main"
+
+[tool.setuptools]
+py-modules = ["dss_hours_tracker"]
