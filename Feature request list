@@ -1,1 +1,17 @@
+Please make this list into a checklist and check items off as they are completed.
+
 I want to implement automatic updates and version control for the installed version of the software. I want to check my github repo for updates, automatically download the updates if on wifi (and not a metered network) and offer to install when the update is downloaded. How can this be implemented.
+
+Are there any ways to make the hash check more robust against metadata that does not pertain to DSS content changes? How do I make the diff only check when cells actually change? This is tough on excel with onedrive autosave on, especially when people have the file open.
+
+I want to be able to click and drag columns in any viewer to re-order them.
+
+I want to add sorting to each header. I can currently click the column headers but they do nothing. I want them to turn into a clickable dropdown that has checkboxes next to each unique entry in the list (scrollbar if necessary) with an option to check all and uncheck all at the top of the page. I do not want to lose the ability to sort the lists with a click as they are now, can we add an option in the dropdown that just switches the order they're sorted in (newest to oldest, alphabetical, reverse alphabetical, however each row is sorted by default when clicked, put that option in the dropdown)
+
+Please ensure the column visibility, width, and any other UI changes get persisted to disk and loaded on the next launch.
+
+In the error report window, please add a button for checking name typos manually. 
+
+In the name typos popup, please add a note that this can be enabled or disabled in settings
+
+Please create a document that lists all UI standardizations that don't necessarily pertain to specifics of this project ("display PF column first" or something), but pertain generally to the creation of a useful UI (tabbed pages, a settings page, diagnostic settings, options to change paths in settings, persisten column width and order, etc). The purpose of this document would be for agent handoffs in future projects for unrelated purposes, which is why it needs to be generalized.

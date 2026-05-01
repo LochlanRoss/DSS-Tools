@@ -17,11 +17,15 @@ from dss_hours_tracker import (
     build_email_html,
     build_bug_report_html,
     build_error_findings,
+    checksum_for_asset_name,
+    choose_release_checksum_asset,
+    choose_release_installer_asset,
     build_permission_denied_message,
     build_week_totals,
     build_weekly_rollup,
     is_newer_version,
     normalize_release_version,
+    parse_checksum_manifest,
     parse_latest_release_payload,
     cache_file_path,
     clear_cache_files,
@@ -39,9 +43,11 @@ from dss_hours_tracker import (
     find_potential_name_typos,
     find_open_excel_workbook,
     filter_employee_names,
+    find_similar_employee_name_pairs,
     FormattingProfile,
     get_app_root,
     is_alert_triggered,
+    is_unmetered_wifi_profile,
     load_cached_daily_records,
     load_cached_source_analysis,
     load_tracker_data,
@@ -394,12 +400,55 @@ class DssHoursTrackerTests(unittest.TestCase):
             'html_url': 'https://github.com/LochlanRoss/DSS-Viewer/releases/tag/v0.2.1',
             'published_at': '2026-05-01T00:00:00Z',
             'body': 'Notes',
-            'assets': [{'name': 'DSSViewerSetup.exe'}, {'name': 'checksums.txt'}],
+            'assets': [
+                {'name': 'DSSViewerSetup.exe', 'browser_download_url': 'https://example.invalid/setup.exe', 'size': 1234, 'content_type': 'application/octet-stream'},
+                {'name': 'checksums.txt', 'browser_download_url': 'https://example.invalid/checksums.txt'},
+            ],
         }
         info = parse_latest_release_payload(payload)
         self.assertEqual(info['version'], '0.2.1')
         self.assertEqual(info['tag_name'], 'v0.2.1')
         self.assertEqual(info['asset_names'], ['DSSViewerSetup.exe', 'checksums.txt'])
+        self.assertEqual(info['assets'][0]['download_url'], 'https://example.invalid/setup.exe')
+
+    def test_release_asset_selection_and_checksum_parsing(self) -> None:
+        release_info = {
+            'assets': [
+                {'name': 'notes.zip', 'download_url': 'https://example.invalid/notes.zip'},
+                {'name': 'DSSViewerSetup.exe', 'download_url': 'https://example.invalid/setup.exe'},
+                {'name': 'checksums.txt', 'download_url': 'https://example.invalid/checksums.txt'},
+            ]
+        }
+        installer = choose_release_installer_asset(release_info)
+        checksum_asset = choose_release_checksum_asset(release_info)
+        manifest = (
+            'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa *DSSViewerSetup.exe\n'
+            'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  other.msi\n'
+        )
+        self.assertEqual(installer['name'], 'DSSViewerSetup.exe')
+        self.assertEqual(checksum_asset['name'], 'checksums.txt')
+        self.assertEqual(
+            checksum_for_asset_name(manifest, 'DSSViewerSetup.exe'),
+            'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        )
+        self.assertIn('other.msi', parse_checksum_manifest(manifest))
+
+    def test_is_unmetered_wifi_profile(self) -> None:
+        self.assertTrue(
+            is_unmetered_wifi_profile(
+                {
+                    'supported': True,
+                    'connected': True,
+                    'is_wlan': True,
+                    'network_cost_type': 'Unrestricted',
+                    'roaming': False,
+                    'over_data_limit': False,
+                    'approaching_data_limit': False,
+                    'background_restricted': False,
+                }
+            )
+        )
+        self.assertFalse(is_unmetered_wifi_profile({'supported': True, 'connected': True, 'is_wlan': False, 'network_cost_type': 'Unrestricted'}))
 
     def test_compute_bytes_hash_is_stable(self) -> None:
         payload = b"example workbook bytes"
@@ -523,6 +572,8 @@ class DssHoursTrackerTests(unittest.TestCase):
                     disable_name_typo_notifications=True,
                     hash_poll_minutes=12,
                     show_daily_raw_tab=False,
+                    auto_update_check_enabled=False,
+                    auto_download_updates_on_unmetered_wifi=False,
                 ),
             )
 
@@ -531,6 +582,8 @@ class DssHoursTrackerTests(unittest.TestCase):
             self.assertTrue(loaded.disable_name_typo_notifications)
             self.assertEqual(loaded.hash_poll_minutes, 12)
             self.assertFalse(loaded.show_daily_raw_tab)
+            self.assertFalse(loaded.auto_update_check_enabled)
+            self.assertFalse(loaded.auto_download_updates_on_unmetered_wifi)
 
     def test_filter_employee_names_supports_all_employee_and_group_modes(self) -> None:
         employees = ["Alice Smith", "Bob Jones", "Charlie West"]

@@ -9,6 +9,7 @@ import io
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import threading
@@ -54,9 +55,13 @@ CACHE_DIRNAME = "cache"
 CACHE_RETENTION_DAYS = 7
 HASH_CHECK_INTERVAL_MS = 300000
 AUTO_OUTLOOK_SYNC_DELAY_MS = 60000
+AUTO_UPDATE_CHECK_DELAY_MS = 15000
 DEFAULT_HASH_POLL_MINUTES = 5
 BUG_REPORT_EMAIL = "lross@jatechpowersystems.com"
 MAX_PARALLEL_PARSE_WORKERS = 2
+UPDATE_DIRNAME = "updates"
+INSTALLER_EXTENSIONS = (".exe", ".msi", ".msix", ".msixbundle")
+CHECKSUM_ASSET_NAMES = ("checksums.txt", "sha256sums.txt", "sha256sums", "sha256sum.txt")
 GITHUB_REPO_SLUG = "LochlanRoss/DSS-Viewer"
 GITHUB_LATEST_RELEASE_URL = f"https://api.github.com/repos/{GITHUB_REPO_SLUG}/releases/latest"
 
@@ -105,6 +110,22 @@ def is_newer_version(candidate_version: str, current_version: str) -> bool:
 def parse_latest_release_payload(payload: dict) -> dict[str, object]:
     tag_name = str(payload.get("tag_name", "")).strip()
     version = normalize_release_version(tag_name)
+    assets: list[dict[str, object]] = []
+    for asset in payload.get("assets", []):
+        if not isinstance(asset, dict):
+            continue
+        name = str(asset.get("name", "")).strip()
+        download_url = str(asset.get("browser_download_url", "")).strip()
+        if not name:
+            continue
+        assets.append(
+            {
+                "name": name,
+                "download_url": download_url,
+                "size": int(asset.get("size", 0) or 0),
+                "content_type": str(asset.get("content_type", "")).strip(),
+            }
+        )
     return {
         "tag_name": tag_name,
         "version": version,
@@ -112,11 +133,8 @@ def parse_latest_release_payload(payload: dict) -> dict[str, object]:
         "html_url": str(payload.get("html_url", "")).strip(),
         "published_at": str(payload.get("published_at", "")).strip(),
         "body": str(payload.get("body", "")),
-        "asset_names": [
-            str(asset.get("name", "")).strip()
-            for asset in payload.get("assets", [])
-            if isinstance(asset, dict) and str(asset.get("name", "")).strip()
-        ],
+        "asset_names": [str(asset["name"]) for asset in assets],
+        "assets": assets,
     }
 
 
@@ -140,6 +158,141 @@ def fetch_latest_release_info(url: str = GITHUB_LATEST_RELEASE_URL, timeout: int
     if not isinstance(payload, dict):
         raise RuntimeError("Unexpected GitHub release response.")
     return parse_latest_release_payload(payload)
+
+
+def choose_release_installer_asset(release_info: dict[str, object]) -> dict[str, object] | None:
+    assets = release_info.get("assets", [])
+    if not isinstance(assets, list):
+        return None
+    ranked_assets: list[tuple[int, dict[str, object]]] = []
+    for asset in assets:
+        if not isinstance(asset, dict):
+            continue
+        name = str(asset.get("name", "")).strip()
+        suffix = Path(name).suffix.lower()
+        if suffix not in INSTALLER_EXTENSIONS:
+            continue
+        ranked_assets.append((INSTALLER_EXTENSIONS.index(suffix), asset))
+    if not ranked_assets:
+        return None
+    ranked_assets.sort(key=lambda item: (item[0], str(item[1].get("name", "")).casefold()))
+    return ranked_assets[0][1]
+
+
+def choose_release_checksum_asset(release_info: dict[str, object]) -> dict[str, object] | None:
+    assets = release_info.get("assets", [])
+    if not isinstance(assets, list):
+        return None
+    for preferred_name in CHECKSUM_ASSET_NAMES:
+        for asset in assets:
+            if isinstance(asset, dict) and str(asset.get("name", "")).strip().casefold() == preferred_name.casefold():
+                return asset
+    return None
+
+
+def parse_checksum_manifest(manifest_text: str) -> dict[str, str]:
+    checksums: dict[str, str] = {}
+    for raw_line in manifest_text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = re.match(r"^([0-9a-fA-F]{64})\s+[* ]?(.+)$", line)
+        if not match:
+            continue
+        checksums[Path(match.group(2).strip()).name] = match.group(1).lower()
+    return checksums
+
+
+def checksum_for_asset_name(manifest_text: str, asset_name: str) -> str | None:
+    return parse_checksum_manifest(manifest_text).get(Path(asset_name).name)
+
+
+def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(chunk_size)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def download_url_bytes(url: str, timeout: int = 60) -> bytes:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": f"dss-hours-tracker/{APP_VERSION}",
+            "Accept": "application/octet-stream, text/plain, application/vnd.github+json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.read()
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"Download failed with HTTP {exc.code}.") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError("Could not reach GitHub to download the update asset.") from exc
+    except OSError as exc:
+        raise RuntimeError("Could not download the update asset.") from exc
+
+
+def download_release_asset(url: str, destination: Path, timeout: int = 300) -> Path:
+    payload = download_url_bytes(url, timeout=timeout)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(payload)
+    return destination
+
+
+def get_windows_network_profile(timeout: int = 10) -> dict[str, object]:
+    if os.name != "nt":
+        return {"connected": False, "supported": False, "reason": "Windows-only check"}
+    command = [
+        "powershell",
+        "-NoProfile",
+        "-Command",
+        "[Windows.Networking.Connectivity.NetworkInformation, Windows, ContentType = WindowsRuntime] | Out-Null; "
+        "$profile = [Windows.Networking.Connectivity.NetworkInformation]::GetInternetConnectionProfile(); "
+        "if ($null -eq $profile) { @{ connected = $false; supported = $true } | ConvertTo-Json -Compress; exit 0 }; "
+        "$cost = $profile.GetConnectionCost(); $level = $profile.GetNetworkConnectivityLevel().ToString(); "
+        "[ordered]@{ connected = ($level -ne 'None'); supported = $true; connectivity_level = $level; is_wlan = [bool]$profile.IsWlanConnectionProfile; network_cost_type = $cost.NetworkCostType.ToString(); roaming = [bool]$cost.Roaming; over_data_limit = [bool]$cost.OverDataLimit; approaching_data_limit = [bool]$cost.ApproachingDataLimit; background_restricted = [bool]$cost.BackgroundDataUsageRestricted } | ConvertTo-Json -Compress",
+    ]
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=True)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"connected": False, "supported": False, "reason": str(exc)}
+    try:
+        payload = json.loads(completed.stdout.strip() or "{}")
+    except json.JSONDecodeError:
+        return {"connected": False, "supported": False, "reason": "Invalid network profile response"}
+    return payload if isinstance(payload, dict) else {"connected": False, "supported": False}
+
+
+def is_unmetered_wifi_profile(profile: dict[str, object]) -> bool:
+    if not isinstance(profile, dict):
+        return False
+    return (
+        bool(profile.get("supported", False))
+        and bool(profile.get("connected", False))
+        and bool(profile.get("is_wlan", False))
+        and str(profile.get("network_cost_type", "")).casefold() == "unrestricted"
+        and not bool(profile.get("roaming", False))
+        and not bool(profile.get("over_data_limit", False))
+        and not bool(profile.get("approaching_data_limit", False))
+        and not bool(profile.get("background_restricted", False))
+    )
+
+
+def describe_network_profile(profile: dict[str, object]) -> str:
+    if not isinstance(profile, dict):
+        return "network state unavailable"
+    if not bool(profile.get("supported", False)):
+        return str(profile.get("reason", "network state unavailable")).strip() or "network state unavailable"
+    if not bool(profile.get("connected", False)):
+        return "no internet connection"
+    connection_type = "Wi-Fi" if bool(profile.get("is_wlan", False)) else "non-Wi-Fi network"
+    cost = str(profile.get("network_cost_type", "Unknown")).strip() or "Unknown"
+    return f"{connection_type}, {cost}"
 
 
 APP_VERSION = discover_app_version()
@@ -279,6 +432,8 @@ class AppSettings:
     disable_name_typo_notifications: bool = False
     hash_poll_minutes: int = DEFAULT_HASH_POLL_MINUTES
     show_daily_raw_tab: bool = True
+    auto_update_check_enabled: bool = True
+    auto_download_updates_on_unmetered_wifi: bool = True
 
 
 @dataclass(frozen=True)
@@ -568,6 +723,8 @@ def load_app_settings(config_path: Path) -> AppSettings:
         disable_name_typo_notifications=bool(raw_settings.get("disable_name_typo_notifications", False)),
         hash_poll_minutes=hash_poll_minutes,
         show_daily_raw_tab=bool(raw_settings.get("show_daily_raw_tab", True)),
+        auto_update_check_enabled=bool(raw_settings.get("auto_update_check_enabled", True)),
+        auto_download_updates_on_unmetered_wifi=bool(raw_settings.get("auto_download_updates_on_unmetered_wifi", True)),
     )
 
 
@@ -577,6 +734,8 @@ def save_app_settings(config_path: Path, settings: AppSettings) -> None:
         "disable_name_typo_notifications": settings.disable_name_typo_notifications,
         "hash_poll_minutes": settings.hash_poll_minutes,
         "show_daily_raw_tab": settings.show_daily_raw_tab,
+        "auto_update_check_enabled": settings.auto_update_check_enabled,
+        "auto_download_updates_on_unmetered_wifi": settings.auto_download_updates_on_unmetered_wifi,
     }
     config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
@@ -1034,6 +1193,41 @@ def find_potential_name_typos(
                 locations=locations,
             )
         )
+    return warnings
+
+
+def find_similar_employee_name_pairs(
+    all_employee_names: Iterable[str],
+    daily_records: Iterable[DailyRecord],
+    similarity_threshold: float = 0.82,
+) -> list[NameTypoWarning]:
+    all_names = sorted({name for name in all_employee_names if name.strip()})
+    normalized_names = {name: normalize_person_name(name) for name in all_names}
+    warnings: list[NameTypoWarning] = []
+    seen_pairs: set[tuple[str, str]] = set()
+
+    for index, left_name in enumerate(all_names):
+        for right_name in all_names[index + 1:]:
+            similarity = difflib.SequenceMatcher(None, normalized_names[left_name], normalized_names[right_name]).ratio()
+            if similarity < similarity_threshold:
+                continue
+            pair_key = tuple(sorted((left_name, right_name), key=str.casefold))
+            if pair_key in seen_pairs:
+                continue
+            seen_pairs.add(pair_key)
+            locations = []
+            for record in daily_records:
+                if record.employee not in pair_key:
+                    continue
+                locations.append(f"{record.employee} | {record.work_date.isoformat()} | {record.source_sheet} | {record.source_file}")
+            warnings.append(
+                NameTypoWarning(
+                    employee=pair_key[1],
+                    similar_employee=pair_key[0],
+                    similarity=similarity,
+                    locations=locations,
+                )
+            )
     return warnings
 
 
@@ -2170,6 +2364,11 @@ class DataTable(ttk.Frame):
         self._column_visibility = {column: True for column in columns}
         self._default_sort_column = default_sort_column if default_sort_column in self._all_columns else None
         self._default_sort_descending = default_sort_descending
+        self._all_rows: list[tuple[str, ...]] = []
+        self._all_tags: list[tuple[str, ...]] = []
+        self._column_filters: dict[str, set[str]] = {}
+        self._filter_menu: tk.Toplevel | None = None
+        self._header_drag_column: str | None = None
 
         toolbar = ttk.Frame(self)
         toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 6))
@@ -2187,7 +2386,9 @@ class DataTable(ttk.Frame):
 
         self.tree.tag_configure("alert", background="#ffc7ce", foreground="#9c0006")
         self.tree.tag_configure("crew_total", background="#e2f0d9", foreground="#1f1f1f")
+        self.tree.bind("<ButtonPress-1>", self._on_tree_button_press, add="+")
         self.tree.bind("<ButtonRelease-1>", self._on_tree_button_release, add="+")
+        self.tree.bind("<ButtonRelease-3>", self._on_tree_right_click, add="+")
         self.tree.on_sort_changed = self._save_layout
         bind_vertical_mousewheel(self.tree, self.tree, units_per_notch=4)
         bind_horizontal_mousewheel(self.tree, self.tree, units_per_notch=4)
@@ -2195,7 +2396,9 @@ class DataTable(ttk.Frame):
         self._load_saved_layout()
 
     def set_rows(self, rows: list[tuple[str, ...]], tags: list[tuple[str, ...]] | None = None) -> None:
-        self.tree.set_rows(rows, tags)
+        self._all_rows = list(rows)
+        self._all_tags = list(tags or [tuple() for _ in rows])
+        self._apply_filters_and_render()
 
     def open_column_picker(self) -> None:
         dialog = tk.Toplevel(self)
@@ -2269,6 +2472,7 @@ class DataTable(ttk.Frame):
             self.tree.set_sort(sort_column, bool(layout.get("sort_descending", False)))
         else:
             self._apply_default_sort()
+        self._apply_filters_and_render()
 
     def _apply_default_sort(self) -> None:
         if self._default_sort_column:
@@ -2300,16 +2504,167 @@ class DataTable(ttk.Frame):
         )
 
     def _on_tree_button_release(self, _event=None) -> None:
+        self._handle_header_drop()
         self.after_idle(self._save_layout)
+
+    def _on_tree_button_press(self, event) -> None:
+        region = self.tree.identify_region(event.x, event.y)
+        if region != "heading":
+            self._header_drag_column = None
+            return
+        self._header_drag_column = self._column_from_identified_id(self.tree.identify_column(event.x))
+
+    def _on_tree_right_click(self, event) -> None:
+        region = self.tree.identify_region(event.x, event.y)
+        if region != "heading":
+            self._close_filter_menu()
+            return
+        column = self._column_from_identified_id(self.tree.identify_column(event.x))
+        if column:
+            self._open_header_filter_menu(column, event)
+
+    def _handle_header_drop(self) -> None:
+        if not self._header_drag_column:
+            return
+        pointer_x = self.winfo_pointerx() - self.tree.winfo_rootx()
+        pointer_y = self.winfo_pointery() - self.tree.winfo_rooty()
+        if self.tree.identify_region(pointer_x, pointer_y) != "heading":
+            self._header_drag_column = None
+            return
+        target_column = self._column_from_identified_id(self.tree.identify_column(pointer_x))
+        dragged_column = self._header_drag_column
+        self._header_drag_column = None
+        if not target_column or target_column == dragged_column:
+            return
+        display_columns_value = self.tree.cget("displaycolumns")
+        if display_columns_value == "#all":
+            display_columns = list(self._all_columns)
+        else:
+            display_columns = [column for column in list(display_columns_value) if column in self._all_columns]
+        if dragged_column not in display_columns or target_column not in display_columns:
+            return
+        display_columns.remove(dragged_column)
+        target_index = display_columns.index(target_column)
+        display_columns.insert(target_index, dragged_column)
+        self.tree.configure(displaycolumns=display_columns)
+
+    def _column_from_identified_id(self, column_id: str) -> str | None:
+        if not column_id.startswith("#"):
+            return None
+        try:
+            index = int(column_id[1:]) - 1
+        except ValueError:
+            return None
+        return self._all_columns[index] if 0 <= index < len(self._all_columns) else None
+
+    def _apply_filters_and_render(self) -> None:
+        filtered_rows: list[tuple[str, ...]] = []
+        filtered_tags: list[tuple[str, ...]] = []
+        for row, row_tags in zip(self._all_rows, self._all_tags):
+            include = True
+            for column, allowed_values in self._column_filters.items():
+                if not allowed_values:
+                    continue
+                column_index = self._all_columns.index(column)
+                if str(row[column_index]) not in allowed_values:
+                    include = False
+                    break
+            if include:
+                filtered_rows.append(row)
+                filtered_tags.append(row_tags)
+        self.tree.set_rows(filtered_rows, filtered_tags)
+
+    def _open_header_filter_menu(self, column: str, event) -> None:
+        self._close_filter_menu()
+        dialog = tk.Toplevel(self)
+        dialog.wm_overrideredirect(True)
+        dialog.wm_geometry(f"+{event.x_root}+{event.y_root}")
+        dialog.transient(self.winfo_toplevel())
+        dialog.bind("<FocusOut>", lambda _event: self._close_filter_menu())
+        self._filter_menu = dialog
+
+        frame = ttk.Frame(dialog, padding=8, relief="solid", borderwidth=1)
+        frame.pack(fill="both", expand=True)
+
+        ttk.Button(frame, text="Sort Ascending", command=lambda: self._sort_and_close(column, False)).pack(fill="x")
+        ttk.Button(frame, text="Sort Descending", command=lambda: self._sort_and_close(column, True)).pack(fill="x", pady=(4, 8))
+
+        value_frame = ttk.Frame(frame)
+        value_frame.pack(fill="both", expand=True)
+        canvas = tk.Canvas(value_frame, width=280, height=220, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(value_frame, orient="vertical", command=canvas.yview)
+        inner = ttk.Frame(canvas)
+        inner.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=inner, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        bind_vertical_mousewheel(canvas, canvas, units_per_notch=4)
+
+        values = sorted({str(row[self._all_columns.index(column)]) for row in self._all_rows}, key=lambda item: item.casefold())
+        current_filter = set(self._column_filters.get(column, set()))
+        if not current_filter:
+            current_filter = set(values)
+        vars_by_value: dict[str, tk.BooleanVar] = {}
+
+        control_frame = ttk.Frame(inner)
+        control_frame.pack(fill="x")
+        ttk.Button(control_frame, text="Check All", command=lambda: self._set_filter_vars(vars_by_value, True)).pack(side="left")
+        ttk.Button(control_frame, text="Uncheck All", command=lambda: self._set_filter_vars(vars_by_value, False)).pack(side="left", padx=(8, 0))
+
+        for value in values:
+            var = tk.BooleanVar(value=value in current_filter)
+            vars_by_value[value] = var
+            ttk.Checkbutton(inner, text=value or "(blank)", variable=var).pack(anchor="w")
+
+        action_frame = ttk.Frame(frame)
+        action_frame.pack(fill="x", pady=(8, 0))
+        ttk.Button(action_frame, text="Apply", command=lambda: self._apply_column_filter(column, vars_by_value)).pack(side="right")
+        ttk.Button(action_frame, text="Clear Filter", command=lambda: self._clear_column_filter(column)).pack(side="right", padx=(0, 8))
+
+        dialog.focus_force()
+
+    @staticmethod
+    def _set_filter_vars(vars_by_value: dict[str, tk.BooleanVar], value: bool) -> None:
+        for var in vars_by_value.values():
+            var.set(value)
+
+    def _sort_and_close(self, column: str, descending: bool) -> None:
+        self.tree.sort_by(column, descending=descending)
+        self._close_filter_menu()
+
+    def _apply_column_filter(self, column: str, vars_by_value: dict[str, tk.BooleanVar]) -> None:
+        selected_values = {value for value, var in vars_by_value.items() if var.get()}
+        if not selected_values:
+            messagebox.showerror("Column Filter", "At least one value must remain selected.")
+            return
+        all_values = {str(row[self._all_columns.index(column)]) for row in self._all_rows}
+        if selected_values == all_values:
+            self._column_filters.pop(column, None)
+        else:
+            self._column_filters[column] = selected_values
+        self._apply_filters_and_render()
+        self._close_filter_menu()
+
+    def _clear_column_filter(self, column: str) -> None:
+        self._column_filters.pop(column, None)
+        self._apply_filters_and_render()
+        self._close_filter_menu()
+
+    def _close_filter_menu(self) -> None:
+        if self._filter_menu is not None:
+            self._filter_menu.destroy()
+            self._filter_menu = None
 
     def reset_layout(self) -> None:
         for column in self._all_columns:
             self._column_visibility[column] = True
             self.tree.column(column, width=120)
         self.tree.configure(displaycolumns="#all")
+        self._column_filters.clear()
         self.tree.clear_sort()
         self._apply_default_sort()
-        self.tree._render_rows()
+        self._apply_filters_and_render()
 
     def displayed_columns_and_rows(self) -> tuple[list[str], list[tuple[str, ...]]]:
         display_columns_value = self.tree.cget("displaycolumns")
@@ -2848,6 +3203,8 @@ class DssHoursTrackerApp(tk.Tk):
         self.geometry("1200x760")
         self.minsize(760, 520)
         self.app_root, self.cache_dir = ensure_app_directories()
+        self.updates_dir = self.app_root / UPDATE_DIRNAME
+        self.updates_dir.mkdir(parents=True, exist_ok=True)
         self.config_path = self.app_root / CONFIG_FILENAME
         self.formatting_profiles, self.current_profile_name = load_formatting_profiles(self.config_path)
         self.employee_emails = load_employee_emails(self.config_path)
@@ -2877,6 +3234,9 @@ class DssHoursTrackerApp(tk.Tk):
         self._outlook_sync_in_progress = False
         self._outlook_auto_sync_done = False
         self._update_check_in_progress = False
+        self._update_download_in_progress = False
+        self._auto_update_check_done = False
+        self._downloaded_update_path: Path | None = None
         self.update_status_var = tk.StringVar(value=f"Installed version: {APP_VERSION}")
         self.hash_poll_interval_ms = self.app_settings.hash_poll_minutes * 60 * 1000
         self._cancel_event: threading.Event | None = None
@@ -2884,6 +3244,7 @@ class DssHoursTrackerApp(tk.Tk):
 
         self._build_layout()
         self.after(AUTO_OUTLOOK_SYNC_DELAY_MS, self._auto_sync_outlook_emails)
+        self.after(AUTO_UPDATE_CHECK_DELAY_MS, self._auto_check_for_updates)
         if initial_source:
             self.load_source(initial_source)
 
@@ -2998,8 +3359,14 @@ class DssHoursTrackerApp(tk.Tk):
             default_sort_column="week_start",
             default_sort_descending=True,
         )
+        self.error_report_page = ttk.Frame(self.reports_notebook)
+        self.error_report_page.columnconfigure(0, weight=1)
+        self.error_report_page.rowconfigure(1, weight=1)
+        error_toolbar = ttk.Frame(self.error_report_page, padding=(0, 0, 0, 6))
+        error_toolbar.grid(row=0, column=0, sticky="ew")
+        ttk.Button(error_toolbar, text="Check Name Typos", command=self._check_name_typos_manually).pack(side="left")
         self.error_report_table = DataTable(
-            self.reports_notebook,
+            self.error_report_page,
             columns=[
                 "employee",
                 "week_start",
@@ -3091,7 +3458,8 @@ class DssHoursTrackerApp(tk.Tk):
         self._refresh_data_tabs()
         self.summaries_notebook.add(self.weekly_rollup_table, text="Weekly Rollup")
         self.summaries_notebook.add(self.combined_weekly_summary_table, text="Combined Summary")
-        self.reports_notebook.add(self.error_report_table, text="Error Report")
+        self.error_report_table.grid(row=1, column=0, sticky="nsew")
+        self.reports_notebook.add(self.error_report_page, text="Error Report")
         self.reports_notebook.add(self.parse_warnings_table, text="Sheet Parse Warnings")
         self.reports_notebook.add(self.workbook_health_table, text="Workbook Health")
         self.reports_notebook.add(self.audit_data_trail_table, text="Audit Data Trail")
@@ -3187,6 +3555,8 @@ class DssHoursTrackerApp(tk.Tk):
         self.disable_name_typos_var = tk.BooleanVar(value=self.app_settings.disable_name_typo_notifications)
         self.show_daily_raw_var = tk.BooleanVar(value=self.app_settings.show_daily_raw_tab)
         self.hash_poll_minutes_var = tk.StringVar(value=str(self.app_settings.hash_poll_minutes))
+        self.auto_update_check_var = tk.BooleanVar(value=self.app_settings.auto_update_check_enabled)
+        self.auto_update_download_var = tk.BooleanVar(value=self.app_settings.auto_download_updates_on_unmetered_wifi)
 
         ttk.Checkbutton(
             self.config_frame,
@@ -3205,12 +3575,24 @@ class DssHoursTrackerApp(tk.Tk):
             variable=self.show_daily_raw_var,
         ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(0, 8))
 
+        ttk.Checkbutton(
+            self.config_frame,
+            text="Automatically check GitHub for updates on startup",
+            variable=self.auto_update_check_var,
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(0, 8))
+
+        ttk.Checkbutton(
+            self.config_frame,
+            text="Automatically download updates on unmetered Wi-Fi",
+            variable=self.auto_update_download_var,
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(0, 8))
+
         ttk.Button(self.config_frame, text="Apply Settings", command=self._apply_app_settings).grid(
-            row=3, column=0, sticky="w", pady=(8, 0)
+            row=5, column=0, sticky="w", pady=(8, 0)
         )
 
         maintenance = ttk.LabelFrame(self.config_frame, text="Maintenance", padding=8)
-        maintenance.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(16, 0))
+        maintenance.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(16, 0))
         ttk.Button(maintenance, text="Reset All Settings to Default", command=self._reset_all_settings).grid(
             row=0, column=0, sticky="w"
         )
@@ -3225,7 +3607,7 @@ class DssHoursTrackerApp(tk.Tk):
         )
 
         diagnostics = ttk.LabelFrame(self.config_frame, text="Diagnostics", padding=8)
-        diagnostics.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(16, 0))
+        diagnostics.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(16, 0))
         ttk.Button(diagnostics, text="Show App Data Folder", command=self._show_app_data_folder).grid(
             row=0, column=0, sticky="w"
         )
@@ -3250,10 +3632,10 @@ class DssHoursTrackerApp(tk.Tk):
 
         note = (
             "These settings control background notifications, how often the app checks loaded DSS files for changes, "
-            "and whether the Daily Raw page is visible in the Data group."
+            "whether Daily Raw is visible, and how the app checks GitHub for downloadable updates."
         )
         ttk.Label(self.config_frame, text=note, wraplength=700, justify="left").grid(
-            row=6, column=0, columnspan=2, sticky="w", pady=(12, 0)
+            row=8, column=0, columnspan=2, sticky="w", pady=(12, 0)
         )
 
     def _profile_names(self) -> list[str]:
@@ -3371,6 +3753,8 @@ class DssHoursTrackerApp(tk.Tk):
         self.disable_name_typos_var.set(self.app_settings.disable_name_typo_notifications)
         self.show_daily_raw_var.set(self.app_settings.show_daily_raw_tab)
         self.hash_poll_minutes_var.set(str(self.app_settings.hash_poll_minutes))
+        self.auto_update_check_var.set(self.app_settings.auto_update_check_enabled)
+        self.auto_update_download_var.set(self.app_settings.auto_download_updates_on_unmetered_wifi)
         self.email_drafts_frame.set_templates(self.email_subject_template, self.email_body_template)
         self._populate_rule_editor()
         self._refresh_data_tabs()
@@ -3406,6 +3790,8 @@ class DssHoursTrackerApp(tk.Tk):
             disable_name_typo_notifications=bool(self.disable_name_typos_var.get()),
             hash_poll_minutes=hash_poll_minutes,
             show_daily_raw_tab=bool(self.show_daily_raw_var.get()),
+            auto_update_check_enabled=bool(self.auto_update_check_var.get()),
+            auto_download_updates_on_unmetered_wifi=bool(self.auto_update_download_var.get()),
         )
         self.hash_poll_interval_ms = self.app_settings.hash_poll_minutes * 60 * 1000
         self._persist_app_settings()
@@ -3515,12 +3901,16 @@ class DssHoursTrackerApp(tk.Tk):
                 "disable_name_typo_notifications": self.app_settings.disable_name_typo_notifications,
                 "hash_poll_minutes": self.app_settings.hash_poll_minutes,
                 "show_daily_raw_tab": self.app_settings.show_daily_raw_tab,
+                "auto_update_check_enabled": self.app_settings.auto_update_check_enabled,
+                "auto_download_updates_on_unmetered_wifi": self.app_settings.auto_download_updates_on_unmetered_wifi,
             },
             "formatting_profiles": sorted(self.formatting_profiles),
             "current_profile_name": self.current_profile_name,
             "employee_email_count": len([email for email in self.employee_emails.values() if email.strip()]),
             "employee_group_count": len(self.employee_groups),
             "cache_file_count": len(list(self.cache_dir.glob("*.json"))),
+            "update_download_dir": str(self.updates_dir),
+            "downloaded_update_path": str(self._downloaded_update_path) if self._downloaded_update_path else "",
             "loaded_dss": [],
         }
 
@@ -3597,28 +3987,39 @@ class DssHoursTrackerApp(tk.Tk):
 
         messagebox.showinfo("Loaded DSS Status", "\n".join(lines).rstrip())
 
-    def _check_for_updates(self) -> None:
-        if self._update_check_in_progress:
+    def _auto_check_for_updates(self) -> None:
+        if self._auto_update_check_done or not self.app_settings.auto_update_check_enabled:
+            return
+        self._auto_update_check_done = True
+        self._check_for_updates(manual=False)
+
+    def _check_for_updates(self, manual: bool = True) -> None:
+        if self._update_check_in_progress or self._update_download_in_progress:
             return
         self._update_check_in_progress = True
-        self.update_status_var.set(f"Checking GitHub releases from version {APP_VERSION}...")
-        worker = threading.Thread(target=self._check_for_updates_worker, daemon=True)
-        worker.start()
+        if manual:
+            self.update_status_var.set(f"Checking GitHub releases from version {APP_VERSION}...")
+        else:
+            self.update_status_var.set(f"Background update check from version {APP_VERSION}...")
+        threading.Thread(target=self._check_for_updates_worker, args=(manual,), daemon=True).start()
 
-    def _check_for_updates_worker(self) -> None:
+    def _check_for_updates_worker(self, manual: bool) -> None:
         try:
             release_info = fetch_latest_release_info()
+            latest_version = str(release_info.get("version", "")).strip()
+            network_profile = get_windows_network_profile() if latest_version and is_newer_version(latest_version, APP_VERSION) else None
         except Exception as exc:
-            self.after(0, lambda: self._handle_update_check_error(exc))
+            self.after(0, lambda exc=exc, manual=manual: self._handle_update_check_error(exc, manual))
             return
-        self.after(0, lambda: self._handle_update_check_result(release_info))
+        self.after(0, lambda release_info=release_info, network_profile=network_profile, manual=manual: self._handle_update_check_result(release_info, network_profile, manual))
 
-    def _handle_update_check_error(self, exc: Exception) -> None:
+    def _handle_update_check_error(self, exc: Exception, manual: bool) -> None:
         self._update_check_in_progress = False
         self.update_status_var.set(f"Installed version: {APP_VERSION}")
-        messagebox.showerror("Check for Updates", f"Could not check for updates.\n\n{exc}")
+        if manual:
+            messagebox.showerror("Check for Updates", f"Could not check for updates.\n\n{exc}")
 
-    def _handle_update_check_result(self, release_info: dict[str, object]) -> None:
+    def _handle_update_check_result(self, release_info: dict[str, object], network_profile: dict[str, object] | None, manual: bool) -> None:
         self._update_check_in_progress = False
         latest_version = str(release_info.get("version", "")).strip()
         latest_tag = str(release_info.get("tag_name", "")).strip()
@@ -3626,27 +4027,118 @@ class DssHoursTrackerApp(tk.Tk):
         published_at = str(release_info.get("published_at", "")).strip()
         asset_names = release_info.get("asset_names", [])
         assets_text = ", ".join(asset_names) if isinstance(asset_names, list) and asset_names else "No assets listed"
-
         if latest_version and is_newer_version(latest_version, APP_VERSION):
             self.update_status_var.set(f"Update available: {latest_tag or latest_version} (installed: {APP_VERSION})")
+            installer_asset = choose_release_installer_asset(release_info)
+            can_auto_download = installer_asset is not None and self.app_settings.auto_download_updates_on_unmetered_wifi and is_unmetered_wifi_profile(network_profile or {})
+            if can_auto_download:
+                self._start_update_download(release_info, manual=manual)
+                if manual:
+                    messagebox.showinfo(
+                        "Check for Updates",
+                        "A newer version is available\n\n"
+                        f"Installed: {APP_VERSION}\n"
+                        f"Latest: {latest_tag or latest_version}\n"
+                        f"Published: {published_at or 'Unknown'}\n"
+                        f"Assets: {assets_text}\n\n"
+                        "This machine is on unmetered Wi-Fi, so the installer is being downloaded automatically.",
+                    )
+                return
+            network_text = describe_network_profile(network_profile or {}) if network_profile is not None else "network state unavailable"
+            self.update_status_var.set(f"Update available: {latest_tag or latest_version} (installed: {APP_VERSION}; {network_text})")
+            if manual:
+                messagebox.showinfo(
+                    "Check for Updates",
+                    "A newer version is available\n\n"
+                    f"Installed: {APP_VERSION}\n"
+                    f"Latest: {latest_tag or latest_version}\n"
+                    f"Published: {published_at or 'Unknown'}\n"
+                    f"Assets: {assets_text}\n"
+                    f"Network: {network_text}\n\n"
+                    f"Release page:\n{html_url}",
+                )
+            return
+        self.update_status_var.set(f"Installed version: {APP_VERSION} (up to date)")
+        if manual:
             messagebox.showinfo(
                 "Check for Updates",
-                "A newer version is available.\n\n"
+                "You are up to date.\n\n"
                 f"Installed: {APP_VERSION}\n"
-                f"Latest: {latest_tag or latest_version}\n"
-                f"Published: {published_at or 'Unknown'}\n"
-                f"Assets: {assets_text}\n\n"
-                f"Release page:\n{html_url}",
+                f"Latest release: {latest_tag or latest_version or 'Unknown'}",
             )
-            return
 
-        self.update_status_var.set(f"Installed version: {APP_VERSION} (up to date)")
-        messagebox.showinfo(
-            "Check for Updates",
-            "You are up to date.\n\n"
-            f"Installed: {APP_VERSION}\n"
-            f"Latest release: {latest_tag or latest_version or 'Unknown'}",
+    def _start_update_download(self, release_info: dict[str, object], manual: bool) -> None:
+        if self._update_download_in_progress:
+            return
+        self._update_download_in_progress = True
+        latest_tag = str(release_info.get("tag_name", "")).strip() or str(release_info.get("version", "")).strip() or "update"
+        self.update_status_var.set(f"Downloading update {latest_tag}...")
+        threading.Thread(target=self._download_update_worker, args=(release_info, manual), daemon=True).start()
+
+    def _download_update_worker(self, release_info: dict[str, object], manual: bool) -> None:
+        try:
+            installer_asset = choose_release_installer_asset(release_info)
+            if installer_asset is None:
+                raise RuntimeError("No installer asset was found in the latest GitHub release.")
+            asset_name = str(installer_asset.get("name", "")).strip()
+            download_url = str(installer_asset.get("download_url", "")).strip()
+            if not asset_name or not download_url:
+                raise RuntimeError("The release installer asset is missing its download URL.")
+            destination = self.updates_dir / asset_name
+            download_release_asset(download_url, destination)
+            checksum_verified = False
+            checksum_asset = choose_release_checksum_asset(release_info)
+            if checksum_asset is not None:
+                checksum_url = str(checksum_asset.get("download_url", "")).strip()
+                if checksum_url:
+                    checksum_text = download_url_bytes(checksum_url, timeout=60).decode("utf-8", errors="replace")
+                    expected_checksum = checksum_for_asset_name(checksum_text, asset_name)
+                    if expected_checksum and sha256_file(destination) != expected_checksum:
+                        raise RuntimeError("Downloaded update failed SHA-256 verification.")
+                    checksum_verified = bool(expected_checksum)
+            self.after(0, lambda release_info=release_info, destination=destination, checksum_verified=checksum_verified, manual=manual: self._handle_update_download_success(release_info, destination, checksum_verified, manual))
+        except Exception as exc:
+            self.after(0, lambda exc=exc, manual=manual: self._handle_update_download_error(exc, manual))
+
+    def _handle_update_download_error(self, exc: Exception, manual: bool) -> None:
+        self._update_download_in_progress = False
+        self.update_status_var.set(f"Update download failed for installed version {APP_VERSION}")
+        if manual:
+            messagebox.showerror("Update Download", f"Could not download the update.\n\n{exc}")
+
+    def _handle_update_download_success(self, release_info: dict[str, object], destination: Path, checksum_verified: bool, manual: bool) -> None:
+        self._update_download_in_progress = False
+        self._downloaded_update_path = destination
+        latest_tag = str(release_info.get("tag_name", "")).strip() or str(release_info.get("version", "")).strip() or destination.name
+        verification_text = " and verified" if checksum_verified else ""
+        self.update_status_var.set(f"Downloaded update {latest_tag}{verification_text}: {destination.name}")
+        should_install = messagebox.askyesno(
+            "Install Update",
+            "The update installer has been downloaded.\n\n"
+            f"Release: {latest_tag}\n"
+            f"File: {destination.name}\n"
+            f"Saved to: {destination}\n"
+            f"Checksum verified: {'Yes' if checksum_verified else 'No checksum asset found'}\n\n"
+            "Install it now? The DSS Hours Tracker window will close first.",
         )
+        if should_install:
+            self._launch_update_installer(destination)
+        elif manual:
+            messagebox.showinfo("Update Download", f"The installer is ready at:\n{destination}")
+
+    def _launch_update_installer(self, installer_path: Path) -> None:
+        if not installer_path.exists():
+            messagebox.showerror("Install Update", f"The downloaded installer could not be found.\n\n{installer_path}")
+            return
+        pid = os.getpid()
+        escaped_path = str(installer_path).replace("'", "''")
+        command = f"while (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ Start-Sleep -Milliseconds 500 }}; Start-Process -FilePath '{escaped_path}'"
+        try:
+            subprocess.Popen(["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", command], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as exc:
+            messagebox.showerror("Install Update", f"Could not launch the installer.\n\n{exc}")
+            return
+        self.destroy()
 
     def _submit_bug_report(self) -> None:
         try:
@@ -4281,6 +4773,35 @@ class DssHoursTrackerApp(tk.Tk):
     def _persist_ignored_name_typos(self) -> None:
         save_ignored_name_typos(self.config_path, self.ignored_name_typos)
 
+    def _check_name_typos_manually(self) -> None:
+        if self.current_data is None or not self.current_data.employee_names:
+            messagebox.showinfo("Check Name Typos", "Load DSS data first.")
+            return
+        names_to_check = [
+            employee for employee in self.current_data.employee_names
+            if not self.employee_emails.get(employee, "").strip()
+        ]
+        if names_to_check:
+            raw_warnings = find_potential_name_typos(
+                names_to_check,
+                self.current_data.employee_names,
+                self.current_data.daily_records,
+            )
+        else:
+            raw_warnings = find_similar_employee_name_pairs(
+                self.current_data.employee_names,
+                self.current_data.daily_records,
+            )
+        warnings = [
+            warning
+            for warning in raw_warnings
+            if typo_warning_key(warning.employee, warning.similar_employee) not in self.ignored_name_typos
+        ]
+        if not warnings:
+            messagebox.showinfo("Check Name Typos", "No likely name typos were found.")
+            return
+        self._show_typo_warning_dialog(warnings)
+
     def _show_typo_warning_dialog(self, typo_warnings: list[NameTypoWarning]) -> None:
         dialog = tk.Toplevel(self)
         dialog.title("Potential Name Typos")
@@ -4289,7 +4810,7 @@ class DssHoursTrackerApp(tk.Tk):
 
         ttk.Label(
             dialog,
-            text="Possible name typo(s) were found for unresolved Outlook matches. Select any entry and choose Ignore Selected to stop warning on that inconsistency going forward.",
+            text="Possible name typo(s) were found for unresolved Outlook matches. Select any entry and choose Ignore Selected to stop warning on that inconsistency going forward. This warning can also be disabled in Settings > Configuration.",
             wraplength=740,
             justify="left",
         ).pack(fill="x", padx=12, pady=(12, 8))
