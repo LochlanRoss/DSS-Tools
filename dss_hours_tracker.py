@@ -7,6 +7,7 @@ import html
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import subprocess
@@ -26,7 +27,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 import tkinter as tk
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import filedialog, font as tkfont, messagebox, simpledialog, ttk
 
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
@@ -40,7 +41,13 @@ except ImportError:  # pragma: no cover - optional Windows integration
 
 
 DATE_PATTERN = re.compile(r"(\d{4}-\d{2}-\d{2})")
-REVISION_PATTERN = re.compile(r"(?:^|[\s_-])(?:rev(?:ision)?[\s_-]*|r[\s_-]*)(\d+)(?=$|[\s_-])", re.IGNORECASE)
+# Revision suffix after the date token: rev 1, r1, r 1, r-1, r.1, Revision 1, etc.
+REVISION_PATTERN = re.compile(
+    r"(?:^|[\s._-])(?:rev(?:ision)?[\s._-]*|r[\s._-]*)(\d+)(?=$|[\s._-])",
+    re.IGNORECASE,
+)
+DSS_HASH_AZ2_COL = 52  # AZ
+DSS_HASH_AZ2_ROW = 2
 PF_PATTERN = re.compile(r"\b(PF\d+(?:-\d+)?)\b", re.IGNORECASE)
 WORKBOOK_CALC_ID_PATTERN = re.compile(br'\s(?:calcId|fullCalcOnLoad|forceFullCalc|calcCompleted)="[^"]*"')
 EXCEL_MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
@@ -535,6 +542,8 @@ class AppSettings:
     disable_name_typo_notifications: bool = False
     hash_poll_minutes: int = DEFAULT_HASH_POLL_MINUTES
     show_daily_raw_tab: bool = True
+    quickload_last_sources_enabled: bool = True
+    quickload_cancel_hotkey: str = "<Escape>"
     auto_update_check_enabled: bool = True
     auto_download_updates_on_unmetered_wifi: bool = True
 
@@ -587,11 +596,192 @@ def parse_sheet_revision(sheet_name: str) -> int:
     return int(match.group(1))
 
 
+def _normalize_az2_cell_text(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, (int, float, Decimal)):
+        if isinstance(value, float) and math.isnan(value):
+            return ""
+        fv = float(value)
+        if abs(fv - round(fv)) < 1e-9 and -1e9 < fv < 1e9:
+            return str(int(round(fv)))
+        return str(value).strip()
+    return str(value).strip()
+
+
+def revision_level_from_az2(value: object) -> int | None:
+    """Return revision level 0,1,2,... from AZ2, or None if the cell does not encode a level (blank / unknown)."""
+    text = _normalize_az2_cell_text(value)
+    if not text:
+        return None
+    lowered = text.casefold()
+    if lowered in {"n", "no", "false", "0", "non", "none", "base", "orig", "original"}:
+        return 0
+    if lowered in {"y", "yes", "true", "rev", "revision"}:
+        return None
+    match = REVISION_PATTERN.search(text)
+    if match:
+        return int(match.group(1))
+    try:
+        as_float = float(text.replace(",", "."))
+    except ValueError:
+        return None
+    if math.isnan(as_float):
+        return None
+    if abs(as_float - round(as_float)) < 1e-9 and 0 <= round(as_float) <= 99:
+        return int(round(as_float))
+    return None
+
+
+def revision_presence_from_az2(value: object) -> bool | None:
+    """True = cell says this is a revision sheet; False = not a revision; None = unknown."""
+    text = _normalize_az2_cell_text(value)
+    if not text:
+        return None
+    lowered = text.casefold()
+    if lowered in {"n", "no", "false", "0", "non", "none", "base", "orig", "original"}:
+        return False
+    if lowered in {"y", "yes", "true", "rev", "revision"}:
+        return True
+    if REVISION_PATTERN.search(text):
+        return None
+    try:
+        as_float = float(text.replace(",", "."))
+    except ValueError:
+        return None
+    if math.isnan(as_float):
+        return None
+    if abs(as_float - round(as_float)) < 1e-9 and 0 <= round(as_float) <= 99:
+        return None
+    return None
+
+
+def az2_revision_matches_sheet_name(sheet_name: str, az2_value: object) -> tuple[bool, str | None]:
+    """
+    AZ2 should agree with the revision encoded in the sheet tab name.
+    Returns (ok, warning_detail_or_none).
+    """
+    name_rev = parse_sheet_revision(sheet_name)
+    text = _normalize_az2_cell_text(az2_value)
+    if not text:
+        if name_rev > 0:
+            return False, "AZ2 is blank but the sheet name includes a revision suffix."
+        return True, None
+    level = revision_level_from_az2(az2_value)
+    if level is not None:
+        if level != name_rev:
+            return (
+                False,
+                f"AZ2 indicates revision level {level} but the sheet name encodes revision {name_rev} "
+                f"(parsed from '{sheet_name}').",
+            )
+        return True, None
+    presence = revision_presence_from_az2(az2_value)
+    if presence is None:
+        return True, None
+    name_has_rev = name_rev > 0
+    if presence != name_has_rev:
+        return (
+            False,
+            f"AZ2 indicates {'a' if presence else 'no'} revision sheet, but the sheet name "
+            f"{'has' if name_has_rev else 'has no'} a revision suffix (parsed revision {name_rev}).",
+        )
+    return True, None
+
+
 def extract_pf_identifier(source_name: str) -> str:
     match = PF_PATTERN.search(source_name)
     if match:
         return match.group(1).upper()
     return Path(source_name).stem.strip() or source_name.strip()
+
+
+_QUICKLOAD_CANCEL_MODIFIER_KEYSYMS: frozenset[str] = frozenset(
+    {
+        "Shift_L",
+        "Shift_R",
+        "Control_L",
+        "Control_R",
+        "Alt_L",
+        "Alt_R",
+        "Meta_L",
+        "Meta_R",
+        "Super_L",
+        "Super_R",
+        "Caps_Lock",
+        "Num_Lock",
+        "ISO_Level3_Shift",
+    }
+)
+
+QUICKLOAD_CANCEL_HOTKEY_PRESETS: tuple[str, ...] = (
+    "<Escape>",
+    "<F8>",
+    "<F9>",
+    "<F10>",
+    "<Control-q>",
+    "<Control-w>",
+    "<Shift-Escape>",
+)
+
+
+def normalize_quickload_cancel_hotkey(raw: str) -> str:
+    s = (raw or "").strip()
+    if not s:
+        return "<Escape>"
+    if not s.startswith("<"):
+        s = f"<{s}"
+    if not s.endswith(">"):
+        s = f"{s}>"
+    return s
+
+
+def is_allowed_quickload_cancel_hotkey(sequence: str) -> bool:
+    seq = normalize_quickload_cancel_hotkey(sequence)
+    if seq in QUICKLOAD_CANCEL_HOTKEY_PRESETS:
+        return True
+    if re.fullmatch(r"<F([1-9]|1\d|2[0-4])>", seq):
+        return True
+    if seq in {"<Escape>", "<Pause>", "<Delete>", "<Insert>", "<Home>", "<End>", "<Next>", "<Prior>", "<Tab>"}:
+        return True
+    if re.fullmatch(r"<Shift-F([1-9]|1\d|2[0-4])>", seq):
+        return True
+    if re.fullmatch(r"<Control-Key-[a-z0-9,\.]>", seq, re.IGNORECASE):
+        return True
+    if re.fullmatch(r"<Control-[a-z]>", seq, re.IGNORECASE):
+        return True
+    return False
+
+
+def binding_sequence_from_keypress_event(event: tk.Event) -> str | None:
+    """Build a Tk virtual event string from a key press, or None if the key should be ignored."""
+    keysym = event.keysym
+    if keysym in _QUICKLOAD_CANCEL_MODIFIER_KEYSYMS or keysym in {"", "??"}:
+        return None
+    state = int(getattr(event, "state", 0) or 0)
+    ctrl = (state & 0x4) != 0
+    shift = (state & 0x1) != 0
+    if keysym.startswith("F"):
+        suffix = keysym[1:]
+        if suffix.isdigit():
+            if shift and not ctrl:
+                return f"<Shift-{keysym}>"
+            if ctrl:
+                return f"<Control-{keysym}>"
+            return f"<{keysym}>"
+    if keysym == "Escape":
+        if shift and not ctrl:
+            return "<Shift-Escape>"
+        if not shift:
+            return "<Escape>"
+    if ctrl:
+        if len(keysym) == 1 and (keysym.isalpha() or keysym in "0123456789,."):
+            return f"<Control-Key-{keysym.lower()}>"
+        if keysym in ("BackSpace", "Return", "space", "Tab"):
+            return f"<Control-Key-{keysym}>"
+    return None
 
 
 def default_formatting_profiles() -> dict[str, FormattingProfile]:
@@ -803,6 +993,28 @@ def load_email_templates(config_path: Path) -> tuple[str, str]:
     return subject_template, body_template
 
 
+def save_last_open_dss_paths(config_path: Path, paths: Iterable[Path]) -> None:
+    payload = read_config_payload(config_path)
+    payload["last_open_dss_paths"] = [str(Path(path).expanduser().resolve()) for path in paths]
+    config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def load_last_open_dss_paths(config_path: Path) -> list[Path]:
+    payload = read_config_payload(config_path)
+    raw = payload.get("last_open_dss_paths", [])
+    if not isinstance(raw, list):
+        return []
+    results: list[Path] = []
+    for item in raw:
+        try:
+            candidate = Path(str(item)).expanduser()
+        except (TypeError, ValueError):
+            continue
+        if str(candidate).strip():
+            results.append(candidate)
+    return results
+
+
 def save_email_templates(config_path: Path, subject_template: str, body_template: str) -> None:
     payload = read_config_payload(config_path)
     payload["email_subject_template"] = subject_template
@@ -822,10 +1034,17 @@ def load_app_settings(config_path: Path) -> AppSettings:
     except (TypeError, ValueError):
         hash_poll_minutes = DEFAULT_HASH_POLL_MINUTES
 
+    raw_hotkey = str(raw_settings.get("quickload_cancel_hotkey", "<Escape>")).strip()
+    cancel_hotkey = normalize_quickload_cancel_hotkey(raw_hotkey)
+    if not is_allowed_quickload_cancel_hotkey(cancel_hotkey):
+        cancel_hotkey = "<Escape>"
+
     return AppSettings(
         disable_name_typo_notifications=bool(raw_settings.get("disable_name_typo_notifications", False)),
         hash_poll_minutes=hash_poll_minutes,
         show_daily_raw_tab=bool(raw_settings.get("show_daily_raw_tab", True)),
+        quickload_last_sources_enabled=bool(raw_settings.get("quickload_last_sources_enabled", True)),
+        quickload_cancel_hotkey=cancel_hotkey,
         auto_update_check_enabled=bool(raw_settings.get("auto_update_check_enabled", True)),
         auto_download_updates_on_unmetered_wifi=bool(raw_settings.get("auto_download_updates_on_unmetered_wifi", True)),
     )
@@ -837,6 +1056,8 @@ def save_app_settings(config_path: Path, settings: AppSettings) -> None:
         "disable_name_typo_notifications": settings.disable_name_typo_notifications,
         "hash_poll_minutes": settings.hash_poll_minutes,
         "show_daily_raw_tab": settings.show_daily_raw_tab,
+        "quickload_last_sources_enabled": settings.quickload_last_sources_enabled,
+        "quickload_cancel_hotkey": settings.quickload_cancel_hotkey,
         "auto_update_check_enabled": settings.auto_update_check_enabled,
         "auto_download_updates_on_unmetered_wifi": settings.auto_download_updates_on_unmetered_wifi,
     }
@@ -1081,6 +1302,113 @@ def load_cached_source_analysis(
         return None
 
 
+def read_workbook_cache_payload(cache_dir: Path, source_path: Path) -> dict | None:
+    cache_path = cache_file_path(cache_dir, source_path)
+    if not cache_path.exists():
+        return None
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if normalize_windows_path(str(payload.get("source_path", ""))) != normalize_windows_path(str(source_path)):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def merge_workbook_from_cache_by_sheet_hashes(
+    *,
+    source_path: Path,
+    workbook_bytes: bytes,
+    cache_dir: Path,
+    should_cancel: Callable[[], bool],
+    progress_callback: Callable[[float, str], None] | None,
+) -> tuple[list[DailyRecord], list[SheetParseWarning], list[WorkbookHealthItem], dict[str, str], str] | None:
+    """
+    When the combined workbook fingerprint changed but preferred sheets per date are unchanged,
+    re-parse only dated sheets whose per-sheet digest changed (or were removed), and merge with
+    cached records and warnings for unchanged sheets.
+    """
+    if should_cancel():
+        return None
+    payload = read_workbook_cache_payload(cache_dir, source_path)
+    if not payload:
+        return None
+    old_sh_raw = payload.get("sheet_hashes")
+    if not isinstance(old_sh_raw, dict) or not old_sh_raw:
+        return None
+    old_sh = {str(name): str(value) for name, value in old_sh_raw.items() if str(name).strip() and str(value).strip()}
+    if not old_sh:
+        return None
+    records_payload = payload.get("records", [])
+    if not isinstance(records_payload, list):
+        return None
+    try:
+        old_records = [deserialize_daily_record(item) for item in records_payload]
+    except (KeyError, TypeError, ValueError):
+        return None
+    warnings_payload = payload.get("parse_warnings", [])
+    health_payload = payload.get("workbook_health", [])
+    if not isinstance(warnings_payload, list):
+        warnings_payload = []
+    if not isinstance(health_payload, list):
+        health_payload = []
+    try:
+        old_warns = [deserialize_sheet_parse_warning(item) for item in warnings_payload if isinstance(item, dict)]
+        old_health = [deserialize_workbook_health_item(item) for item in health_payload if isinstance(item, dict)]
+    except (KeyError, TypeError, ValueError):
+        return None
+
+    new_sh = compute_all_dated_sheet_hashes(workbook_bytes)
+    if not new_sh:
+        return None
+    new_fp = combine_sheet_hashes(new_sh)
+    old_pref = dict(select_preferred_dated_sheets(old_sh.keys()))
+    new_pref = dict(select_preferred_dated_sheets(new_sh.keys()))
+    if old_pref != new_pref:
+        return None
+
+    stale_dates: set[date] = set()
+    for sheet_name in set(old_sh) | set(new_sh):
+        if old_sh.get(sheet_name) != new_sh.get(sheet_name):
+            sheet_date = parse_sheet_date(sheet_name)
+            if sheet_date is not None:
+                stale_dates.add(sheet_date)
+    if not stale_dates:
+        return None
+
+    to_repars = frozenset({new_pref[d] for d in stale_dates if d in new_pref})
+    if not to_repars:
+        return None
+
+    removed_sheets = set(old_sh) - set(new_sh)
+    drop_sheets = to_repars | removed_sheets
+    kept_records = [r for r in old_records if r.source_sheet not in drop_sheets]
+    kept_warns = [w for w in old_warns if w.source_sheet not in drop_sheets]
+
+    if progress_callback:
+        progress_callback(0.05, f"Re-parsing {len(to_repars)} changed sheet(s) in {source_path.name}")
+
+    def reparsing_progress(fraction: float, message: str) -> None:
+        if progress_callback:
+            progress_callback(0.05 + 0.95 * fraction, message)
+
+    new_records, new_warns, new_health = process_workbook_bytes(
+        source_path,
+        workbook_bytes,
+        progress_callback=reparsing_progress if progress_callback else None,
+        should_cancel=should_cancel,
+        preview_callback=None,
+        restrict_to_sheet_names=to_repars,
+    )
+    if should_cancel():
+        return None
+
+    merged_records = kept_records + new_records
+    merged_warns = kept_warns + new_warns
+    merged_health = new_health or old_health
+    return merged_records, merged_warns, merged_health, new_sh, new_fp
+
+
 def save_cached_daily_records(
     cache_dir: Path,
     source_path: Path,
@@ -1088,9 +1416,10 @@ def save_cached_daily_records(
     records: list[DailyRecord],
     parse_warnings: list[SheetParseWarning] | None = None,
     workbook_health: list[WorkbookHealthItem] | None = None,
+    sheet_hashes: dict[str, str] | None = None,
 ) -> None:
     cache_path = cache_file_path(cache_dir, source_path)
-    payload = {
+    payload: dict[str, object] = {
         "source_path": str(source_path),
         "file_hash": file_hash,
         "cached_at": datetime.now().isoformat(),
@@ -1098,6 +1427,8 @@ def save_cached_daily_records(
         "parse_warnings": [serialize_sheet_parse_warning(warning) for warning in (parse_warnings or [])],
         "workbook_health": [serialize_workbook_health_item(item) for item in (workbook_health or [])],
     }
+    if sheet_hashes:
+        payload["sheet_hashes"] = dict(sorted(sheet_hashes.items(), key=lambda item: item[0].casefold()))
     cache_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
@@ -1720,6 +2051,7 @@ def process_workbook_bytes(
     progress_callback: Callable[[float, str], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
     preview_callback: Callable[[list[DailyRecord], list[SheetParseWarning], list[WorkbookHealthItem], str], None] | None = None,
+    restrict_to_sheet_names: frozenset[str] | None = None,
 ) -> tuple[list[DailyRecord], list[SheetParseWarning], list[WorkbookHealthItem]]:
     emit_progress = progress_callback or (lambda _fraction, _message: None)
     check_cancel = should_cancel or (lambda: False)
@@ -1767,16 +2099,44 @@ def process_workbook_bytes(
             if sheet_date is not None:
                 by_date.setdefault(sheet_date, []).append(sheet_name)
         preferred_sheet_by_date = dict(selected_sheets)
-        for sheet_date, sheet_names in sorted(by_date.items()):
-            if len(sheet_names) > 1:
-                health.append(
-                    WorkbookHealthItem(
+        if restrict_to_sheet_names is None:
+            for sheet_date, sheet_names in sorted(by_date.items()):
+                if len(sheet_names) > 1:
+                    health.append(
+                        WorkbookHealthItem(
+                            source_file=source_path.name,
+                            status="Info",
+                            details=(
+                                f"{sheet_date.isoformat()} has {len(sheet_names)} revision candidate sheets. "
+                                f"Using '{preferred_sheet_by_date.get(sheet_date, '')}'."
+                            ),
+                        )
+                    )
+
+        if restrict_to_sheet_names is None:
+            az2_targets = dated_sheets
+        else:
+            az2_targets = [name for name in dated_sheets if name in restrict_to_sheet_names]
+        for sheet_name in az2_targets:
+            sheet_date_az = parse_sheet_date(sheet_name)
+            if sheet_date_az is None:
+                continue
+            ws_az = workbook[sheet_name]
+            az2_raw = ws_az.cell(row=DSS_HASH_AZ2_ROW, column=DSS_HASH_AZ2_COL).value
+            ok_az, detail_az = az2_revision_matches_sheet_name(sheet_name, az2_raw)
+            if not ok_az and detail_az:
+                extra = ""
+                if az2_raw is not None and str(az2_raw).strip() != "":
+                    extra = f" (AZ2 raw value: {az2_raw!r})"
+                else:
+                    extra = " (AZ2 is blank or non-numeric)"
+                warnings.append(
+                    SheetParseWarning(
                         source_file=source_path.name,
-                        status="Info",
-                        details=(
-                            f"{sheet_date.isoformat()} has {len(sheet_names)} revision candidate sheets. "
-                            f"Using '{preferred_sheet_by_date.get(sheet_date, '')}'."
-                        ),
+                        source_sheet=sheet_name,
+                        work_date=sheet_date_az.isoformat(),
+                        issue="Revision Indicator AZ2 Mismatch",
+                        details=detail_az + extra,
                     )
                 )
 
@@ -1791,6 +2151,8 @@ def process_workbook_bytes(
         )
         for sheet_index, (sheet_date, sheet_name) in enumerate(selected_sheets, start=1):
             raise_if_cancelled()
+            if restrict_to_sheet_names is not None and sheet_name not in restrict_to_sheet_names:
+                continue
             ws = workbook[sheet_name]
             seen_names: dict[str, int] = {}
             for start_row in BLOCK_START_ROWS:
@@ -1856,9 +2218,10 @@ def process_workbook_bytes(
                             details=f"{employee} appears {count} times on the same sheet.",
                         )
                     )
+            pf_label = extract_pf_identifier(source_path.name)
             emit_progress(
                 0.2 + (0.75 * sheet_index / total_sheets),
-                f"Processed {sheet_name}",
+                f"Processed {pf_label} — {sheet_name}",
             )
             if (
                 preview_callback is not None
@@ -1876,7 +2239,7 @@ def process_workbook_bytes(
     finally:
         workbook.close()
 
-    if not health:
+    if not health and restrict_to_sheet_names is None:
         health.append(
             WorkbookHealthItem(
                 source_file=source_path.name,
@@ -2001,7 +2364,9 @@ def worksheet_window_value_map(worksheet_root: ET.Element, shared_strings: list[
         if position is None:
             continue
         column, row = position
-        if not (DSS_HASH_MIN_COL <= column <= DSS_HASH_MAX_COL and DSS_HASH_MIN_ROW <= row <= DSS_HASH_MAX_ROW):
+        in_data_window = DSS_HASH_MIN_COL <= column <= DSS_HASH_MAX_COL and DSS_HASH_MIN_ROW <= row <= DSS_HASH_MAX_ROW
+        is_az2_marker = column == DSS_HASH_AZ2_COL and row == DSS_HASH_AZ2_ROW
+        if not (in_data_window or is_az2_marker):
             continue
         cell_type = str(cell.get("t", "")).strip()
         raw_value = ""
@@ -2021,33 +2386,54 @@ def worksheet_window_value_map(worksheet_root: ET.Element, shared_strings: list[
     return values
 
 
-def compute_dss_semantic_hash(workbook_bytes: bytes) -> str | None:
+def _digest_sheet_cells(sheet_date: date, sheet_name: str, cell_values: dict[str, str]) -> str:
+    digest = hashlib.blake2b(digest_size=16)
+    digest.update(sheet_date.isoformat().encode("utf-8"))
+    digest.update(b"\0")
+    digest.update(sheet_name.encode("utf-8"))
+    digest.update(b"\0")
+    for cell_ref in sorted(cell_values):
+        digest.update(cell_ref.encode("utf-8"))
+        digest.update(b"=")
+        digest.update(cell_values[cell_ref].encode("utf-8"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def compute_all_dated_sheet_hashes(workbook_bytes: bytes) -> dict[str, str]:
+    """Per–dated-sheet digest of K25:AZ36 plus AZ2 (same window as parsing / cache invalidation)."""
+    hashes: dict[str, str] = {}
     try:
         with zipfile.ZipFile(io.BytesIO(workbook_bytes)) as archive:
             sheet_targets = parse_workbook_sheet_targets(archive)
-            selected_sheets = select_preferred_dated_sheets(sheet_targets)
-            if not selected_sheets:
-                return None
             shared_strings = parse_shared_strings(archive)
-            digest = hashlib.blake2b(digest_size=16)
-            for sheet_date, sheet_name in selected_sheets:
+            for sheet_name in sheet_targets:
+                sheet_date = parse_sheet_date(sheet_name)
+                if sheet_date is None:
+                    continue
                 worksheet_target = sheet_targets.get(sheet_name, "")
                 if not worksheet_target:
                     continue
                 worksheet_root = ET.fromstring(archive.read(worksheet_target))
                 cell_values = worksheet_window_value_map(worksheet_root, shared_strings)
-                digest.update(sheet_date.isoformat().encode("utf-8"))
-                digest.update(b"\0")
-                digest.update(sheet_name.encode("utf-8"))
-                digest.update(b"\0")
-                for cell_ref in sorted(cell_values):
-                    digest.update(cell_ref.encode("utf-8"))
-                    digest.update(b"=")
-                    digest.update(cell_values[cell_ref].encode("utf-8"))
-                    digest.update(b"\0")
-            return digest.hexdigest()
+                hashes[sheet_name] = _digest_sheet_cells(sheet_date, sheet_name, cell_values)
     except (OSError, ValueError, zipfile.BadZipFile, KeyError, ET.ParseError):
+        return {}
+    return hashes
+
+
+def combine_sheet_hashes(sheet_hashes: dict[str, str]) -> str:
+    if not sheet_hashes:
+        return ""
+    joined = "\0".join(f"{name}\x1e{value}" for name, value in sorted(sheet_hashes.items(), key=lambda item: item[0].casefold()))
+    return hashlib.blake2b(joined.encode("utf-8"), digest_size=16).hexdigest()
+
+
+def compute_dss_semantic_hash(workbook_bytes: bytes) -> str | None:
+    sheet_hashes = compute_all_dated_sheet_hashes(workbook_bytes)
+    if not sheet_hashes:
         return None
+    return combine_sheet_hashes(sheet_hashes)
 
 
 def compute_workbook_content_hash(workbook_bytes: bytes) -> str:
@@ -2376,6 +2762,10 @@ def load_tracker_data(
         normalized_paths = [source_paths]
     else:
         normalized_paths = sorted({Path(path) for path in source_paths}, key=lambda item: item.name.lower())
+    try:
+        normalized_paths.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    except OSError:
+        pass
 
     if cache_dir is None:
         _app_root, cache_dir = ensure_app_directories()
@@ -2452,7 +2842,8 @@ def load_tracker_data(
     def parse_miss_file(
         source_path: Path,
         workbook_bytes: bytes,
-    ) -> tuple[Path, list[DailyRecord], list[SheetParseWarning], list[WorkbookHealthItem]]:
+    ) -> tuple[Path, list[DailyRecord], list[SheetParseWarning], list[WorkbookHealthItem], dict[str, str]]:
+        sheet_hashes = compute_all_dated_sheet_hashes(workbook_bytes)
         parsed_records, file_warnings, file_health = process_workbook_bytes(
             source_path,
             workbook_bytes,
@@ -2470,7 +2861,7 @@ def load_tracker_data(
                 message,
             ),
         )
-        return source_path, parsed_records, file_warnings, file_health
+        return source_path, parsed_records, file_warnings, file_health, sheet_hashes
 
     pending_parse_inputs: list[tuple[Path, bytes]] = []
 
@@ -2526,14 +2917,46 @@ def load_tracker_data(
                         cached_records,
                         parse_warnings=file_warnings,
                         workbook_health=file_health,
+                        sheet_hashes=compute_all_dated_sheet_hashes(workbook_bytes),
                     )
                 emit_overall_progress(source_path, 1.0, f"Loaded cached data for {source_path.name}")
             else:
-                with state_lock:
-                    reloaded_paths.append(source_path)
-                    cache_status_by_path[source_path] = "Miss"
-                emit_overall_progress(source_path, 0.15, f"Queued {source_path.name} for parsing")
-                pending_parse_inputs.append((source_path, workbook_bytes))
+                merged = merge_workbook_from_cache_by_sheet_hashes(
+                    source_path=source_path,
+                    workbook_bytes=workbook_bytes,
+                    cache_dir=cache_dir,
+                    should_cancel=check_cancel,
+                    progress_callback=lambda fraction, message, sp=source_path: emit_overall_progress(
+                        sp,
+                        0.15 + 0.85 * fraction,
+                        message,
+                    ),
+                )
+                if merged is not None:
+                    merged_records, merged_warnings, merged_health, merged_sheet_hashes, merged_fp = merged
+                    with state_lock:
+                        reloaded_paths.append(source_path)
+                        cache_status_by_path[source_path] = "Partial Refresh"
+                        daily_records.extend(merged_records)
+                        parse_warnings.extend(merged_warnings)
+                        workbook_health.extend(merged_health)
+                    file_hashes[source_path] = merged_fp
+                    save_cached_daily_records(
+                        cache_dir,
+                        source_path,
+                        merged_fp,
+                        merged_records,
+                        parse_warnings=merged_warnings,
+                        workbook_health=merged_health,
+                        sheet_hashes=merged_sheet_hashes,
+                    )
+                    emit_overall_progress(source_path, 1.0, f"Updated changed sheets in {source_path.name}")
+                else:
+                    with state_lock:
+                        reloaded_paths.append(source_path)
+                        cache_status_by_path[source_path] = "Miss"
+                    emit_overall_progress(source_path, 0.15, f"Queued {source_path.name} for parsing")
+                    pending_parse_inputs.append((source_path, workbook_bytes))
 
     if pending_parse_inputs:
         max_workers = min(MAX_PARALLEL_PARSE_WORKERS, len(pending_parse_inputs))
@@ -2545,7 +2968,7 @@ def load_tracker_data(
             for future in concurrent.futures.as_completed(future_map):
                 raise_if_cancelled("Cancelled DSS load.")
                 source_path = future_map[future]
-                parsed_source_path, parsed_records, file_warnings, file_health = future.result()
+                parsed_source_path, parsed_records, file_warnings, file_health, sheet_hashes = future.result()
                 save_cached_daily_records(
                     cache_dir,
                     parsed_source_path,
@@ -2553,6 +2976,7 @@ def load_tracker_data(
                     parsed_records,
                     parse_warnings=file_warnings,
                     workbook_health=file_health,
+                    sheet_hashes=sheet_hashes,
                 )
                 with state_lock:
                     parse_warnings.extend(file_warnings)
@@ -2578,6 +3002,24 @@ def fmt_hours(value: float) -> str:
 
 def expanded_hours(st: float, ot: float, dt: float) -> float:
     return round(st + (ot * 1.5) + (dt * 2.0), 2)
+
+
+AUTO_COLUMN_WIDTH_PAD_PX = 28
+AUTO_COLUMN_MIN_WIDTH_PX = 56
+AUTO_SOURCE_FILE_MAX_WIDTH_PX = 300
+AUTO_PATH_LIKE_MAX_WIDTH_PX = 340
+AUTO_NON_PATH_MAX_WIDTH_PX = 1200
+
+
+def is_path_like_table_column(column: str, source_file_column: str | None) -> bool:
+    """Columns that often hold filenames or paths: cap width when auto-fitting."""
+    if column == "source_file" or (source_file_column and column == source_file_column):
+        return True
+    if column == "sources":
+        return True
+    if column.endswith("_path"):
+        return True
+    return False
 
 
 class SortableTreeview(ttk.Treeview):
@@ -2675,6 +3117,8 @@ class DataTable(ttk.Frame):
         default_sort_column: str | None = None,
         default_sort_descending: bool = False,
         custom_sort_key: Callable[[str, tuple[str, ...], bool], object] | None = None,
+        open_source_file_callback: Callable[[str], None] | None = None,
+        source_file_column: str | None = None,
     ):
         super().__init__(master)
         self._table_id = table_id
@@ -2689,6 +3133,9 @@ class DataTable(ttk.Frame):
         self._column_filters: dict[str, set[str]] = {}
         self._filter_menu: tk.Toplevel | None = None
         self._header_drag_column: str | None = None
+        self._open_source_file_callback = open_source_file_callback
+        self._source_file_column = source_file_column if source_file_column in columns else None
+        self._column_drag_line: tk.Frame | None = None
 
         toolbar = ttk.Frame(self)
         toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 6))
@@ -2709,8 +3156,11 @@ class DataTable(ttk.Frame):
         self.tree.tag_configure("crew_total", background="#e2f0d9", foreground="#1f1f1f")
         self.tree.bind("<ButtonPress-1>", self._on_tree_button_press, add="+")
         self.tree.bind("<ButtonRelease-1>", self._on_tree_button_release, add="+")
+        self.tree.bind("<B1-Motion>", self._on_tree_b1_motion, add="+")
         self.tree.bind("<ButtonRelease-3>", self._on_tree_right_click, add="+")
         self.tree.on_sort_changed = self._save_layout
+        if self._open_source_file_callback and self._source_file_column:
+            self.tree.bind("<Double-Button-1>", self._on_tree_double_click_open_source, add="+")
         bind_vertical_mousewheel(self.tree, self.tree, units_per_notch=4)
         bind_horizontal_mousewheel(self.tree, self.tree, units_per_notch=4)
 
@@ -2786,9 +3236,6 @@ class DataTable(ttk.Frame):
             for column in self._all_columns:
                 self._column_visibility[column] = column in requested_columns
 
-        for column, width in layout.get("column_widths", {}).items():
-            if column in self._all_columns and width > 0:
-                self.tree.column(column, width=width)
         sort_column = str(layout.get("sort_column", "")).strip()
         if sort_column in self._all_columns:
             self.tree.set_sort(sort_column, bool(layout.get("sort_descending", False)))
@@ -2843,14 +3290,80 @@ class DataTable(ttk.Frame):
 
     def _on_tree_button_release(self, _event=None) -> None:
         self._handle_header_drop()
+        self._hide_column_drag_line()
         self.after_idle(self._save_layout)
 
     def _on_tree_button_press(self, event) -> None:
         region = self.tree.identify_region(event.x, event.y)
         if region != "heading":
             self._header_drag_column = None
+            self._hide_column_drag_line()
             return
         self._header_drag_column = self._column_from_identified_id(self.tree.identify_column(event.x))
+
+    def _hide_column_drag_line(self) -> None:
+        if self._column_drag_line is not None:
+            self._column_drag_line.place_forget()
+
+    def _on_tree_b1_motion(self, event) -> None:
+        if not self._header_drag_column:
+            self._hide_column_drag_line()
+            return
+        if self.tree.identify_region(event.x, event.y) != "heading":
+            self._hide_column_drag_line()
+            return
+        target_id = self.tree.identify_column(event.x)
+        target_column = self._column_from_identified_id(target_id)
+        if not target_column:
+            self._hide_column_drag_line()
+            return
+        x_edge = self._heading_left_edge_x_for_column_id(target_id)
+        if x_edge is None:
+            self._hide_column_drag_line()
+            return
+        if self._column_drag_line is None:
+            self._column_drag_line = tk.Frame(self.tree, width=3, bg="#0078d7")
+        self._column_drag_line.place(in_=self.tree, x=max(x_edge - 1, 0), y=0, relheight=1.0)
+
+    def _heading_left_edge_x_for_column_id(self, column_id: str) -> int | None:
+        if not column_id.startswith("#"):
+            return None
+        try:
+            index = int(column_id[1:]) - 1
+        except ValueError:
+            return None
+        if index < 0:
+            return None
+        x_acc = 0
+        display_columns_value = self.tree.cget("displaycolumns")
+        if display_columns_value == "#all":
+            ordered = list(self._all_columns)
+        else:
+            ordered = [c for c in list(display_columns_value) if c in self._all_columns]
+        for col in ordered:
+            if self._all_columns.index(col) == index:
+                return x_acc
+            x_acc += int(self.tree.column(col, "width"))
+        return None
+
+    def _on_tree_double_click_open_source(self, event) -> None:
+        if not self._open_source_file_callback or not self._source_file_column:
+            return
+        if self.tree.identify_region(event.x, event.y) != "cell":
+            return
+        column = self._column_from_identified_id(self.tree.identify_column(event.x))
+        if column != self._source_file_column:
+            return
+        row_id = self.tree.identify_row(event.y)
+        if not row_id:
+            return
+        values = self.tree.item(row_id, "values")
+        col_index = self._all_columns.index(self._source_file_column)
+        if col_index >= len(values):
+            return
+        name = str(values[col_index]).strip()
+        if name:
+            self._open_source_file_callback(name)
 
     def _on_tree_right_click(self, event) -> None:
         region = self.tree.identify_region(event.x, event.y)
@@ -2868,11 +3381,13 @@ class DataTable(ttk.Frame):
         pointer_y = self.winfo_pointery() - self.tree.winfo_rooty()
         if self.tree.identify_region(pointer_x, pointer_y) != "heading":
             self._header_drag_column = None
+            self._hide_column_drag_line()
             return
         target_column = self._column_from_identified_id(self.tree.identify_column(pointer_x))
         dragged_column = self._header_drag_column
         self._header_drag_column = None
         if not target_column or target_column == dragged_column:
+            self._hide_column_drag_line()
             return
         display_columns_value = self.tree.cget("displaycolumns")
         if display_columns_value == "#all":
@@ -2880,6 +3395,7 @@ class DataTable(ttk.Frame):
         else:
             display_columns = [column for column in list(display_columns_value) if column in self._all_columns]
         if dragged_column not in display_columns or target_column not in display_columns:
+            self._hide_column_drag_line()
             return
         display_columns.remove(dragged_column)
         target_index = display_columns.index(target_column)
@@ -2911,6 +3427,59 @@ class DataTable(ttk.Frame):
                 filtered_rows.append(row)
                 filtered_tags.append(row_tags)
         self.tree.set_rows(filtered_rows, filtered_tags)
+        self._autofit_column_widths_to_content()
+
+    def _measure_font_for_tree(self) -> tkfont.Font:
+        try:
+            spec = self.tree.cget("font")
+        except tk.TclError:
+            spec = None
+        if isinstance(spec, tuple) and spec:
+            family, size = spec[0], spec[1]
+            opts: dict[str, object] = {"root": self, "family": family, "size": int(float(size))}
+            if len(spec) > 2:
+                opts["weight"] = spec[2]
+            return tkfont.Font(**opts)
+        if isinstance(spec, str) and spec.strip():
+            try:
+                return tkfont.nametofont(spec.strip())
+            except tk.TclError:
+                pass
+        return tkfont.nametofont("TkDefaultFont")
+
+    def _autofit_column_widths_to_content(self) -> None:
+        font_obj = self._measure_font_for_tree()
+        display_columns_value = self.tree.cget("displaycolumns")
+        if display_columns_value == "#all":
+            visible = list(self._all_columns)
+        else:
+            visible = [column for column in list(display_columns_value) if column in self._all_columns]
+        if not visible:
+            return
+        for col_index_vis, column in enumerate(visible):
+            heading = self._headings_by_column.get(column, column)
+            max_px = font_obj.measure(str(heading)) + AUTO_COLUMN_WIDTH_PAD_PX
+            col_index = self._all_columns.index(column)
+            for item_id in self.tree.get_children():
+                values = self.tree.item(item_id, "values")
+                if col_index >= len(values):
+                    continue
+                cell = str(values[col_index]).replace("\n", " ")
+                span = font_obj.measure(cell) + AUTO_COLUMN_WIDTH_PAD_PX
+                if span > max_px:
+                    max_px = span
+            width = max(AUTO_COLUMN_MIN_WIDTH_PX, int(max_px))
+            if is_path_like_table_column(column, self._source_file_column):
+                cap = (
+                    AUTO_SOURCE_FILE_MAX_WIDTH_PX
+                    if column == "source_file" or column == self._source_file_column
+                    else AUTO_PATH_LIKE_MAX_WIDTH_PX
+                )
+                width = min(width, cap)
+            else:
+                width = min(width, AUTO_NON_PATH_MAX_WIDTH_PX)
+            stretch = col_index_vis == len(visible) - 1
+            self.tree.column(column, width=width, stretch=stretch)
 
     def _open_header_filter_menu(self, column: str, event) -> None:
         self._close_filter_menu()
@@ -3002,6 +3571,8 @@ class DataTable(ttk.Frame):
             self.tree.column(column, width=120)
         self.tree.configure(displaycolumns="#all")
         self._column_filters.clear()
+        self._header_drag_column = None
+        self._hide_column_drag_line()
         self.tree.clear_sort()
         self._apply_default_sort()
         self._apply_filters_and_render()
@@ -3582,11 +4153,16 @@ class DssHoursTrackerApp(tk.Tk):
         self._cancel_event: threading.Event | None = None
         self._active_operation_name = ""
 
+        self._quickload_session = False
+        self._quickload_cancel_sequence: str | None = None
         self._build_layout()
         self.after(AUTO_OUTLOOK_SYNC_DELAY_MS, self._auto_sync_outlook_emails)
         self.after(AUTO_UPDATE_CHECK_DELAY_MS, self._auto_check_for_updates)
         if initial_source:
             self.load_source(initial_source)
+        else:
+            self.after(800, self._maybe_quickload_last_sources)
+        self._register_quickload_cancel_hotkey()
 
     def _build_layout(self) -> None:
         container = ttk.Frame(self, padding=12)
@@ -3628,8 +4204,14 @@ class DssHoursTrackerApp(tk.Tk):
         self.stats_label.pack(side="left", fill="x", expand=True)
         self.cancel_button = ttk.Button(stats, text="Cancel", command=self._cancel_current_action, state="disabled")
         self.cancel_button.pack(side="right")
-        self.progress_bar = ttk.Progressbar(stats, variable=self.progress_var, maximum=100, mode="determinate", length=240)
-        self.progress_bar.pack(side="right", padx=(12, 8))
+        progress_column = ttk.Frame(stats)
+        progress_column.pack(side="right", padx=(12, 8))
+        self.progress_bar = ttk.Progressbar(
+            progress_column, variable=self.progress_var, maximum=100, mode="determinate", length=240
+        )
+        self.progress_bar.pack(side="top")
+        self.quickload_hint_label = ttk.Label(progress_column, text="", wraplength=260, justify="center")
+        self.quickload_hint_label.pack(side="top", pady=(4, 0))
 
         self.group_notebook = ttk.Notebook(container)
         self.group_notebook.pack(fill="both", expand=True)
@@ -3649,7 +4231,11 @@ class DssHoursTrackerApp(tk.Tk):
         self.reports_group = ttk.Frame(self.group_notebook, padding=6)
         self.reports_group.columnconfigure(0, weight=1)
         self.reports_group.rowconfigure(0, weight=1)
-        self.reports_notebook = ttk.Notebook(self.reports_group)
+        self.reports_outline = tk.Frame(self.reports_group, highlightthickness=0, borderwidth=0)
+        self.reports_outline.grid(row=0, column=0, sticky="nsew")
+        self.reports_outline.columnconfigure(0, weight=1)
+        self.reports_outline.rowconfigure(0, weight=1)
+        self.reports_notebook = ttk.Notebook(self.reports_outline)
         self.reports_notebook.grid(row=0, column=0, sticky="nsew")
 
         self.settings_group = ttk.Frame(self.group_notebook, padding=6)
@@ -3666,6 +4252,8 @@ class DssHoursTrackerApp(tk.Tk):
             config_path=self.config_path,
             default_sort_column="sheet",
             default_sort_descending=True,
+            open_source_file_callback=self._open_displayed_source_file,
+            source_file_column="source_file",
         )
         self.employee_editor = EmployeeListEditor(
             self.settings_notebook,
@@ -3681,6 +4269,8 @@ class DssHoursTrackerApp(tk.Tk):
             default_sort_column="week_start",
             default_sort_descending=True,
             custom_sort_key=weekly_rollup_sort_key,
+            open_source_file_callback=self._open_displayed_source_file,
+            source_file_column="source_file",
         )
         self.daily_by_pf_table = DataTable(
             self.summaries_notebook,
@@ -3691,6 +4281,8 @@ class DssHoursTrackerApp(tk.Tk):
             default_sort_column="work_date",
             default_sort_descending=True,
             custom_sort_key=daily_rollup_sort_key,
+            open_source_file_callback=self._open_displayed_source_file,
+            source_file_column="source_file",
         )
         self.combined_weekly_summary_table = DataTable(
             self.summaries_notebook,
@@ -3772,6 +4364,8 @@ class DssHoursTrackerApp(tk.Tk):
             config_path=self.config_path,
             default_sort_column="sheet",
             default_sort_descending=True,
+            open_source_file_callback=self._open_displayed_source_file,
+            source_file_column="source_file",
         )
         self.workbook_health_table = DataTable(
             self.reports_notebook,
@@ -3779,6 +4373,8 @@ class DssHoursTrackerApp(tk.Tk):
             headings=["Source File", "Status", "Details"],
             table_id="workbook_health",
             config_path=self.config_path,
+            open_source_file_callback=self._open_displayed_source_file,
+            source_file_column="source_file",
         )
         self.audit_data_trail_table = DataTable(
             self.reports_notebook,
@@ -3788,6 +4384,8 @@ class DssHoursTrackerApp(tk.Tk):
             config_path=self.config_path,
             default_sort_column="sheet",
             default_sort_descending=True,
+            open_source_file_callback=self._open_displayed_source_file,
+            source_file_column="source_file",
         )
         self.email_drafts_frame = EmailDraftsFrame(
             self.reports_notebook,
@@ -3814,12 +4412,13 @@ class DssHoursTrackerApp(tk.Tk):
         self.group_notebook.add(self.summaries_group, text="Summaries")
         self.group_notebook.add(self.reports_group, text="Reports")
         self.group_notebook.add(self.settings_group, text="Settings")
+        self._reports_group_tab_index = self.group_notebook.index(self.reports_group)
 
         self._refresh_data_tabs()
-        self.summaries_notebook.add(self.weekly_rollup_table, text="Weekly by PF#")
         self.summaries_notebook.add(self.daily_by_pf_table, text="Daily by PF#")
-        self.summaries_notebook.add(self.combined_weekly_summary_table, text="Combined Summary by Week")
+        self.summaries_notebook.add(self.weekly_rollup_table, text="Weekly by PF#")
         self.summaries_notebook.add(self.combined_daily_summary_table, text="Combined Summary by Day")
+        self.summaries_notebook.add(self.combined_weekly_summary_table, text="Combined Summary by Week")
         self.error_report_table.grid(row=1, column=0, sticky="nsew")
         self.reports_notebook.add(self.error_report_page, text="Error Report")
         self.reports_notebook.add(self.parse_warnings_table, text="Sheet Parse Warnings")
@@ -3916,6 +4515,8 @@ class DssHoursTrackerApp(tk.Tk):
 
         self.disable_name_typos_var = tk.BooleanVar(value=self.app_settings.disable_name_typo_notifications)
         self.show_daily_raw_var = tk.BooleanVar(value=self.app_settings.show_daily_raw_tab)
+        self.quickload_last_sources_var = tk.BooleanVar(value=self.app_settings.quickload_last_sources_enabled)
+        self.quickload_cancel_hotkey_var = tk.StringVar(value=self.app_settings.quickload_cancel_hotkey)
         self.hash_poll_minutes_var = tk.StringVar(value=str(self.app_settings.hash_poll_minutes))
         self.auto_update_check_var = tk.BooleanVar(value=self.app_settings.auto_update_check_enabled)
         self.auto_update_download_var = tk.BooleanVar(value=self.app_settings.auto_download_updates_on_unmetered_wifi)
@@ -3939,22 +4540,45 @@ class DssHoursTrackerApp(tk.Tk):
 
         ttk.Checkbutton(
             self.config_frame,
+            text="Quick load last opened DSS workbook(s) on startup",
+            variable=self.quickload_last_sources_var,
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(0, 8))
+
+        ttk.Label(self.config_frame, text="Cancel quick-load hotkey (Tk sequence)").grid(
+            row=4, column=0, sticky="nw", pady=(0, 8)
+        )
+        hotkey_row = ttk.Frame(self.config_frame)
+        hotkey_row.grid(row=4, column=1, sticky="ew", pady=(0, 8))
+        hotkey_row.columnconfigure(0, weight=1)
+        self.quickload_hotkey_combo = ttk.Combobox(
+            hotkey_row,
+            textvariable=self.quickload_cancel_hotkey_var,
+            values=list(QUICKLOAD_CANCEL_HOTKEY_PRESETS),
+            width=22,
+        )
+        self.quickload_hotkey_combo.grid(row=0, column=0, sticky="ew")
+        ttk.Button(hotkey_row, text="Press keys…", command=self._open_quickload_hotkey_capture).grid(
+            row=0, column=1, sticky="e", padx=(8, 0)
+        )
+
+        ttk.Checkbutton(
+            self.config_frame,
             text="Automatically check GitHub for updates on startup",
             variable=self.auto_update_check_var,
-        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(0, 8))
 
         ttk.Checkbutton(
             self.config_frame,
             text="Automatically download updates on unmetered Wi-Fi",
             variable=self.auto_update_download_var,
-        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(0, 8))
 
         ttk.Button(self.config_frame, text="Apply Settings", command=self._apply_app_settings).grid(
-            row=5, column=0, sticky="w", pady=(8, 0)
+            row=7, column=0, sticky="w", pady=(8, 0)
         )
 
         maintenance = ttk.LabelFrame(self.config_frame, text="Maintenance", padding=8)
-        maintenance.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(16, 0))
+        maintenance.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(16, 0))
         ttk.Button(maintenance, text="Reset All Settings to Default", command=self._reset_all_settings).grid(
             row=0, column=0, sticky="w"
         )
@@ -3969,7 +4593,7 @@ class DssHoursTrackerApp(tk.Tk):
         )
 
         diagnostics = ttk.LabelFrame(self.config_frame, text="Diagnostics", padding=8)
-        diagnostics.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(16, 0))
+        diagnostics.grid(row=9, column=0, columnspan=2, sticky="ew", pady=(16, 0))
         ttk.Button(diagnostics, text="Show App Data Folder", command=self._show_app_data_folder).grid(
             row=0, column=0, sticky="w"
         )
@@ -3994,10 +4618,11 @@ class DssHoursTrackerApp(tk.Tk):
 
         note = (
             "These settings control background notifications, how often the app checks loaded DSS files for changes, "
-            "whether Daily Raw is visible, and how the app checks GitHub for downloadable updates."
+            "whether Daily Raw is visible, quick re-open of the last DSS set, the cancel hotkey for that load, "
+            "and how the app checks GitHub for downloadable updates."
         )
         ttk.Label(self.config_frame, text=note, wraplength=700, justify="left").grid(
-            row=8, column=0, columnspan=2, sticky="w", pady=(12, 0)
+            row=10, column=0, columnspan=2, sticky="w", pady=(12, 0)
         )
 
     def _profile_names(self) -> list[str]:
@@ -4116,6 +4741,8 @@ class DssHoursTrackerApp(tk.Tk):
     def _reload_defaults_into_ui(self) -> None:
         self.disable_name_typos_var.set(self.app_settings.disable_name_typo_notifications)
         self.show_daily_raw_var.set(self.app_settings.show_daily_raw_tab)
+        self.quickload_last_sources_var.set(self.app_settings.quickload_last_sources_enabled)
+        self.quickload_cancel_hotkey_var.set(self.app_settings.quickload_cancel_hotkey)
         self.hash_poll_minutes_var.set(str(self.app_settings.hash_poll_minutes))
         self.auto_update_check_var.set(self.app_settings.auto_update_check_enabled)
         self.auto_update_download_var.set(self.app_settings.auto_download_updates_on_unmetered_wifi)
@@ -4150,15 +4777,28 @@ class DssHoursTrackerApp(tk.Tk):
             messagebox.showerror("Configuration", "Hash poll frequency must be a whole number of minutes.")
             return
 
+        hotkey_raw = self.quickload_cancel_hotkey_var.get().strip()
+        hotkey_norm = normalize_quickload_cancel_hotkey(hotkey_raw)
+        if not is_allowed_quickload_cancel_hotkey(hotkey_norm):
+            messagebox.showerror(
+                "Configuration",
+                "That cancel hotkey is not allowed. Use Escape, F-keys, Shift+F-keys, or Control+letter "
+                "(see presets), then click Apply again.",
+            )
+            return
+
         self.app_settings = AppSettings(
             disable_name_typo_notifications=bool(self.disable_name_typos_var.get()),
             hash_poll_minutes=hash_poll_minutes,
             show_daily_raw_tab=bool(self.show_daily_raw_var.get()),
+            quickload_last_sources_enabled=bool(self.quickload_last_sources_var.get()),
+            quickload_cancel_hotkey=hotkey_norm,
             auto_update_check_enabled=bool(self.auto_update_check_var.get()),
             auto_download_updates_on_unmetered_wifi=bool(self.auto_update_download_var.get()),
         )
         self.hash_poll_interval_ms = self.app_settings.hash_poll_minutes * 60 * 1000
         self._persist_app_settings()
+        self._register_quickload_cancel_hotkey()
         self._refresh_data_tabs()
         self._schedule_hash_monitor()
         messagebox.showinfo("Configuration", "Saved application settings.")
@@ -4189,6 +4829,7 @@ class DssHoursTrackerApp(tk.Tk):
         self.email_subject_template, self.email_body_template = load_email_templates(self.config_path)
         self.job_presets = {}
         self._reload_defaults_into_ui()
+        self._register_quickload_cancel_hotkey()
         self._schedule_hash_monitor()
         messagebox.showinfo("Configuration", "Settings were reset to defaults.")
 
@@ -4232,6 +4873,7 @@ class DssHoursTrackerApp(tk.Tk):
         self.formatting_profiles, self.current_profile_name = load_formatting_profiles(self.config_path)
         self.email_subject_template, self.email_body_template = load_email_templates(self.config_path)
         self._reload_defaults_into_ui()
+        self._register_quickload_cancel_hotkey()
         self._schedule_hash_monitor()
         messagebox.showinfo("Configuration", "All stored tracker data was cleared.")
 
@@ -4265,6 +4907,8 @@ class DssHoursTrackerApp(tk.Tk):
                 "disable_name_typo_notifications": self.app_settings.disable_name_typo_notifications,
                 "hash_poll_minutes": self.app_settings.hash_poll_minutes,
                 "show_daily_raw_tab": self.app_settings.show_daily_raw_tab,
+                "quickload_last_sources_enabled": self.app_settings.quickload_last_sources_enabled,
+                "quickload_cancel_hotkey": self.app_settings.quickload_cancel_hotkey,
                 "auto_update_check_enabled": self.app_settings.auto_update_check_enabled,
                 "auto_download_updates_on_unmetered_wifi": self.app_settings.auto_download_updates_on_unmetered_wifi,
             },
@@ -5361,9 +6005,12 @@ class DssHoursTrackerApp(tk.Tk):
             self.loading_label.configure(text=f"Loading {target}...")
             self.stats_label.configure(text="Reading workbook data in the background...")
             self.progress_var.set(0.0)
+            self._refresh_quickload_hint_label()
         else:
             self.loading_label.configure(text="")
             self.progress_var.set(0.0)
+            self._quickload_session = False
+            self._refresh_quickload_hint_label()
         self._refresh_outlook_sync_button()
 
     def _clear_all_views(self) -> None:
@@ -5383,6 +6030,7 @@ class DssHoursTrackerApp(tk.Tk):
         self.employee_editor.set_names([], self.employee_emails)
         self.notes_frame.set_data([], self.employee_notes)
         self.groups_frame.set_data([], self.employee_groups, self.employee_emails)
+        self._sync_reports_alert_chrome(has_errors=False, has_parse_warnings=False)
 
     def _load_source_worker(
         self,
@@ -5479,6 +6127,7 @@ class DssHoursTrackerApp(tk.Tk):
         self._refresh_stats_summary()
         self._render_data(tracker_data)
         self._schedule_hash_monitor()
+        save_last_open_dss_paths(self.config_path, tracker_data.source_paths)
         if show_success:
             summary_lines = [
                 f"Reloaded: {len(tracker_data.reloaded_paths)}",
@@ -5526,6 +6175,11 @@ class DssHoursTrackerApp(tk.Tk):
         ]
         filtered_week_totals = build_week_totals(filtered_combined_summary) if filtered_combined_summary else []
         filtered_source_files = {record.source_file for record in filtered_daily_records}
+        filtered_parse_warnings = [
+            warning
+            for warning in tracker_data.parse_warnings
+            if warning.source_file in filtered_source_files or not filtered_daily_records
+        ]
 
         self.daily_table.set_rows(
             [
@@ -5675,14 +6329,9 @@ class DssHoursTrackerApp(tk.Tk):
                     warning.issue,
                     warning.details,
                 )
-                for warning in tracker_data.parse_warnings
-                if warning.source_file in filtered_source_files or not filtered_daily_records
+                for warning in filtered_parse_warnings
             ],
-            tags=[
-                ("alert",)
-                for warning in tracker_data.parse_warnings
-                if warning.source_file in filtered_source_files or not filtered_daily_records
-            ],
+            tags=[("alert",) for _ in filtered_parse_warnings],
         )
         self.workbook_health_table.set_rows(
             [
@@ -5713,7 +6362,131 @@ class DssHoursTrackerApp(tk.Tk):
                 for record in filtered_daily_records
             ]
         )
+        self._sync_reports_alert_chrome(
+            has_errors=bool(error_findings),
+            has_parse_warnings=bool(filtered_parse_warnings),
+        )
         self._refresh_email_preview(tracker_data, allowed_employees)
+
+    def _sync_reports_alert_chrome(self, *, has_errors: bool, has_parse_warnings: bool) -> None:
+        er_idx = self.reports_notebook.index(self.error_report_page)
+        pw_idx = self.reports_notebook.index(self.parse_warnings_table)
+        base_er = "Error Report"
+        base_pw = "Sheet Parse Warnings"
+        self.reports_notebook.tab(er_idx, text=f"{base_er} (!)" if has_errors else base_er)
+        self.reports_notebook.tab(pw_idx, text=f"{base_pw} (!)" if has_parse_warnings else base_pw)
+        parent_alert = has_errors or has_parse_warnings
+        self.group_notebook.tab(self._reports_group_tab_index, text="Reports (!)" if parent_alert else "Reports")
+        try:
+            if parent_alert:
+                self.reports_outline.configure(highlightthickness=3, highlightbackground="#ffc7ce", highlightcolor="#9c0006")
+            else:
+                self.reports_outline.configure(highlightthickness=0)
+        except tk.TclError:
+            pass
+
+    def _open_displayed_source_file(self, source_display_name: str) -> None:
+        if not source_display_name or self.current_data is None:
+            return
+        target: Path | None = None
+        for path in self.current_data.source_paths:
+            if path.name == source_display_name:
+                target = path
+                break
+        if target is None or not target.exists():
+            messagebox.showerror("Open Source File", f"Could not find workbook:\n{source_display_name}")
+            return
+        try:
+            if sys.platform == "win32":
+                os.startfile(target)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.run(["open", str(target)], check=False)
+            else:
+                subprocess.run(["xdg-open", str(target)], check=False)
+        except OSError as exc:
+            messagebox.showerror("Open Source File", f"Could not open file.\n\n{exc}")
+
+    def _register_quickload_cancel_hotkey(self) -> None:
+        new_seq = normalize_quickload_cancel_hotkey(self.app_settings.quickload_cancel_hotkey)
+        if not is_allowed_quickload_cancel_hotkey(new_seq):
+            new_seq = "<Escape>"
+        if self._quickload_cancel_sequence == new_seq:
+            return
+        if self._quickload_cancel_sequence:
+            try:
+                self.unbind_all(self._quickload_cancel_sequence)
+            except tk.TclError:
+                pass
+        try:
+            self.bind_all(new_seq, self._on_quickload_cancel_hotkey_event)
+        except tk.TclError:
+            return
+        self._quickload_cancel_sequence = new_seq
+
+    def _on_quickload_cancel_hotkey_event(self, _event: tk.Event) -> str | None:
+        if self._is_loading and self._quickload_session and self._cancel_event is not None:
+            self._cancel_current_action()
+            return "break"
+        return None
+
+    def _refresh_quickload_hint_label(self) -> None:
+        if self._is_loading and self._quickload_session:
+            self.quickload_hint_label.configure(
+                text="Quick load — you can turn this off under Settings → Configuration."
+            )
+        else:
+            self.quickload_hint_label.configure(text="")
+
+    def _open_quickload_hotkey_capture(self) -> None:
+        dialog = tk.Toplevel(self)
+        dialog.title("Set cancel hotkey")
+        dialog.transient(self)
+        dialog.resizable(False, False)
+        ttk.Label(
+            dialog,
+            text=(
+                "Click here, then press the key or combination you want.\n"
+                "Escape, F-keys, Shift+F-keys, and Control+letter are supported.\n"
+                "Use Cancel to close without changing the hotkey field."
+            ),
+            padding=12,
+            wraplength=420,
+            justify="left",
+        ).pack(fill="x")
+        status = ttk.Label(dialog, text="Waiting for keys…", padding=(12, 4))
+        status.pack(fill="x")
+
+        def finish(seq: str) -> None:
+            self.quickload_cancel_hotkey_var.set(seq)
+            status.configure(text=f"Captured: {seq}")
+            dialog.destroy()
+
+        def on_key_press(event: tk.Event) -> str | None:
+            seq = binding_sequence_from_keypress_event(event)
+            if seq is None:
+                return None
+            if not is_allowed_quickload_cancel_hotkey(seq):
+                status.configure(text=f"Not allowed: {seq}")
+                return "break"
+            finish(seq)
+            return "break"
+
+        dialog.bind("<KeyPress>", on_key_press)
+        ttk.Button(dialog, text="Cancel", command=dialog.destroy).pack(pady=(0, 12))
+        dialog.grab_set()
+        dialog.focus_set()
+        dialog.wait_window(dialog)
+
+    def _maybe_quickload_last_sources(self) -> None:
+        if not self.app_settings.quickload_last_sources_enabled:
+            return
+        if self.current_data is not None:
+            return
+        paths = [path for path in load_last_open_dss_paths(self.config_path) if path.expanduser().resolve().exists()]
+        if not paths:
+            return
+        self._quickload_session = True
+        self.load_source(paths, show_success=False)
 
     def _refresh_email_preview(self, tracker_data: TrackerData, allowed_employees: set[str] | None = None) -> None:
         filtered_daily_records = [

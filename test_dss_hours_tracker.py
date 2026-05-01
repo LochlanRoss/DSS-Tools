@@ -14,6 +14,8 @@ from dss_hours_tracker import (
     aggregate_daily,
     aggregate_weekly,
     AppSettings,
+    binding_sequence_from_keypress_event,
+    az2_revision_matches_sheet_name,
     build_email_draft_requests,
     build_email_html,
     build_bug_report_html,
@@ -33,6 +35,7 @@ from dss_hours_tracker import (
     cache_file_path,
     clear_cache_files,
     compute_bytes_hash,
+    combine_sheet_hashes,
     compute_dss_semantic_hash,
     compute_workbook_content_hash,
     load_ignored_name_typos,
@@ -51,6 +54,8 @@ from dss_hours_tracker import (
     FormattingProfile,
     get_app_root,
     is_alert_triggered,
+    is_allowed_quickload_cancel_hotkey,
+    is_path_like_table_column,
     is_unmetered_wifi_profile,
     load_cached_daily_records,
     load_cached_source_analysis,
@@ -63,6 +68,7 @@ from dss_hours_tracker import (
     load_table_layouts,
     monday_week_start,
     normalize_person_name,
+    normalize_quickload_cancel_hotkey,
     normalize_windows_path,
     OperationCancelled,
     parse_sheet_revision,
@@ -325,6 +331,35 @@ class DssHoursTrackerTests(unittest.TestCase):
         self.assertEqual(parse_sheet_revision("2026-04-07 r 2"), 2)
         self.assertEqual(parse_sheet_revision("2026-04-07 rev 3"), 3)
         self.assertEqual(parse_sheet_revision("2026-04-07 Revision_4"), 4)
+        self.assertEqual(parse_sheet_revision("2026-04-07 r-1"), 1)
+        self.assertEqual(parse_sheet_revision("2026-04-07 r.1"), 1)
+        self.assertEqual(parse_sheet_revision("2026-04-07 rev 12"), 12)
+
+    def test_select_preferred_dated_sheets_prefers_highest_revision(self) -> None:
+        sheets = [
+            "2026-04-07",
+            "2026-04-07 R1",
+            "2026-04-07 rev 2",
+            "2026-04-07 r.3",
+        ]
+        selected = dict(select_preferred_dated_sheets(sheets))
+        self.assertEqual(selected[date(2026, 4, 7)], "2026-04-07 r.3")
+
+    def test_az2_revision_matches_sheet_name(self) -> None:
+        ok, _ = az2_revision_matches_sheet_name("2026-04-07 R2", 2)
+        self.assertTrue(ok)
+        ok, msg = az2_revision_matches_sheet_name("2026-04-07 R2", 1)
+        self.assertFalse(ok)
+        self.assertIn("revision level 1", msg or "")
+        ok, msg = az2_revision_matches_sheet_name("2026-04-07", "")
+        self.assertTrue(ok)
+        ok, msg = az2_revision_matches_sheet_name("2026-04-07 R1", "")
+        self.assertFalse(ok)
+        self.assertIn("blank", (msg or "").lower())
+
+    def test_combine_sheet_hashes_stable(self) -> None:
+        a = {"2026-04-07": "aa", "2026-04-08": "bb"}
+        self.assertEqual(combine_sheet_hashes(a), combine_sheet_hashes(dict(reversed(list(a.items())))))
 
     def test_extract_pf_identifier_prefers_pf_token(self) -> None:
         self.assertEqual(
@@ -698,6 +733,8 @@ class DssHoursTrackerTests(unittest.TestCase):
                     disable_name_typo_notifications=True,
                     hash_poll_minutes=12,
                     show_daily_raw_tab=False,
+                    quickload_last_sources_enabled=False,
+                    quickload_cancel_hotkey="<F9>",
                     auto_update_check_enabled=False,
                     auto_download_updates_on_unmetered_wifi=False,
                 ),
@@ -708,8 +745,40 @@ class DssHoursTrackerTests(unittest.TestCase):
             self.assertTrue(loaded.disable_name_typo_notifications)
             self.assertEqual(loaded.hash_poll_minutes, 12)
             self.assertFalse(loaded.show_daily_raw_tab)
+            self.assertFalse(loaded.quickload_last_sources_enabled)
+            self.assertEqual(loaded.quickload_cancel_hotkey, "<F9>")
             self.assertFalse(loaded.auto_update_check_enabled)
             self.assertFalse(loaded.auto_download_updates_on_unmetered_wifi)
+
+    def test_binding_sequence_from_keypress_event(self) -> None:
+        class KeyEvt:
+            __slots__ = ("keysym", "state")
+
+            def __init__(self, keysym: str, state: int = 0):
+                self.keysym = keysym
+                self.state = state
+
+        self.assertEqual(binding_sequence_from_keypress_event(KeyEvt("Escape")), "<Escape>")
+        self.assertEqual(binding_sequence_from_keypress_event(KeyEvt("F9")), "<F9>")
+        self.assertEqual(binding_sequence_from_keypress_event(KeyEvt("q", 0x4)), "<Control-Key-q>")
+        self.assertIsNone(binding_sequence_from_keypress_event(KeyEvt("q", 0)))
+        self.assertEqual(binding_sequence_from_keypress_event(KeyEvt("Escape", 0x1)), "<Shift-Escape>")
+
+    def test_quickload_cancel_hotkey_validation(self) -> None:
+        self.assertTrue(is_allowed_quickload_cancel_hotkey("<Escape>"))
+        self.assertTrue(is_allowed_quickload_cancel_hotkey("<Control-Key-z>"))
+        self.assertTrue(is_allowed_quickload_cancel_hotkey("<Control-q>"))
+        self.assertEqual(normalize_quickload_cancel_hotkey("Escape"), "<Escape>")
+        self.assertFalse(is_allowed_quickload_cancel_hotkey("<Key-a>"))
+        self.assertFalse(is_allowed_quickload_cancel_hotkey("<bogus>"))
+
+    def test_path_like_table_column_ids(self) -> None:
+        self.assertTrue(is_path_like_table_column("source_file", None))
+        self.assertTrue(is_path_like_table_column("sources", None))
+        self.assertTrue(is_path_like_table_column("workbook_path", None))
+        self.assertTrue(is_path_like_table_column("dss_file", "dss_file"))
+        self.assertFalse(is_path_like_table_column("employee", "source_file"))
+        self.assertFalse(is_path_like_table_column("details", None))
 
     def test_filter_employee_names_supports_all_employee_and_group_modes(self) -> None:
         employees = ["Alice Smith", "Bob Jones", "Charlie West"]

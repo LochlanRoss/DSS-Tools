@@ -49,10 +49,10 @@ The app uses grouped navigation with two tab rows:
     - `Daily Raw` (optional, can be hidden in Configuration)
     - `Week Totals`
   - `Summaries`
-    - `Weekly by PF#`
     - `Daily by PF#`
-    - `Combined Summary by Week`
+    - `Weekly by PF#`
     - `Combined Summary by Day`
+    - `Combined Summary by Week`
   - `Reports`
     - `Error Report`
     - `Email Drafts`
@@ -66,9 +66,11 @@ The app uses grouped navigation with two tab rows:
 
 - `Update View` reloads all currently selected DSS files
 - Background loading keeps the UI responsive
-- Overall progress bar shows multi-DSS progress
-- `Cancel` can abort DSS loading and Outlook email sync
-- Same-file updates are skipped when the **DSS semantic hash** (dated sheets and `K25:AZ36` only) is unchanged
+- Overall progress bar shows multi-DSS progress; sheet progress text includes the **PF#-#** token from the filename where available
+- `Cancel` can abort DSS loading and Outlook email sync; during **quick load** (re-opening the last DSS set on startup) you can also cancel with a configurable hotkey (defaults to Escape; presets and key capture live under **Settings → Configuration**)
+- Optional **quick load**: on startup the app can re-open the same DSS workbook paths as last time (saved in config), with a short hint next to the progress bar; turn the behaviour off in Configuration
+- Multi-file loads prefer **newer files first** (by filesystem modified time); the parser can emit an early partial preview while older workbooks are still loading
+- Same-file updates are skipped when the **DSS semantic hash** (dated sheets and `K25:AZ36` only) is unchanged; per-sheet digests allow **partial refresh** when only some dated sheets change
 - Parsed DSS data is cached on disk for up to 7 days
 - Optional **GitHub release** update check; automatic download on unmetered Wi‑Fi; install prompt after download
 - Loaded DSS files are checked periodically in the background for changes
@@ -76,9 +78,12 @@ The app uses grouped navigation with two tab rows:
 - Conditional highlighting uses saved job-specific formatting profiles
 - Table layouts persist per page:
   - shown/hidden columns
-  - column widths and order
+  - column order (drag column headers to reorder; a drop indicator shows the insertion point)
   - sort column and direction
   - per-column header filter selections (where filters are used)
+- Column widths **auto-fit** to the heading and visible cell text after each refresh (saved pixel widths in config are not reapplied so layout stays data-driven); **Source File** / path-like columns (`sources`, `*_path`) use a tighter cap so long filenames stay readable without stretching the whole grid
+- Double-click a **source file** cell in supported tables to open that workbook in the desktop shell
+- **AZ2** is checked against the sheet name revision pattern; mismatches appear as sheet parse warnings, and Reports tab chrome highlights when errors or parse warnings are present
 
 ## Filtering
 

@@ -13,16 +13,30 @@ Working scratchpad: check items off when they are done.
 - [x] Add a generalized UI standardization document for future agent handoffs on other projects (`UI Standardization Notes.md`).
 - [x] Summaries tab: add **Daily by PF#**; rename weekly view to **Weekly by PF#**; rename combined weekly view to **Combined Summary by Week**; add **Combined Summary by Day**.
 
--I want to check a new cell for errors: I want to register a sheet parsing error whenever a specific cell which indicates whether a DSS is a rev or not does not match the sheet name. That cell address is the same for every file and every sheet, its address is: AZ2
+- [x] Check cell **AZ2** against the sheet name revision indicator; register a sheet parse warning when they disagree.
 
--Whenever a sheet parse error is registered, I want the sheet parse error to show up in the list in the same font colour/highlight colour as the error reports do. 
+- [x] Sheet parse warnings use the same alert styling as error report rows.
 
--Whenever a sheet parse error or an error report error is logged, I want the tab for that page to turn the same colour of formatting (either the error report tab or the sheet parse warnings tab). Whenever either of those tabs turn red, I want the parent tab to turn red (the whole reports upper tab). I want them to stay red until cleared. By cleared I mean the data is updated and no longer has the problem in it.
+- [x] When sheet parse warnings or error-report items are present, colour the relevant report sub-tabs and the parent **Reports** tab; clear when updated data no longer has those issues.
 
--I want to verify that the rev up ignore previous rev logic works for revs greater than one, and also works for different permutations and combinations of "rev 1" " r1" "r 1" "r-1" "r.1" "Revision 1" and so on. 
+- [x] Verify revision parsing for many suffix forms (`rev 1`, `r1`, `r 1`, `r-1`, `r.1`, `Revision 1`, …) and rev-up logic for revisions greater than one.
 
--Whenever I doubleclick a source file in any list, I would like to open that source file.
+- [x] Double-click **source file** in any supported list to open that workbook.
 
--I want to be able to click and drag any column in any list to re-order the columns. I want the column order to persist as though it was a user setting and reset whenever a reset to default that is applicable to it resets. I want to be able to either A) see the column live as I drag it or B) see some kind of indicator for which two columns the dragged will land between. 
+- [x] Column reorder drag with a visible drop indicator; order persists with other layout settings and resets with applicable defaults.
 
--Can the hashing logic be updated to improve the speed of refreshing? Right is it accurate to say we only hash the whole file's sum of each sheet's area of interest? If so, can we continue to hash the whole file but also now store the sheet hash? If we do that we can change the behaviour of the update view button to only reload specific sheets that change instead of the whole workbook/file. 
+- [x] Per-sheet hashing plus combined file digest for faster refresh; **Update View** / reload can **partially** refresh only changed dated sheets when the rest of the cache still matches.
+
+- [x] **Quick load** last opened DSS set on startup (optional), progress + cancel, hint near the progress bar, setting to disable, and a **configurable cancel hotkey** (presets + key-capture dialog; persisted).
+
+- [x] Progress text while processing sheets: include **PF#-#** (from the filename) with the sheet name, not the full file name.
+
+- [x] Prefer **newer DSS files first** by modified time when loading multiple sources; early partial UI preview while older workbooks continue loading (existing preview path).
+
+- [x] **Summaries** tab order: daily tabs before weekly (`Daily by PF#`, `Weekly by PF#`, combined day, combined week).
+
+- [x] Auto-size column widths from header + cell text; cap **Source File** / `source_file` and other path-like columns (`sources`, `*_path`) so long filenames do not blow out the layout; other columns cap at a large pixel ceiling for sanity.
+
+I want to add a feature. When I click and drag to resize a column, I don't want it to knock on adjust the size of the next column. I want the size of every other column to remain constant and end up with either a greater or a lesser total width. If the width exceeds the width of the page, I want a scrollbar to appear. 
+
+I want to add a feature. I want a word wrap button with a status "(on)" or "(off)" to appear on any page with a row whose contents are not fully displayed on the width of the page or are cut off by the next column. This button should be per-page and not global. It should appear even when the conditions to trigger it are not present. This setting should wrap the contents of each row in their respective columns and occupy the equivalent space of multiple rows on the page until all info is displayed, but still be one single row.
