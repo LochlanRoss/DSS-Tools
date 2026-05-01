@@ -17,6 +17,7 @@ import tomllib
 import urllib.error
 import urllib.request
 import zipfile
+import xml.etree.ElementTree as ET
 from importlib import metadata as importlib_metadata
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -42,6 +43,13 @@ DATE_PATTERN = re.compile(r"(\d{4}-\d{2}-\d{2})")
 REVISION_PATTERN = re.compile(r"(?:^|[\s_-])(?:rev(?:ision)?[\s_-]*|r[\s_-]*)(\d+)(?=$|[\s_-])", re.IGNORECASE)
 PF_PATTERN = re.compile(r"\b(PF\d+(?:-\d+)?)\b", re.IGNORECASE)
 WORKBOOK_CALC_ID_PATTERN = re.compile(br'\s(?:calcId|fullCalcOnLoad|forceFullCalc|calcCompleted)="[^"]*"')
+EXCEL_MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+EXCEL_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+EXCEL_PACKAGE_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+DSS_HASH_MIN_COL = 11  # K
+DSS_HASH_MAX_COL = 52  # AZ
+DSS_HASH_MIN_ROW = 25
+DSS_HASH_MAX_ROW = 36
 BLOCK_START_ROWS = (25, 28, 31, 34)
 
 LEFT_NAME_COLS = tuple(range(20, 28))   # T:AA
@@ -296,6 +304,44 @@ def describe_network_profile(profile: dict[str, object]) -> str:
 
 
 APP_VERSION = discover_app_version()
+
+
+def directional_sort_key(value: str, descending: bool = False) -> tuple[int, object]:
+    text = str(value)
+    try:
+        number = float(text)
+    except ValueError:
+        folded = text.casefold()
+        if descending:
+            return (1, tuple(-ord(char) for char in folded))
+        return (1, folded)
+    return (0, -number if descending else number)
+
+
+def weekly_rollup_sort_key(column: str, row: tuple[str, ...], descending: bool) -> tuple[object, ...]:
+    columns = {
+        "source_file": 0,
+        "week_start": 1,
+        "week_end": 2,
+        "employee": 3,
+        "st": 4,
+        "ot": 5,
+        "dt": 6,
+        "total": 7,
+        "expanded": 8,
+        "row_type": 9,
+    }
+    primary_index = columns.get(column)
+    if primary_index is None:
+        return tuple()
+    row_type_rank = 1 if row[9] == "Crew Total" else 0
+    return (
+        directional_sort_key(row[primary_index], descending),
+        directional_sort_key(row[0], False),
+        directional_sort_key(row[1], descending if column in {"week_start", "week_end"} else False),
+        row_type_rank,
+        directional_sort_key(row[3], False),
+    )
 
 
 @dataclass(frozen=True)
@@ -1808,7 +1854,130 @@ def normalize_workbook_member_bytes(member_name: str, member_bytes: bytes) -> by
     return member_bytes
 
 
+def cell_reference_to_position(cell_ref: str) -> tuple[int, int] | None:
+    match = re.fullmatch(r"([A-Z]+)(\d+)", cell_ref.upper())
+    if not match:
+        return None
+    letters, row_text = match.groups()
+    column = 0
+    for character in letters:
+        column = (column * 26) + (ord(character) - 64)
+    return column, int(row_text)
+
+
+def normalize_hash_cell_value(raw_value: str, cell_type: str) -> str:
+    value = raw_value.strip()
+    if not value:
+        return ""
+    if cell_type in {"s", "str", "inlineStr"}:
+        return " ".join(value.split())
+    try:
+        normalized_decimal = Decimal(value)
+    except (InvalidOperation, ValueError):
+        return value
+    normalized = normalized_decimal.normalize()
+    if normalized == normalized.to_integral():
+        return format(normalized.quantize(Decimal("1")), "f")
+    return format(normalized, "f")
+
+
+def parse_shared_strings(archive: zipfile.ZipFile) -> list[str]:
+    try:
+        payload = archive.read("xl/sharedStrings.xml")
+    except KeyError:
+        return []
+    root = ET.fromstring(payload)
+    values: list[str] = []
+    for si in root.findall(f"{{{EXCEL_MAIN_NS}}}si"):
+        text_parts = [node.text or "" for node in si.iterfind(f".//{{{EXCEL_MAIN_NS}}}t")]
+        values.append("".join(text_parts))
+    return values
+
+
+def parse_workbook_sheet_targets(archive: zipfile.ZipFile) -> dict[str, str]:
+    workbook_root = ET.fromstring(normalize_workbook_member_bytes("xl/workbook.xml", archive.read("xl/workbook.xml")))
+    rels_root = ET.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
+    rel_targets: dict[str, str] = {}
+    for rel in rels_root.findall(f"{{{EXCEL_PACKAGE_REL_NS}}}Relationship"):
+        rel_id = rel.get("Id", "").strip()
+        target = rel.get("Target", "").strip()
+        if rel_id and target:
+            rel_targets[rel_id] = target
+    sheet_targets: dict[str, str] = {}
+    for sheet in workbook_root.findall(f".//{{{EXCEL_MAIN_NS}}}sheet"):
+        sheet_name = str(sheet.get("name", "")).strip()
+        rel_id = str(sheet.get(f"{{{EXCEL_REL_NS}}}id", "")).strip()
+        target = rel_targets.get(rel_id, "")
+        if not sheet_name or not target:
+            continue
+        normalized_target = target.replace("\\", "/").lstrip("/")
+        if not normalized_target.startswith("xl/"):
+            normalized_target = f"xl/{normalized_target}"
+        sheet_targets[sheet_name] = normalized_target
+    return sheet_targets
+
+
+def worksheet_window_value_map(worksheet_root: ET.Element, shared_strings: list[str]) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for cell in worksheet_root.findall(f".//{{{EXCEL_MAIN_NS}}}c"):
+        cell_ref = str(cell.get("r", "")).strip()
+        position = cell_reference_to_position(cell_ref)
+        if position is None:
+            continue
+        column, row = position
+        if not (DSS_HASH_MIN_COL <= column <= DSS_HASH_MAX_COL and DSS_HASH_MIN_ROW <= row <= DSS_HASH_MAX_ROW):
+            continue
+        cell_type = str(cell.get("t", "")).strip()
+        raw_value = ""
+        if cell_type == "inlineStr":
+            raw_value = "".join(node.text or "" for node in cell.iterfind(f".//{{{EXCEL_MAIN_NS}}}t"))
+        else:
+            value_node = cell.find(f"{{{EXCEL_MAIN_NS}}}v")
+            raw_value = value_node.text if value_node is not None and value_node.text is not None else ""
+            if cell_type == "s" and raw_value.strip():
+                try:
+                    raw_value = shared_strings[int(raw_value)]
+                except (IndexError, ValueError):
+                    pass
+        normalized_value = normalize_hash_cell_value(raw_value, cell_type)
+        if normalized_value:
+            values[cell_ref.upper()] = normalized_value
+    return values
+
+
+def compute_dss_semantic_hash(workbook_bytes: bytes) -> str | None:
+    try:
+        with zipfile.ZipFile(io.BytesIO(workbook_bytes)) as archive:
+            sheet_targets = parse_workbook_sheet_targets(archive)
+            selected_sheets = select_preferred_dated_sheets(sheet_targets)
+            if not selected_sheets:
+                return None
+            shared_strings = parse_shared_strings(archive)
+            digest = hashlib.blake2b(digest_size=16)
+            for sheet_date, sheet_name in selected_sheets:
+                worksheet_target = sheet_targets.get(sheet_name, "")
+                if not worksheet_target:
+                    continue
+                worksheet_root = ET.fromstring(archive.read(worksheet_target))
+                cell_values = worksheet_window_value_map(worksheet_root, shared_strings)
+                digest.update(sheet_date.isoformat().encode("utf-8"))
+                digest.update(b"\0")
+                digest.update(sheet_name.encode("utf-8"))
+                digest.update(b"\0")
+                for cell_ref in sorted(cell_values):
+                    digest.update(cell_ref.encode("utf-8"))
+                    digest.update(b"=")
+                    digest.update(cell_values[cell_ref].encode("utf-8"))
+                    digest.update(b"\0")
+            return digest.hexdigest()
+    except (OSError, ValueError, zipfile.BadZipFile, KeyError, ET.ParseError):
+        return None
+
+
 def compute_workbook_content_hash(workbook_bytes: bytes) -> str:
+    semantic_hash = compute_dss_semantic_hash(workbook_bytes)
+    if semantic_hash is not None:
+        return semantic_hash
     try:
         with zipfile.ZipFile(io.BytesIO(workbook_bytes)) as archive:
             digest = hashlib.blake2b(digest_size=16)
@@ -2274,6 +2443,7 @@ class SortableTreeview(ttk.Treeview):
         self._active_sort_column: str | None = None
         self._active_sort_descending = False
         self.on_sort_changed: Callable[[], None] | None = None
+        self.custom_sort_key: Callable[[str, tuple[str, ...], bool], object] | None = None
         for column, heading in zip(columns, headings):
             self.heading(column, text=heading, command=lambda col=column: self.sort_by(col))
             self.column(column, anchor="w", width=120, stretch=True)
@@ -2327,6 +2497,10 @@ class SortableTreeview(ttk.Treeview):
         self._sort_state.clear()
 
     def _sort_rows(self, column: str, reverse: bool, index: int | None = None) -> None:
+        if self.custom_sort_key is not None:
+            self._rows.sort(key=lambda item: self.custom_sort_key(column, item[0], reverse))
+            return
+
         columns = list(self["columns"])
         column_index = columns.index(column) if index is None else index
 
@@ -2355,6 +2529,7 @@ class DataTable(ttk.Frame):
         config_path: Path | None = None,
         default_sort_column: str | None = None,
         default_sort_descending: bool = False,
+        custom_sort_key: Callable[[str, tuple[str, ...], bool], object] | None = None,
     ):
         super().__init__(master)
         self._table_id = table_id
@@ -2375,6 +2550,7 @@ class DataTable(ttk.Frame):
         ttk.Button(toolbar, text="Columns", command=self.open_column_picker).pack(side="right")
 
         self.tree = SortableTreeview(self, columns, headings)
+        self.tree.custom_sort_key = custom_sort_key
         y_scroll = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
         x_scroll = ttk.Scrollbar(self, orient="horizontal", command=self.tree.xview)
         self.tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
@@ -3340,6 +3516,7 @@ class DssHoursTrackerApp(tk.Tk):
             config_path=self.config_path,
             default_sort_column="week_start",
             default_sort_descending=True,
+            custom_sort_key=weekly_rollup_sort_key,
         )
         self.combined_weekly_summary_table = DataTable(
             self.summaries_notebook,

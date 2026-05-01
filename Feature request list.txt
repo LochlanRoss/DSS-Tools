@@ -15,3 +15,5 @@ In the error report window, please add a button for checking name typos manually
 In the name typos popup, please add a note that this can be enabled or disabled in settings
 
 Please create a document that lists all UI standardizations that don't necessarily pertain to specifics of this project ("display PF column first" or something), but pertain generally to the creation of a useful UI (tabbed pages, a settings page, diagnostic settings, options to change paths in settings, persisten column width and order, etc). The purpose of this document would be for agent handoffs in future projects for unrelated purposes, which is why it needs to be generalized.
+
+I want to expand on the summaries tab. I currently have a weekly rollup which displays each crew-members hours by summed by week and by PF#. I would like to expand this functionality to a new "Daily by PF#" tab. I want to rename "weekly rollup" to "Weekly by PF#". I want to change the name of the combined summary tab from "Combined Summary" to "Combined Summary by Week", and add a new tab called "Combined Summary by Day"

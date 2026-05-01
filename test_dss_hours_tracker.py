@@ -23,6 +23,7 @@ from dss_hours_tracker import (
     build_permission_denied_message,
     build_week_totals,
     build_weekly_rollup,
+    directional_sort_key,
     is_newer_version,
     normalize_release_version,
     parse_checksum_manifest,
@@ -30,6 +31,7 @@ from dss_hours_tracker import (
     cache_file_path,
     clear_cache_files,
     compute_bytes_hash,
+    compute_dss_semantic_hash,
     compute_workbook_content_hash,
     load_ignored_name_typos,
     pf_numbers_for_records,
@@ -64,6 +66,7 @@ from dss_hours_tracker import (
     parse_sheet_revision,
     parse_daily_records,
     parse_threshold_value,
+    weekly_rollup_sort_key,
     purge_stale_cache,
     remove_config_keys,
     save_employee_emails,
@@ -231,6 +234,23 @@ class DssHoursTrackerTests(unittest.TestCase):
 
             self.assertEqual(len(totals), 1)
             self.assertEqual(totals[0].total, 37.0)
+
+    def test_weekly_rollup_sort_key_keeps_sections_grouped(self) -> None:
+        rows = [
+            ("PF26024-2 Electrical", "2026-04-27", "2026-05-03", "Whole Crew", "255.5", "30", "60", "345.5", "420.5", "Crew Total"),
+            ("PF26024-1 Instrumentation", "2026-04-27", "2026-05-03", "Grady Redden", "50", "0", "6", "56", "62", "Employee"),
+            ("PF26024-2 Electrical", "2026-04-27", "2026-05-03", "Dexter Olshewski", "10", "0", "4", "14", "18", "Employee"),
+            ("PF26024-1 Instrumentation", "2026-04-27", "2026-05-03", "Chuck Ehr", "50", "0", "6", "56", "62", "Employee"),
+            ("PF26024-1 Instrumentation", "2026-04-27", "2026-05-03", "Whole Crew", "288", "0", "32.5", "320.5", "353", "Crew Total"),
+        ]
+        sorted_rows = sorted(rows, key=lambda row: weekly_rollup_sort_key("week_start", row, True))
+        self.assertEqual(sorted_rows[0][0], "PF26024-1 Instrumentation")
+        self.assertEqual(sorted_rows[0][3], "Chuck Ehr")
+        self.assertEqual(sorted_rows[1][0], "PF26024-1 Instrumentation")
+        self.assertEqual(sorted_rows[2][3], "Whole Crew")
+        self.assertEqual(sorted_rows[3][0], "PF26024-2 Electrical")
+        self.assertEqual(sorted_rows[3][3], "Dexter Olshewski")
+        self.assertEqual(sorted_rows[4][3], "Whole Crew")
 
     def test_load_tracker_data_builds_gui_view_model(self) -> None:
         with self.workspace_files("source") as source, self.workspace_dir("cache") as cache_dir:
@@ -471,6 +491,60 @@ class DssHoursTrackerTests(unittest.TestCase):
             self.assertEqual(
                 compute_workbook_content_hash(source1.read_bytes()),
                 compute_workbook_content_hash(source2.read_bytes()),
+            )
+
+    def test_compute_dss_semantic_hash_ignores_irrelevant_cells(self) -> None:
+        with self.workspace_files("hash_irrelevant_1") as source1, self.workspace_files("hash_irrelevant_2") as source2:
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "2026-04-07"
+            ws["T25"] = "Alice Smith"
+            ws["AC25"] = 8
+            ws["B2"] = "outside range"
+            wb.save(source1)
+
+            ws["B2"] = "changed outside range"
+            wb.save(source2)
+
+            self.assertEqual(
+                compute_dss_semantic_hash(source1.read_bytes()),
+                compute_dss_semantic_hash(source2.read_bytes()),
+            )
+
+    def test_compute_dss_semantic_hash_ignores_non_dated_sheets(self) -> None:
+        with self.workspace_files("hash_notes_1") as source1, self.workspace_files("hash_notes_2") as source2:
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "2026-04-07"
+            ws["T25"] = "Alice Smith"
+            ws["AC25"] = 8
+            notes = wb.create_sheet("Notes")
+            notes["A1"] = "alpha"
+            wb.save(source1)
+
+            notes["A1"] = "beta"
+            wb.save(source2)
+
+            self.assertEqual(
+                compute_dss_semantic_hash(source1.read_bytes()),
+                compute_dss_semantic_hash(source2.read_bytes()),
+            )
+
+    def test_compute_dss_semantic_hash_changes_when_relevant_cells_change(self) -> None:
+        with self.workspace_files("hash_relevant_1") as source1, self.workspace_files("hash_relevant_2") as source2:
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "2026-04-07"
+            ws["T25"] = "Alice Smith"
+            ws["AC25"] = 8
+            wb.save(source1)
+
+            ws["AC25"] = 9
+            wb.save(source2)
+
+            self.assertNotEqual(
+                compute_dss_semantic_hash(source1.read_bytes()),
+                compute_dss_semantic_hash(source2.read_bytes()),
             )
 
     def test_parse_threshold_value_allows_blank(self) -> None:

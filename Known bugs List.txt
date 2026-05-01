@@ -1,3 +1,5 @@
 Delete entries from this list after you ask me directly if they are fixed and I confirm they are. 
 
 Currently, every time I reload the same three DSS files, it loads two that have not changed from cache, and it loads one that has not changed by processing it directly. I suspect something has broken the caching logic or the loading logic. Can you investigate? I see this: "192 daily records, 26 employees, 6 weeks, 3 DSS file(s), rules: Default, cache: 0 memory hit / 2 disk hit / 1 miss"
+
+When I use the checkbox filtering to filter for multiple employees, where some are one one DSS file and some are on another, and then sort by most recent week start or end, I notice that the rollup for the most recent whole crew sum for the -2 section will have employees from the -1 or -3 PF# in that section, and the section they should be in will only list the whole crew sum with no employees above it. - I confirm this is fixed.
