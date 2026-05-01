@@ -344,6 +344,31 @@ def weekly_rollup_sort_key(column: str, row: tuple[str, ...], descending: bool) 
     )
 
 
+def daily_rollup_sort_key(column: str, row: tuple[str, ...], descending: bool) -> tuple[object, ...]:
+    columns = {
+        "source_file": 0,
+        "work_date": 1,
+        "employee": 2,
+        "st": 3,
+        "ot": 4,
+        "dt": 5,
+        "total": 6,
+        "expanded": 7,
+        "row_type": 8,
+    }
+    primary_index = columns.get(column)
+    if primary_index is None:
+        return tuple()
+    row_type_rank = 1 if row[8] == "Crew Total" else 0
+    return (
+        directional_sort_key(row[primary_index], descending),
+        directional_sort_key(row[0], False),
+        directional_sort_key(row[1], descending if column == "work_date" else False),
+        row_type_rank,
+        directional_sort_key(row[2], False),
+    )
+
+
 @dataclass(frozen=True)
 class DailyRecord:
     source_path: Path
@@ -393,6 +418,35 @@ class WeeklyRollupRow:
 
 
 @dataclass(frozen=True)
+class DailySummaryRecord:
+    source_file: str
+    work_date: date
+    employee: str
+    st: float
+    ot: float
+    dt: float
+
+    @property
+    def total(self) -> float:
+        return round(self.st + self.ot + self.dt, 2)
+
+
+@dataclass(frozen=True)
+class DailyRollupRow:
+    source_file: str
+    work_date: date
+    employee: str
+    st: float
+    ot: float
+    dt: float
+    row_type: str
+
+    @property
+    def total(self) -> float:
+        return round(self.st + self.ot + self.dt, 2)
+
+
+@dataclass(frozen=True)
 class WeekTotalRow:
     week_start: date
     week_end: date
@@ -416,8 +470,11 @@ class TrackerData:
     employee_names: list[str]
     weekly_summary: list[WeeklyRecord]
     weekly_rollup: list[WeeklyRollupRow]
+    daily_summary: list[DailySummaryRecord]
+    daily_rollup: list[DailyRollupRow]
     week_totals: list[WeekTotalRow]
     combined_weekly_summary: list[WeeklyRecord]
+    combined_daily_summary: list[DailySummaryRecord]
     parse_warnings: list["SheetParseWarning"]
     workbook_health: list["WorkbookHealthItem"]
 
@@ -814,6 +871,16 @@ def load_table_layouts(config_path: Path) -> dict[str, dict]:
         column_widths = layout.get("column_widths", {})
         sort_column = str(layout.get("sort_column", "")).strip()
         sort_descending = bool(layout.get("sort_descending", False))
+        column_filters: dict[str, set[str]] = {}
+        raw_filters = layout.get("column_filters")
+        if isinstance(raw_filters, dict):
+            for column, values in raw_filters.items():
+                col_key = str(column).strip()
+                if not col_key or not isinstance(values, list):
+                    continue
+                allowed = {str(value) for value in values}
+                if allowed:
+                    column_filters[col_key] = allowed
         layouts[str(table_id)] = {
             "visible_columns": [str(column) for column in visible_columns if str(column).strip()],
             "column_widths": {
@@ -823,6 +890,7 @@ def load_table_layouts(config_path: Path) -> dict[str, dict]:
             },
             "sort_column": sort_column,
             "sort_descending": sort_descending,
+            "column_filters": column_filters,
         }
     return layouts
 
@@ -834,11 +902,12 @@ def save_table_layout(
     column_widths: dict[str, int],
     sort_column: str = "",
     sort_descending: bool = False,
+    column_filters: dict[str, set[str]] | None = None,
 ) -> None:
     payload = read_config_payload(config_path)
     raw_layouts = payload.get("table_layouts", {})
     layouts = raw_layouts if isinstance(raw_layouts, dict) else {}
-    layouts[table_id] = {
+    entry: dict[str, object] = {
         "visible_columns": list(visible_columns),
         "column_widths": {
             column: int(width)
@@ -848,6 +917,13 @@ def save_table_layout(
         "sort_column": sort_column,
         "sort_descending": sort_descending,
     }
+    if column_filters:
+        entry["column_filters"] = {
+            column: sorted(values, key=lambda item: item.casefold())
+            for column, values in column_filters.items()
+            if column.strip() and values
+        }
+    layouts[table_id] = entry
     payload["table_layouts"] = layouts
     config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
@@ -2118,6 +2194,30 @@ def aggregate_weekly(records: Iterable[DailyRecord], combine_sources: bool = Fal
     return results
 
 
+def aggregate_daily(records: Iterable[DailyRecord], combine_sources: bool = False) -> list[DailySummaryRecord]:
+    grouped: dict[tuple[str, date, str], dict[str, float]] = {}
+    for record in records:
+        source_file = "All DSSs" if combine_sources else record.source_file
+        bucket = grouped.setdefault((source_file, record.work_date, record.employee), {"ST": 0.0, "OT": 0.0, "DT": 0.0})
+        bucket["ST"] += record.st
+        bucket["OT"] += record.ot
+        bucket["DT"] += record.dt
+
+    results: list[DailySummaryRecord] = []
+    for (source_file, work_date, employee), totals in sorted(grouped.items(), key=lambda item: (item[0][1], item[0][0], item[0][2])):
+        results.append(
+            DailySummaryRecord(
+                source_file=source_file,
+                work_date=work_date,
+                employee=employee,
+                st=round(totals["ST"], 2),
+                ot=round(totals["OT"], 2),
+                dt=round(totals["DT"], 2),
+            )
+        )
+    return results
+
+
 def build_weekly_rollup(weekly_records: list[WeeklyRecord]) -> list[WeeklyRollupRow]:
     grouped: dict[tuple[str, date], list[WeeklyRecord]] = {}
     for record in weekly_records:
@@ -2151,6 +2251,46 @@ def build_weekly_rollup(weekly_records: list[WeeklyRecord]) -> list[WeeklyRollup
                 source_file=source_file,
                 week_start=week_start,
                 week_end=week_end,
+                employee="Whole Crew",
+                st=round(crew_st, 2),
+                ot=round(crew_ot, 2),
+                dt=round(crew_dt, 2),
+                row_type="Crew Total",
+            )
+        )
+    return rows
+
+
+def build_daily_rollup(daily_summary: list[DailySummaryRecord]) -> list[DailyRollupRow]:
+    grouped: dict[tuple[str, date], list[DailySummaryRecord]] = {}
+    for record in daily_summary:
+        grouped.setdefault((record.source_file, record.work_date), []).append(record)
+
+    rows: list[DailyRollupRow] = []
+    for source_file, work_date in sorted(grouped):
+        day_entries = sorted(grouped[(source_file, work_date)], key=lambda item: item.employee)
+        crew_st = 0.0
+        crew_ot = 0.0
+        crew_dt = 0.0
+        for record in day_entries:
+            rows.append(
+                DailyRollupRow(
+                    source_file=source_file,
+                    work_date=work_date,
+                    employee=record.employee,
+                    st=record.st,
+                    ot=record.ot,
+                    dt=record.dt,
+                    row_type="Employee",
+                )
+            )
+            crew_st += record.st
+            crew_ot += record.ot
+            crew_dt += record.dt
+        rows.append(
+            DailyRollupRow(
+                source_file=source_file,
+                work_date=work_date,
                 employee="Whole Crew",
                 st=round(crew_st, 2),
                 ot=round(crew_ot, 2),
@@ -2202,6 +2342,8 @@ def build_tracker_data_with_status(
         raise ValueError("No daily DSS records were found in sheets named with YYYY-MM-DD.")
     weekly_summary = aggregate_weekly(daily_records, combine_sources=False)
     combined_weekly_summary = aggregate_weekly(daily_records, combine_sources=True)
+    daily_summary = aggregate_daily(daily_records, combine_sources=False)
+    combined_daily_summary = aggregate_daily(daily_records, combine_sources=True)
     return TrackerData(
         source_paths=source_paths,
         file_hashes=file_hashes,
@@ -2212,8 +2354,11 @@ def build_tracker_data_with_status(
         employee_names=sorted({record.employee for record in daily_records}),
         weekly_summary=weekly_summary,
         weekly_rollup=build_weekly_rollup(weekly_summary),
+        daily_summary=daily_summary,
+        daily_rollup=build_daily_rollup(daily_summary),
         week_totals=build_week_totals(combined_weekly_summary),
         combined_weekly_summary=combined_weekly_summary,
+        combined_daily_summary=combined_daily_summary,
         parse_warnings=parse_warnings or [],
         workbook_health=workbook_health or [],
     )
@@ -2628,6 +2773,7 @@ class DataTable(ttk.Frame):
         layouts = load_table_layouts(self._config_path)
         layout = layouts.get(self._table_id)
         if not isinstance(layout, dict):
+            self._column_filters.clear()
             self._apply_default_sort()
             return
 
@@ -2648,6 +2794,16 @@ class DataTable(ttk.Frame):
             self.tree.set_sort(sort_column, bool(layout.get("sort_descending", False)))
         else:
             self._apply_default_sort()
+        self._column_filters.clear()
+        saved_filters = layout.get("column_filters", {})
+        if isinstance(saved_filters, dict):
+            for column, values in saved_filters.items():
+                if column not in self._all_columns:
+                    continue
+                if isinstance(values, set) and values:
+                    self._column_filters[column] = set(values)
+                elif isinstance(values, list) and values:
+                    self._column_filters[column] = {str(value) for value in values}
         self._apply_filters_and_render()
 
     def _apply_default_sort(self) -> None:
@@ -2670,6 +2826,11 @@ class DataTable(ttk.Frame):
         current_sort = self.tree.current_sort()
         sort_column = current_sort[0] if current_sort is not None else ""
         sort_descending = current_sort[1] if current_sort is not None else False
+        column_filters_payload = {
+            column: values
+            for column, values in self._column_filters.items()
+            if column in self._all_columns and values
+        }
         save_table_layout(
             self._config_path,
             self._table_id,
@@ -2677,6 +2838,7 @@ class DataTable(ttk.Frame):
             column_widths,
             sort_column=sort_column,
             sort_descending=sort_descending,
+            column_filters=column_filters_payload if column_filters_payload else None,
         )
 
     def _on_tree_button_release(self, _event=None) -> None:
@@ -2821,11 +2983,13 @@ class DataTable(ttk.Frame):
             self._column_filters[column] = selected_values
         self._apply_filters_and_render()
         self._close_filter_menu()
+        self.after_idle(self._save_layout)
 
     def _clear_column_filter(self, column: str) -> None:
         self._column_filters.pop(column, None)
         self._apply_filters_and_render()
         self._close_filter_menu()
+        self.after_idle(self._save_layout)
 
     def _close_filter_menu(self) -> None:
         if self._filter_menu is not None:
@@ -3518,6 +3682,16 @@ class DssHoursTrackerApp(tk.Tk):
             default_sort_descending=True,
             custom_sort_key=weekly_rollup_sort_key,
         )
+        self.daily_by_pf_table = DataTable(
+            self.summaries_notebook,
+            columns=["source_file", "work_date", "employee", "st", "ot", "dt", "total", "expanded", "row_type"],
+            headings=["Source File", "Date", "Employee", "ST", "OT", "DT", "Total", "Expanded Hours", "Row Type"],
+            table_id="daily_by_pf",
+            config_path=self.config_path,
+            default_sort_column="work_date",
+            default_sort_descending=True,
+            custom_sort_key=daily_rollup_sort_key,
+        )
         self.combined_weekly_summary_table = DataTable(
             self.summaries_notebook,
             columns=["week_start", "week_end", "employee", "st", "ot", "dt", "total", "expanded"],
@@ -3525,6 +3699,15 @@ class DssHoursTrackerApp(tk.Tk):
             table_id="combined_summary",
             config_path=self.config_path,
             default_sort_column="week_start",
+            default_sort_descending=True,
+        )
+        self.combined_daily_summary_table = DataTable(
+            self.summaries_notebook,
+            columns=["work_date", "employee", "st", "ot", "dt", "total", "expanded"],
+            headings=["Date", "Employee", "ST", "OT", "DT", "Total", "Expanded Hours"],
+            table_id="combined_summary_by_day",
+            config_path=self.config_path,
+            default_sort_column="work_date",
             default_sort_descending=True,
         )
         self.week_totals_table = DataTable(
@@ -3633,8 +3816,10 @@ class DssHoursTrackerApp(tk.Tk):
         self.group_notebook.add(self.settings_group, text="Settings")
 
         self._refresh_data_tabs()
-        self.summaries_notebook.add(self.weekly_rollup_table, text="Weekly Rollup")
-        self.summaries_notebook.add(self.combined_weekly_summary_table, text="Combined Summary")
+        self.summaries_notebook.add(self.weekly_rollup_table, text="Weekly by PF#")
+        self.summaries_notebook.add(self.daily_by_pf_table, text="Daily by PF#")
+        self.summaries_notebook.add(self.combined_weekly_summary_table, text="Combined Summary by Week")
+        self.summaries_notebook.add(self.combined_daily_summary_table, text="Combined Summary by Day")
         self.error_report_table.grid(row=1, column=0, sticky="nsew")
         self.reports_notebook.add(self.error_report_page, text="Error Report")
         self.reports_notebook.add(self.parse_warnings_table, text="Sheet Parse Warnings")
@@ -3718,7 +3903,7 @@ class DssHoursTrackerApp(tk.Tk):
 
         note = (
             "Enter weekly alert thresholds for this profile. Leave a field blank to disable that alert. "
-            "These rules apply to employee rows in Weekly Rollup and Combined Summary."
+            "These rules apply to employee rows in the Summaries tables (weekly and daily, per PF and combined)."
         )
         ttk.Label(self.rules_frame, text=note, wraplength=700, justify="left").grid(
             row=7, column=0, columnspan=5, sticky="w", pady=(12, 0)
@@ -3918,7 +4103,9 @@ class DssHoursTrackerApp(tk.Tk):
         return [
             self.daily_table,
             self.weekly_rollup_table,
+            self.daily_by_pf_table,
             self.combined_weekly_summary_table,
+            self.combined_daily_summary_table,
             self.week_totals_table,
             self.error_report_table,
             self.parse_warnings_table,
@@ -4479,7 +4666,9 @@ class DssHoursTrackerApp(tk.Tk):
             current_page = self.summaries_notebook.select()
             mapping = {
                 str(self.weekly_rollup_table): self.weekly_rollup_table,
+                str(self.daily_by_pf_table): self.daily_by_pf_table,
                 str(self.combined_weekly_summary_table): self.combined_weekly_summary_table,
+                str(self.combined_daily_summary_table): self.combined_daily_summary_table,
             }
             return mapping.get(current_page)
         if current_group == str(self.reports_group):
@@ -5180,7 +5369,9 @@ class DssHoursTrackerApp(tk.Tk):
     def _clear_all_views(self) -> None:
         self.daily_table.set_rows([])
         self.weekly_rollup_table.set_rows([])
+        self.daily_by_pf_table.set_rows([])
         self.combined_weekly_summary_table.set_rows([])
+        self.combined_daily_summary_table.set_rows([])
         self.week_totals_table.set_rows([])
         self.error_report_table.set_rows([])
         self.parse_warnings_table.set_rows([])
@@ -5320,8 +5511,18 @@ class DssHoursTrackerApp(tk.Tk):
                 and (record.row_type == "Crew Total" or record.employee in allowed_employees)
             )
         ]
+        filtered_daily_rollup = [
+            record for record in tracker_data.daily_rollup
+            if (
+                extract_pf_identifier(record.source_file) in selected_pfs
+                and (record.row_type == "Crew Total" or record.employee in allowed_employees)
+            )
+        ]
         filtered_combined_summary = [
             record for record in tracker_data.combined_weekly_summary if record.employee in allowed_employees
+        ]
+        filtered_combined_daily = [
+            record for record in tracker_data.combined_daily_summary if record.employee in allowed_employees
         ]
         filtered_week_totals = build_week_totals(filtered_combined_summary) if filtered_combined_summary else []
         filtered_source_files = {record.source_file for record in filtered_daily_records}
@@ -5371,6 +5572,28 @@ class DssHoursTrackerApp(tk.Tk):
                 weekly_rollup_tags.append(self._threshold_tags(record.st, record.ot, record.dt))
         self.weekly_rollup_table.set_rows(weekly_rollup_rows, weekly_rollup_tags)
 
+        daily_rollup_rows: list[tuple[str, ...]] = []
+        daily_rollup_tags: list[tuple[str, ...]] = []
+        for record in filtered_daily_rollup:
+            daily_rollup_rows.append(
+                (
+                    record.source_file,
+                    record.work_date.isoformat(),
+                    record.employee,
+                    fmt_hours(record.st),
+                    fmt_hours(record.ot),
+                    fmt_hours(record.dt),
+                    fmt_hours(record.total),
+                    fmt_hours(expanded_hours(record.st, record.ot, record.dt)),
+                    record.row_type,
+                )
+            )
+            if record.row_type == "Crew Total":
+                daily_rollup_tags.append(("crew_total",))
+            else:
+                daily_rollup_tags.append(self._threshold_tags(record.st, record.ot, record.dt))
+        self.daily_by_pf_table.set_rows(daily_rollup_rows, daily_rollup_tags)
+
         combined_summary_rows: list[tuple[str, ...]] = []
         combined_summary_tags: list[tuple[str, ...]] = []
         for record in filtered_combined_summary:
@@ -5388,6 +5611,23 @@ class DssHoursTrackerApp(tk.Tk):
             )
             combined_summary_tags.append(self._threshold_tags(record.st, record.ot, record.dt))
         self.combined_weekly_summary_table.set_rows(combined_summary_rows, combined_summary_tags)
+
+        combined_daily_rows: list[tuple[str, ...]] = []
+        combined_daily_tags: list[tuple[str, ...]] = []
+        for record in filtered_combined_daily:
+            combined_daily_rows.append(
+                (
+                    record.work_date.isoformat(),
+                    record.employee,
+                    fmt_hours(record.st),
+                    fmt_hours(record.ot),
+                    fmt_hours(record.dt),
+                    fmt_hours(record.total),
+                    fmt_hours(expanded_hours(record.st, record.ot, record.dt)),
+                )
+            )
+            combined_daily_tags.append(self._threshold_tags(record.st, record.ot, record.dt))
+        self.combined_daily_summary_table.set_rows(combined_daily_rows, combined_daily_tags)
 
         self.week_totals_table.set_rows(
             [

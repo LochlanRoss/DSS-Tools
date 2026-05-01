@@ -1,3 +1,12 @@
+Metadata-Version: 2.4
+Name: dss-hours-tracker
+Version: 0.1.0
+Summary: Desktop DSS labour-hour tracker
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: openpyxl<4,>=3.1
+Requires-Dist: pywin32>=306; platform_system == "Windows"
+
 # DSS Hours Tracker
 
 Desktop GUI for opening one or more DSS `.xlsx` workbooks, extracting labour hours from the protected daily sheets, and working with the results directly in the app.
@@ -49,10 +58,8 @@ The app uses grouped navigation with two tab rows:
     - `Daily Raw` (optional, can be hidden in Configuration)
     - `Week Totals`
   - `Summaries`
-    - `Weekly by PF#`
-    - `Daily by PF#`
-    - `Combined Summary by Week`
-    - `Combined Summary by Day`
+    - `Weekly Rollup`
+    - `Combined Summary`
   - `Reports`
     - `Error Report`
     - `Email Drafts`
@@ -68,17 +75,15 @@ The app uses grouped navigation with two tab rows:
 - Background loading keeps the UI responsive
 - Overall progress bar shows multi-DSS progress
 - `Cancel` can abort DSS loading and Outlook email sync
-- Same-file updates are skipped when the **DSS semantic hash** (dated sheets and `K25:AZ36` only) is unchanged
+- Same-file updates are skipped when the workbook hash is unchanged
 - Parsed DSS data is cached on disk for up to 7 days
-- Optional **GitHub release** update check; automatic download on unmetered Wi‑Fi; install prompt after download
 - Loaded DSS files are checked periodically in the background for changes
 - Revision sheets such as `R1` / `rev 2` override the non-revised sheet for the same date
 - Conditional highlighting uses saved job-specific formatting profiles
 - Table layouts persist per page:
   - shown/hidden columns
-  - column widths and order
+  - column widths
   - sort column and direction
-  - per-column header filter selections (where filters are used)
 
 ## Filtering
 
@@ -92,19 +97,14 @@ You can keep the filter popup open while selecting multiple employees. It closes
 
 The filter applies across the main data views and the email draft preview.
 
-## Summaries views
+## Weekly Views
 
-- `Weekly by PF#`
-  - one row per employee per source DSS (PF) per week
-  - includes `Whole Crew` total rows per PF per week
-- `Daily by PF#`
-  - one row per employee per source DSS per calendar day
-  - includes `Whole Crew` total rows per PF per day
-- `Combined Summary by Week`
-  - combines matching employee names across all loaded DSS files, aggregated by week
-- `Combined Summary by Day`
-  - same cross-file name matching, aggregated by calendar day
-- `Week Totals` (under **Data**)
+- `Weekly Rollup`
+  - one row per employee per source DSS per week
+  - includes `Whole Crew` total rows
+- `Combined Summary`
+  - combines matching employee names across all loaded DSS files
+- `Week Totals`
   - one row per week for whole-crew totals across the currently filtered result set
 
 ## Error Reporting
@@ -174,8 +174,6 @@ The `Configuration` page currently includes:
 - disable name typo notifications
 - check source DSS(s) frequency in minutes
 - show/hide the `Daily Raw` tab
-- enable automatic update checks against GitHub releases
-- optionally download release installers automatically on unmetered Wi‑Fi
 
 ### Maintenance Buttons
 

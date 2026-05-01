@@ -30,7 +30,7 @@ Small fixes and very short edits are intentionally omitted unless they materiall
 
 ### Bug Fixes
 - Fixed the weekly rollup cross-PF grouping bug when multi-employee filtering was combined with sorting by week.
-- The fix adds a section-aware custom sort path for the `Weekly Rollup` table so employee rows stay grouped with the correct PF/source-file crew-total row.
+- The fix adds a section-aware custom sort path for the weekly-by-PF rollup table so employee rows stay grouped with the correct PF/source-file crew-total row.
 
 ### Hash / Cache Improvements
 - Replaced the previous workbook-content hash preference with a DSS-semantic hash path.
@@ -41,7 +41,7 @@ Small fixes and very short edits are intentionally omitted unless they materiall
   - workbook metadata churn
   - non-dated sheets
   - changes outside the DSS-relevant range
-- This is intended to reduce false cache misses and false ìchangedî alerts caused by Excel/OneDrive autosave behavior.
+- This is intended to reduce false cache misses and false ùchangedù alerts caused by Excel/OneDrive autosave behavior.
 
 ### Safety / Source Workbook Audit
 - Reviewed source-workbook access paths in `dss_hours_tracker.py`.
@@ -66,7 +66,13 @@ Small fixes and very short edits are intentionally omitted unless they materiall
   - weekly rollup grouped sorting behavior
   - DSS semantic hashing behavior
 - Full unit suite passing after the above changes.
-- Current passing count: 54 tests.
+
+### Follow-up (same release cycle)
+
+- **Summaries:** added `Daily by PF#` and `Combined Summary by Day`; renamed tabs to `Weekly by PF#` and `Combined Summary by Week`. `TrackerData` now carries `daily_summary`, `daily_rollup`, and `combined_daily_summary` built beside the weekly model.
+- **Table layouts:** persisted `column_filters` in `table_layouts` JSON; restored on launch with the rest of each tableùs layout.
+- **`Feature request list.txt`:** converted to a markdown checklist with completed items checked.
+- Unit tests: added coverage for daily aggregation/rollup, daily rollup sort key, layout column-filter round-trip; **57** tests passing.
 
 ## Current Open Bugs
 These remain on `Known bugs List.txt` until explicitly confirmed fixed by the user.
@@ -76,9 +82,7 @@ These remain on `Known bugs List.txt` until explicitly confirmed fixed by the us
   - likely next area to investigate if still reproducible after the semantic hash update
 
 ## Active Feature Requests / Objectives
-- Make `Feature request list` into a checklist and mark completed items off there.
-- Persist active per-column header filter selections across launches.
-- Continue monitoring whether the new DSS-semantic hash fully resolves OneDrive/autosave false-change behavior.
+- Continue monitoring whether the DSS-semantic hash fully resolves OneDrive/autosave false-change behavior (see open bug note below).
 - Continue using this development log for medium and large features going forward.
 
 ## Handoff Notes

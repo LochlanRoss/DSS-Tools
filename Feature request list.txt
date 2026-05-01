@@ -1,19 +1,28 @@
-Please make this list into a checklist and check items off as they are completed.
+# Feature request checklist
 
-I want to implement automatic updates and version control for the installed version of the software. I want to check my github repo for updates, automatically download the updates if on wifi (and not a metered network) and offer to install when the update is downloaded. How can this be implemented.
+Working scratchpad: check items off when they are done.
 
-Are there any ways to make the hash check more robust against metadata that does not pertain to DSS content changes? How do I make the diff only check when cells actually change? This is tough on excel with onedrive autosave on, especially when people have the file open.
+- [x] Make this list into a checklist and check items off as they are completed.
+- [x] Automatic updates and version control: check GitHub for releases, download on unmetered Wi‑Fi, offer to install when the installer is ready.
+- [x] Make the workbook / cache hash more robust against non–DSS metadata churn (semantic hash over preferred dated sheets and `K25:AZ36` only).
+- [x] Click and drag columns in any viewer to reorder them.
+- [x] Per-column header filtering (checkbox list with check all / uncheck all) without losing one-click header sort (sort ascending/descending in the same header menu).
+- [x] Persist column visibility, widths, sort state, column order, and per-column header filter selections across launches.
+- [x] Error Report: add a button to check name typos manually.
+- [x] Name typos popup: note that the warning can be enabled or disabled in settings.
+- [x] Add a generalized UI standardization document for future agent handoffs on other projects (`UI Standardization Notes.md`).
+- [x] Summaries tab: add **Daily by PF#**; rename weekly view to **Weekly by PF#**; rename combined weekly view to **Combined Summary by Week**; add **Combined Summary by Day**.
 
-I want to be able to click and drag columns in any viewer to re-order them.
+-I want to check a new cell for errors: I want to register a sheet parsing error whenever a specific cell which indicates whether a DSS is a rev or not does not match the sheet name. That cell address is the same for every file and every sheet, its address is: AZ2
 
-I want to add sorting to each header. I can currently click the column headers but they do nothing. I want them to turn into a clickable dropdown that has checkboxes next to each unique entry in the list (scrollbar if necessary) with an option to check all and uncheck all at the top of the page. I do not want to lose the ability to sort the lists with a click as they are now, can we add an option in the dropdown that just switches the order they're sorted in (newest to oldest, alphabetical, reverse alphabetical, however each row is sorted by default when clicked, put that option in the dropdown)
+-Whenever a sheet parse error is registered, I want the sheet parse error to show up in the list in the same font colour/highlight colour as the error reports do. 
 
-Please ensure the column visibility, width, and any other UI changes get persisted to disk and loaded on the next launch.
+-Whenever a sheet parse error or an error report error is logged, I want the tab for that page to turn the same colour of formatting (either the error report tab or the sheet parse warnings tab). Whenever either of those tabs turn red, I want the parent tab to turn red (the whole reports upper tab). I want them to stay red until cleared. By cleared I mean the data is updated and no longer has the problem in it.
 
-In the error report window, please add a button for checking name typos manually. 
+-I want to verify that the rev up ignore previous rev logic works for revs greater than one, and also works for different permutations and combinations of "rev 1" " r1" "r 1" "r-1" "r.1" "Revision 1" and so on. 
 
-In the name typos popup, please add a note that this can be enabled or disabled in settings
+-Whenever I doubleclick a source file in any list, I would like to open that source file.
 
-Please create a document that lists all UI standardizations that don't necessarily pertain to specifics of this project ("display PF column first" or something), but pertain generally to the creation of a useful UI (tabbed pages, a settings page, diagnostic settings, options to change paths in settings, persisten column width and order, etc). The purpose of this document would be for agent handoffs in future projects for unrelated purposes, which is why it needs to be generalized.
+-I want to be able to click and drag any column in any list to re-order the columns. I want the column order to persist as though it was a user setting and reset whenever a reset to default that is applicable to it resets. I want to be able to either A) see the column live as I drag it or B) see some kind of indicator for which two columns the dragged will land between. 
 
-I want to expand on the summaries tab. I currently have a weekly rollup which displays each crew-members hours by summed by week and by PF#. I would like to expand this functionality to a new "Daily by PF#" tab. I want to rename "weekly rollup" to "Weekly by PF#". I want to change the name of the combined summary tab from "Combined Summary" to "Combined Summary by Week", and add a new tab called "Combined Summary by Day"
+-Can the hashing logic be updated to improve the speed of refreshing? Right is it accurate to say we only hash the whole file's sum of each sheet's area of interest? If so, can we continue to hash the whole file but also now store the sheet hash? If we do that we can change the behaviour of the update view button to only reload specific sheets that change instead of the whole workbook/file. 

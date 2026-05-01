@@ -11,6 +11,7 @@ from unittest import mock
 from openpyxl import Workbook
 
 from dss_hours_tracker import (
+    aggregate_daily,
     aggregate_weekly,
     AppSettings,
     build_email_draft_requests,
@@ -21,6 +22,7 @@ from dss_hours_tracker import (
     choose_release_checksum_asset,
     choose_release_installer_asset,
     build_permission_denied_message,
+    build_daily_rollup,
     build_week_totals,
     build_weekly_rollup,
     directional_sort_key,
@@ -66,6 +68,7 @@ from dss_hours_tracker import (
     parse_sheet_revision,
     parse_daily_records,
     parse_threshold_value,
+    daily_rollup_sort_key,
     weekly_rollup_sort_key,
     purge_stale_cache,
     remove_config_keys,
@@ -235,6 +238,34 @@ class DssHoursTrackerTests(unittest.TestCase):
             self.assertEqual(len(totals), 1)
             self.assertEqual(totals[0].total, 37.0)
 
+    def test_daily_rollup_adds_whole_crew_per_day(self) -> None:
+        with self.workspace_files("sample") as source:
+            self.build_source_workbook(source)
+
+            daily = aggregate_daily(parse_daily_records(source))
+            rollup = build_daily_rollup(daily)
+            crew_rows = [row for row in rollup if row.row_type == "Crew Total"]
+            self.assertEqual(len(crew_rows), 2)
+            self.assertTrue(all(row.employee == "Whole Crew" for row in crew_rows))
+            self.assertEqual(sum(row.total for row in crew_rows), sum(row.total for row in daily))
+
+    def test_daily_rollup_sort_key_keeps_sections_grouped(self) -> None:
+        rows = [
+            ("PF26024-2 Electrical", "2026-04-07", "Whole Crew", "255.5", "30", "60", "345.5", "420.5", "Crew Total"),
+            ("PF26024-1 Instrumentation", "2026-04-07", "Grady Redden", "50", "0", "6", "56", "62", "Employee"),
+            ("PF26024-2 Electrical", "2026-04-07", "Dexter Olshewski", "10", "0", "4", "14", "18", "Employee"),
+            ("PF26024-1 Instrumentation", "2026-04-07", "Chuck Ehr", "50", "0", "6", "56", "62", "Employee"),
+            ("PF26024-1 Instrumentation", "2026-04-07", "Whole Crew", "288", "0", "32.5", "320.5", "353", "Crew Total"),
+        ]
+        sorted_rows = sorted(rows, key=lambda row: daily_rollup_sort_key("work_date", row, True))
+        self.assertEqual(sorted_rows[0][0], "PF26024-1 Instrumentation")
+        self.assertEqual(sorted_rows[0][2], "Chuck Ehr")
+        self.assertEqual(sorted_rows[1][0], "PF26024-1 Instrumentation")
+        self.assertEqual(sorted_rows[2][2], "Whole Crew")
+        self.assertEqual(sorted_rows[3][0], "PF26024-2 Electrical")
+        self.assertEqual(sorted_rows[3][2], "Dexter Olshewski")
+        self.assertEqual(sorted_rows[4][2], "Whole Crew")
+
     def test_weekly_rollup_sort_key_keeps_sections_grouped(self) -> None:
         rows = [
             ("PF26024-2 Electrical", "2026-04-27", "2026-05-03", "Whole Crew", "255.5", "30", "60", "345.5", "420.5", "Crew Total"),
@@ -262,8 +293,11 @@ class DssHoursTrackerTests(unittest.TestCase):
             self.assertEqual(tracker_data.employee_names, ["Alice Smith", "Bob Jones"])
             self.assertEqual(len(tracker_data.weekly_summary), 2)
             self.assertEqual(len(tracker_data.weekly_rollup), 3)
+            self.assertEqual(len(tracker_data.daily_summary), 3)
+            self.assertEqual(len(tracker_data.daily_rollup), 5)
             self.assertEqual(len(tracker_data.week_totals), 1)
             self.assertEqual(len(tracker_data.combined_weekly_summary), 2)
+            self.assertEqual(len(tracker_data.combined_daily_summary), 3)
 
     def test_load_tracker_data_combines_multiple_dsss(self) -> None:
         with self.workspace_files("source1") as source1, self.workspace_files("source2") as source2, self.workspace_dir("cache") as cache_dir:
@@ -276,6 +310,9 @@ class DssHoursTrackerTests(unittest.TestCase):
             self.assertEqual(len(tracker_data.daily_records), 5)
             self.assertEqual(len(tracker_data.weekly_summary), 4)
             self.assertEqual(len(tracker_data.combined_weekly_summary), 3)
+            self.assertEqual(len(tracker_data.daily_summary), 5)
+            self.assertEqual(len(tracker_data.daily_rollup), 8)
+            self.assertEqual(len(tracker_data.combined_daily_summary), 5)
 
             alice = next(record for record in tracker_data.combined_weekly_summary if record.employee == "Alice Smith")
             self.assertEqual(alice.st, 25.0)
@@ -637,6 +674,21 @@ class DssHoursTrackerTests(unittest.TestCase):
             self.assertEqual(layouts["weekly_summary"]["column_widths"]["employee"], 240)
             self.assertEqual(layouts["weekly_summary"]["sort_column"], "week_start")
             self.assertTrue(layouts["weekly_summary"]["sort_descending"])
+            self.assertEqual(layouts["weekly_summary"].get("column_filters", {}), {})
+
+    def test_table_layout_column_filters_round_trip(self) -> None:
+        with self.workspace_json("table_layout_cf") as path:
+            save_table_layout(
+                path,
+                "t_filter",
+                ["employee", "st"],
+                {"employee": 200, "st": 80},
+                sort_column="employee",
+                sort_descending=False,
+                column_filters={"employee": {"Alice Smith", "Bob Jones"}},
+            )
+            layouts = load_table_layouts(path)
+            self.assertEqual(layouts["t_filter"]["column_filters"], {"employee": {"Alice Smith", "Bob Jones"}})
 
     def test_app_settings_round_trip(self) -> None:
         with self.workspace_json("app_settings") as path:
