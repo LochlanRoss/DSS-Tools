@@ -562,8 +562,6 @@ class UiThemeColors:
     tooltip_foreground: str = "#334155"
     reports_outline_background: str = "#fbcfe8"
     reports_outline_foreground: str = "#be123c"
-    top_toolbar_background: str = "#141414"
-    top_toolbar_foreground: str = "#f8fafc"
     table_background: str = "#f4f4f5"
     content_chrome_background: str = "#ffffff"
 
@@ -578,8 +576,6 @@ UI_THEME_CONFIG_FIELDS: tuple[tuple[str, str], ...] = (
     ("Crew total row — text", "crew_total_foreground"),
     ("Tooltip — background", "tooltip_background"),
     ("Tooltip — text", "tooltip_foreground"),
-    ("Top toolbar + progress row — background", "top_toolbar_background"),
-    ("Top toolbar + progress row — text", "top_toolbar_foreground"),
     ("Main content area — background", "content_chrome_background"),
     ("Table — cell background", "table_background"),
 )
@@ -663,8 +659,6 @@ def parse_ui_theme_payload(raw: object, defaults: UiThemeColors = DEFAULT_UI_THE
         "tooltip_foreground",
         "reports_outline_background",
         "reports_outline_foreground",
-        "top_toolbar_background",
-        "top_toolbar_foreground",
         "table_background",
         "content_chrome_background",
     ):
@@ -4460,103 +4454,63 @@ class DssHoursTrackerApp(tk.Tk):
         theme = self.app_settings.ui_theme
         configure_dss_table_treeview_style(self, theme)
 
-        self._shell_frame = tk.Frame(self, bg=theme.content_chrome_background, highlightthickness=0)
+        content_bg = theme.content_chrome_background
+        self._shell_frame = tk.Frame(self, bg=content_bg, highlightthickness=0)
         self._shell_frame.pack(fill="both", expand=True)
 
-        tb = theme.top_toolbar_background
-        tfg = theme.top_toolbar_foreground
-        btn_bg = lighten_hex_color(tb, 28)
-        btn_active = lighten_hex_color(tb, 44)
+        self._main_chrome_frame = tk.Frame(self._shell_frame, bg=content_bg, highlightthickness=0)
+        self._main_chrome_frame.pack(fill="both", expand=True, padx=12, pady=12)
 
-        self._chrome_frame = tk.Frame(self._shell_frame, bg=tb, highlightthickness=0)
-        self._chrome_frame.pack(fill="x", padx=12, pady=(12, 0))
+        top = ttk.Frame(self._main_chrome_frame)
+        top.pack(fill="x", pady=(0, 12))
 
-        self._toolbar_top_row = tk.Frame(self._chrome_frame, bg=tb, highlightthickness=0)
-        self._toolbar_top_row.pack(fill="x")
-        top = self._toolbar_top_row
-
-        def _toolbar_button(master: tk.Misc, **kw: object) -> tk.Button:
-            return tk.Button(
-                master,
-                relief=tk.FLAT,
-                bd=0,
-                highlightthickness=0,
-                bg=btn_bg,
-                fg=tfg,
-                activebackground=btn_active,
-                activeforeground=tfg,
-                disabledforeground="#64748b",
-                cursor="hand2",
-                padx=10,
-                pady=4,
-                **kw,
-            )
-
-        self.add_dss_button = _toolbar_button(top, text="Add DSS Workbook(s)", command=self.add_sources)
+        self.add_dss_button = ttk.Button(top, text="Add DSS Workbook(s)", command=self.add_sources)
         self.add_dss_button.pack(side="left")
-        self.remove_button = _toolbar_button(top, text="Remove DSS(s)", command=self.remove_sources, state="disabled")
+        self.remove_button = ttk.Button(top, text="Remove DSS(s)", command=self.remove_sources, state="disabled")
         self.remove_button.pack(side="left", padx=(8, 0))
-        self.reload_button = _toolbar_button(top, text="Update View", command=self.reload_source, state="disabled")
+        self.reload_button = ttk.Button(top, text="Update View", command=self.reload_source, state="disabled")
         self.reload_button.pack(side="left", padx=(8, 0))
-        self.export_button = _toolbar_button(top, text="Export Current View", command=self.export_current_view)
+        self.export_button = ttk.Button(top, text="Export Current View", command=self.export_current_view)
         self.export_button.pack(side="left", padx=(8, 0))
-        self._filter_caption_label = tk.Label(top, text="Filter", bg=tb, fg=tfg)
-        self._filter_caption_label.pack(side="left", padx=(12, 4))
-        self.filter_button = _toolbar_button(top, textvariable=self.filter_button_var, width=22, command=self._toggle_filter_popup)
+        ttk.Label(top, text="Filter").pack(side="left", padx=(12, 4))
+        self.filter_button = ttk.Button(top, textvariable=self.filter_button_var, width=28, command=self._toggle_filter_popup)
         self.filter_button.pack(side="left")
-        self._pf_caption_label = tk.Label(top, text="PF", bg=tb, fg=tfg)
-        self._pf_caption_label.pack(side="left", padx=(8, 4))
-        self.pf_filter_button = _toolbar_button(
+        ttk.Label(top, text="PF").pack(side="left", padx=(8, 4))
+        self.pf_filter_button = ttk.Button(
             top,
             textvariable=self.pf_filter_button_var,
-            width=14,
+            width=18,
             command=self._toggle_pf_filter_popup,
             state="disabled",
         )
         self.pf_filter_button.pack(side="left")
-        self.source_label = tk.Label(top, text="No workbook loaded", anchor="w", bg=tb, fg=tfg)
+        self.source_label = ttk.Label(top, text="No workbook loaded", anchor="w")
         self.source_label.pack(side="left", fill="x", expand=True, padx=(12, 0))
-        self.loading_label = tk.Label(top, text="", anchor="e", bg=tb, fg=tfg)
+        self.loading_label = ttk.Label(top, text="", anchor="e")
         self.loading_label.pack(side="right")
 
-        self._toolbar_stats_row = tk.Frame(self._chrome_frame, bg=tb, highlightthickness=0)
-        self._toolbar_stats_row.pack(fill="x", pady=(6, 8))
-        stats_row = self._toolbar_stats_row
-        self.stats_label = tk.Label(
-            stats_row,
+        stats = ttk.Frame(self._main_chrome_frame)
+        stats.pack(fill="x", pady=(0, 12))
+        self.stats_label = ttk.Label(
+            stats,
             text="Load a DSS workbook to view daily and weekly labour summaries.",
-            anchor="w",
-            justify="left",
-            bg=tb,
-            fg=tfg,
             wraplength=520,
+            justify="left",
         )
         self.stats_label.pack(side="left", fill="x", expand=True)
 
-        self._progress_cluster = tk.Frame(stats_row, bg=tb, highlightthickness=0)
-        self._progress_cluster.pack(side="right")
-        progress_cluster = self._progress_cluster
-        self.quickload_hint_label = tk.Label(
-            progress_cluster,
-            text="",
-            bg=tb,
-            fg=tfg,
-            anchor="e",
-            justify="right",
-            wraplength=220,
-        )
+        progress_cluster = ttk.Frame(stats)
+        progress_cluster.pack(side="right")
+        self.quickload_hint_label = ttk.Label(progress_cluster, text="", wraplength=220, justify="right")
         self.quickload_hint_label.pack(side="left", padx=(0, 8))
         self.progress_bar = ttk.Progressbar(
             progress_cluster, variable=self.progress_var, maximum=100, mode="determinate", length=240
         )
         self.progress_bar.pack(side="left")
-        self.cancel_button = _toolbar_button(progress_cluster, text="Cancel", command=self._cancel_current_action, state="disabled")
+        self.cancel_button = ttk.Button(progress_cluster, text="Cancel", command=self._cancel_current_action, state="disabled")
         self.cancel_button.pack(side="left", padx=(8, 0))
 
-        self._notebook_shell = tk.Frame(self._shell_frame, bg=theme.content_chrome_background, highlightthickness=0)
-        self._notebook_shell.pack(fill="both", expand=True, padx=12, pady=(8, 12))
-
-        self.group_notebook = ttk.Notebook(self._notebook_shell)
+        self.group_notebook = ttk.Notebook(self._main_chrome_frame)
         self.group_notebook.pack(fill="both", expand=True)
 
         self.data_group = ttk.Frame(self.group_notebook, padding=6)
@@ -4957,7 +4911,7 @@ class DssHoursTrackerApp(tk.Tk):
         ttk.Label(
             appearance,
             text="Use #RRGGBB hex (optional short form #RGB). Applies to table row highlights, crew totals, tooltips, "
-            "the top toolbar and progress row, main window chrome, table cell backgrounds, and alert tint on report tabs.",
+            "main window chrome, table cell backgrounds, and alert tint on report tabs.",
             wraplength=680,
             justify="left",
         ).grid(row=len(UI_THEME_CONFIG_FIELDS) + 1, column=0, columnspan=2, sticky="w", pady=(8, 0))
@@ -5008,7 +4962,7 @@ class DssHoursTrackerApp(tk.Tk):
         note = (
             "These settings control background notifications, how often the app checks loaded DSS files for changes, "
             "whether Daily Raw is visible, quick re-open of the last DSS set, the cancel hotkey for that load, "
-            "how the app checks GitHub for downloadable updates, and optional UI colours (toolbar, tables, alerts)."
+            "how the app checks GitHub for downloadable updates, and optional UI colours (tables, chrome, alerts)."
         )
         ttk.Label(self.config_frame, text=note, wraplength=700, justify="left").grid(
             row=12, column=0, columnspan=2, sticky="w", pady=(12, 0)
@@ -5162,52 +5116,17 @@ class DssHoursTrackerApp(tk.Tk):
 
     def _apply_main_chrome_theme(self) -> None:
         theme = self.app_settings.ui_theme
+        content_bg = theme.content_chrome_background
         try:
-            self.configure(bg=theme.content_chrome_background)
+            self.configure(bg=content_bg)
         except tk.TclError:
             pass
-        tb = theme.top_toolbar_background
-        tfg = theme.top_toolbar_foreground
-        btn_bg = lighten_hex_color(tb, 28)
-        btn_active = lighten_hex_color(tb, 44)
-        content_bg = theme.content_chrome_background
         shell = getattr(self, "_shell_frame", None)
         if isinstance(shell, tk.Frame):
             shell.configure(bg=content_bg)
-        nb_shell = getattr(self, "_notebook_shell", None)
-        if isinstance(nb_shell, tk.Frame):
-            nb_shell.configure(bg=content_bg)
-        chrome = getattr(self, "_chrome_frame", None)
-        if isinstance(chrome, tk.Frame):
-            chrome.configure(bg=tb)
-        for row in (
-            getattr(self, "_toolbar_top_row", None),
-            getattr(self, "_toolbar_stats_row", None),
-            getattr(self, "_progress_cluster", None),
-        ):
-            if isinstance(row, tk.Frame):
-                row.configure(bg=tb)
-        for w in (
-            getattr(self, "_filter_caption_label", None),
-            getattr(self, "_pf_caption_label", None),
-            self.source_label,
-            self.loading_label,
-            self.stats_label,
-            self.quickload_hint_label,
-        ):
-            if isinstance(w, tk.Label):
-                w.configure(bg=tb, fg=tfg)
-        for w in (
-            self.add_dss_button,
-            self.remove_button,
-            self.reload_button,
-            self.export_button,
-            self.filter_button,
-            self.pf_filter_button,
-            self.cancel_button,
-        ):
-            if isinstance(w, tk.Button):
-                w.configure(bg=btn_bg, fg=tfg, activebackground=btn_active, activeforeground=tfg, disabledforeground="#64748b")
+        main_chrome = getattr(self, "_main_chrome_frame", None)
+        if isinstance(main_chrome, tk.Frame):
+            main_chrome.configure(bg=content_bg)
         self._refresh_quickload_hint_label()
 
     def _reload_defaults_into_ui(self) -> None:
@@ -6946,17 +6865,12 @@ class DssHoursTrackerApp(tk.Tk):
         return None
 
     def _refresh_quickload_hint_label(self) -> None:
-        theme = self.app_settings.ui_theme
-        tb = theme.top_toolbar_background
-        tfg = theme.top_toolbar_foreground
         if self._is_loading and self._quickload_session:
             self.quickload_hint_label.configure(
-                text="Quick load — you can turn this off under Settings → Configuration.",
-                bg=tb,
-                fg=tfg,
+                text="Quick load — you can turn this off under Settings → Configuration."
             )
         else:
-            self.quickload_hint_label.configure(text="", bg=tb, fg=tfg)
+            self.quickload_hint_label.configure(text="")
 
     def _open_quickload_hotkey_capture(self) -> None:
         dialog = tk.Toplevel(self)

@@ -11,10 +11,10 @@ Small fixes and very short edits are intentionally omitted unless they materiall
 
 ### Main-window chrome, cache clear, reports tabs, toolbar UX
 
-- **Clear Cached DSSs** now also clears in-memory reuse flags (`file_hashes`, `reused_paths`, cache status ? Miss) for the loaded set so stats and the next **Update View** do not report stale memory hits after disk cache deletion (`tracker_data_invalidated_for_cache_clear`).
+- **Clear Cached DSSs** now also clears in-memory reuse flags (`file_hashes`, `reused_paths`, cache status to Miss) for the loaded set so stats and the next **Update View** do not report stale memory hits after disk cache deletion (`tracker_data_invalidated_for_cache_clear`).
 - **Open DSS** removed; a single **Add DSS Workbook(s)** control always merges paths; **Remove DSS(s)** clears sources as before.
 - **Reports alerts:** dropped the pink outline frame; Error Report / Sheet Parse Warnings / parent **Reports** tabs show a left **swatch** in the alert-row background colour (PhotoImage stripe) while keeping the `(!)` labels.
-- **Toolbar row:** hint sits left of the progress bar; **Cancel** aligns on the same row as the bar; dark themed toolbar + progress strip with light text (`UiThemeColors` **top_toolbar_***, **table_background**, **content_chrome_background**); Configuration Appearance lists those fields with **PickÖ** beside each hex entry; **Application version** line on Configuration.
+- **Toolbar row:** hint sits left of the progress bar; **Cancel** aligns on the same row as the bar; standard ttk toolbar and progress row (no dark strip) (`UiThemeColors` **table_background**, **content_chrome_background**); Configuration Appearance lists those fields with **Pickù** beside each hex entry; **Application version** line on Configuration.
 - Shared **`DssTable.Treeview`** style for table backgrounds; word-wrap styles copy table colours.
 
 ### Test layout: fast default vs slow integration

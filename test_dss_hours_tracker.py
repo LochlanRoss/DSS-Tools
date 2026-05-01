@@ -388,7 +388,6 @@ class DssHoursTrackerTests(DssHoursTrackerFixtures):
         merged = parse_ui_theme_payload({})
         self.assertEqual(merged.table_background, DEFAULT_UI_THEME.table_background)
         self.assertEqual(merged.content_chrome_background, DEFAULT_UI_THEME.content_chrome_background)
-        self.assertEqual(merged.top_toolbar_background, DEFAULT_UI_THEME.top_toolbar_background)
 
     def test_tracker_data_invalidated_for_cache_clear(self) -> None:
         p = Path("fixture.xlsx")

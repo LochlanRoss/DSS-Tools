@@ -203,7 +203,7 @@ The `Configuration` page currently includes:
 - enable automatic update checks against GitHub releases
 - optionally download release installers automatically on unmetered Wi‑Fi
 - **Application version** line (same value as the built-in / frozen version used for updates)
-- **Appearance:** configurable `#RRGGBB` colours (with **Pick…** next to each hex field) for alert rows, crew totals, tooltips, the **top toolbar + progress row**, **main content background**, and **table cell background**; report tabs use the alert-row tint when issues exist; **Reset colours to sample defaults** restores the built-in palette
+- **Appearance:** configurable `#RRGGBB` colours (with **Pick…** next to each hex field) for alert rows, crew totals, tooltips, **main content background**, and **table cell background**; report tabs use the alert-row tint when issues exist; **Reset colours to sample defaults** restores the built-in palette
 
 ### Maintenance Buttons
 
