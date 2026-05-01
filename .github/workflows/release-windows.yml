@@ -1,11 +1,12 @@
 # Build a single-file Windows .exe with PyInstaller and publish GitHub Release assets.
 #
-# Trigger A — recommended: push an annotated tag (must match pyproject / release notes intent):
-#   git tag -a v0.2.0 -m "Release 0.2.0"
-#   git push origin v0.2.0
+# Trigger A — recommended: push an annotated version tag (MAJOR.MINOR.PATCH, optional leading v):
+#   git tag -a 0.2.0 -m "Release 0.2.0"
+#   git push origin 0.2.0
+#   (v0.2.0 still matches if you prefer a v-prefix.)
 #
 # Trigger B — rebuild an existing tag (after fixing the workflow, etc.):
-#   Actions → "Release Windows build" → Run workflow → enter the same tag (e.g. v0.2.0).
+#   Actions → "Release Windows build" → Run workflow → enter the same tag (e.g. 0.2.0 or v0.2.0).
 #
 # Requires: Settings → Actions → General → Workflow permissions → "Read and write permissions"
 # (so the GITHUB_TOKEN can upload release assets).
@@ -15,11 +16,13 @@ name: Release Windows build
 on:
   push:
     tags:
-      - "v*"
+      # Semantic version tags only (no arbitrary "v*" names like vbeta).
+      - "[0-9]*.[0-9]*.[0-9]*"
+      - "v[0-9]*.[0-9]*.[0-9]*"
   workflow_dispatch:
     inputs:
       version_tag:
-        description: "Existing Git tag to checkout and attach (e.g. v0.2.0)"
+        description: "Existing Git tag to checkout and attach (e.g. 0.2.0 or v0.2.0)"
         required: true
         type: string
 
@@ -80,15 +83,34 @@ jobs:
       - name: PyInstaller (one file)
         run: pyinstaller --noconsole --onefile --name DSSHoursTracker --collect-all pywin32 --add-data "dss_app_version.txt;." dss_hours_tracker.py
 
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Compile installer (Inno Setup wizard)
+        shell: pwsh
+        env:
+          MY_VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          $iscc = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path -LiteralPath $iscc)) {
+            $iscc = Join-Path $env:ProgramFiles "Inno Setup 6\ISCC.exe"
+          }
+          if (-not (Test-Path -LiteralPath $iscc)) { throw "ISCC.exe not found after Inno Setup install." }
+          $iss = Join-Path $env:GITHUB_WORKSPACE "installer\DSSHoursTracker.iss"
+          & $iscc /DMyAppVersion=$env:MY_VERSION $iss
+          Get-Item (Join-Path $env:GITHUB_WORKSPACE "dist\DSSHoursTrackerSetup.exe") | Format-List *
+
       - name: Write checksums.txt for in-app verification
         shell: python
         run: |
           import hashlib
           from pathlib import Path
-          exe = Path("dist") / "DSSHoursTracker.exe"
-          digest = hashlib.sha256(exe.read_bytes()).hexdigest()
+          setup_exe = Path("dist") / "DSSHoursTrackerSetup.exe"
+          if not setup_exe.is_file():
+              raise SystemExit(f"Missing installer: {setup_exe}")
+          digest = hashlib.sha256(setup_exe.read_bytes()).hexdigest()
           Path("checksums.txt").write_text(
-              f"{digest}  *{exe.name}\n",
+              f"{digest}  *{setup_exe.name}\n",
               encoding="ascii",
               newline="\n",
           )
@@ -102,5 +124,5 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
-            dist/DSSHoursTracker.exe
+            dist/DSSHoursTrackerSetup.exe
             checksums.txt

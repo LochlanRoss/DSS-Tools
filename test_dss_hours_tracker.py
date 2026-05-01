@@ -51,6 +51,9 @@ from dss_hours_tracker import (
     load_app_settings,
     normalize_ui_hex_color,
     parse_ui_theme_payload,
+    DailyRecord,
+    build_tracker_data_with_status,
+    tracker_data_invalidated_for_cache_clear,
     load_employee_emails,
     load_employee_groups,
     load_table_layouts,
@@ -380,6 +383,38 @@ class DssHoursTrackerTests(DssHoursTrackerFixtures):
         merged = parse_ui_theme_payload({"alert_row_background": "#001122", "tooltip_foreground": "not-a-colour"})
         self.assertEqual(merged.alert_row_background, "#001122")
         self.assertEqual(merged.tooltip_foreground, DEFAULT_UI_THEME.tooltip_foreground)
+
+    def test_parse_ui_theme_payload_includes_chrome_fields(self) -> None:
+        merged = parse_ui_theme_payload({})
+        self.assertEqual(merged.table_background, DEFAULT_UI_THEME.table_background)
+        self.assertEqual(merged.content_chrome_background, DEFAULT_UI_THEME.content_chrome_background)
+        self.assertEqual(merged.top_toolbar_background, DEFAULT_UI_THEME.top_toolbar_background)
+
+    def test_tracker_data_invalidated_for_cache_clear(self) -> None:
+        p = Path("fixture.xlsx")
+        rec = DailyRecord(
+            source_path=p,
+            source_file="fixture.xlsx",
+            work_date=date(2026, 1, 2),
+            source_sheet="2026-01-02",
+            employee="Test",
+            st=1.0,
+            ot=0.0,
+            dt=0.0,
+            source_ranges="",
+        )
+        data = build_tracker_data_with_status(
+            [p],
+            {p: "hash1"},
+            [p],
+            [],
+            [rec],
+            cache_status_by_path={p: "Memory Hit"},
+        )
+        cleared = tracker_data_invalidated_for_cache_clear(data)
+        self.assertEqual(cleared.file_hashes, {})
+        self.assertEqual(cleared.reused_paths, [])
+        self.assertEqual(cleared.cache_status_by_path.get(p), "Miss")
 
     def test_discover_app_version_env_override(self) -> None:
         import dss_hours_tracker as m

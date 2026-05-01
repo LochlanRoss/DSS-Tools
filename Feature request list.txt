@@ -41,12 +41,16 @@ Working scratchpad: check items off when they are done.
 
 - [x] **Word wrap (off) / (on)** toggle per `DataTable` (toolbar); wraps cell text to column width with newlines, increases Treeview row height via a per-table style so wrapped lines are visible; double-click source strips newlines before opening.
 
-- When I click the clear cached DSS button, it does not clear memory hits, it only clears stored data. Can you dump the memory as well?
+- [x] When I click the clear cached DSS button, it does not clear memory hits, it only clears stored data. Can you dump the memory as well?
 
-- I want to merge the funcitonality of the open DSS workbooks and add DSSs buttons. Currenly the open DSS workbooks clears whats open and opens new ones. Add DSSs adds to the existing open books. Tests with users have indicated this is unclear. I want to effectively only have the Add DSSs button so this only ever adds workbooks, and simply count on the remove DSSs button to clear when the user wants to
+- [x] I want to merge the funcitonality of the open DSS workbooks and add DSSs buttons. Currenly the open DSS workbooks clears whats open and opens new ones. Add DSSs adds to the existing open books. Tests with users have indicated this is unclear. I want to effectively only have the Add DSSs button so this only ever adds workbooks, and simply count on the remove DSSs button to clear when the user wants to
 
-- Right now when an error exists in either the error report or sheet parse warnings tabs, an exclamation point appears in their tab names, as well as their parent, and only the window around them changes the colour of its borders. I don't want to change the colour of this border. I want the tabs themselves (which are currently grey) to change to the same colour red as the error report listing red. 
+- [x] Right now when an error exists in either the error report or sheet parse warnings tabs, an exclamation point appears in their tab names, as well as their parent, and only the window around them changes the colour of its borders. I don't want to change the colour of this border. I want the tabs themselves (which are currently grey) to change to the same colour red as the error report listing red. 
 
-- I would like the cancel button aligned with the progress bar. Right now it is centered vertically between the progress bar and the hint below it. The hint below the progress bar now pushes the rest of the UI further down and leaves dead space, which I do not like. I would like to move this hint left of the progress bar and reclaim the space below the progress bar for the windows below. 
+- [x] I would like the cancel button aligned with the progress bar. Right now it is centered vertically between the progress bar and the hint below it. The hint below the progress bar now pushes the rest of the UI further down and leaves dead space, which I do not like. I would like to move this hint left of the progress bar and reclaim the space below the progress bar for the windows below. 
 
-- Please move the pick buttons closer to the colour codes. It is difficult to track across the screen visually and associate the correct pick button with the desired label.
+- [x] Please move the pick buttons closer to the colour codes. It is difficult to track across the screen visually and associate the correct pick button with the desired label.
+
+- [x] Please add the app version number to the configuration page.
+
+- [x] Please add colour configuration for the top bar section of the main window (the top buttons down to just above the summaries and raw tabs, progress bar included), by default make this a very dark grey that is near black, change the font to be a white readable on this black. Please make the colour of table background colours modifiable, same with the window colour around the tables. Make these by default a just off-white grey and white respectively by default.

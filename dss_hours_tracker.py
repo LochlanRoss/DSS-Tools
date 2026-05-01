@@ -20,7 +20,7 @@ import urllib.request
 import zipfile
 import xml.etree.ElementTree as ET
 from importlib import metadata as importlib_metadata
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -552,7 +552,7 @@ class FilterSelection:
 
 @dataclass(frozen=True)
 class UiThemeColors:
-    """Semantic UI colours (hex #RRGGBB) for tables, tooltips, and report chrome."""
+    """Semantic UI colours (hex #RRGGBB) for tables, tooltips, and main chrome."""
 
     alert_row_background: str = "#fde2e7"
     alert_row_foreground: str = "#9f1239"
@@ -562,6 +562,10 @@ class UiThemeColors:
     tooltip_foreground: str = "#334155"
     reports_outline_background: str = "#fbcfe8"
     reports_outline_foreground: str = "#be123c"
+    top_toolbar_background: str = "#141414"
+    top_toolbar_foreground: str = "#f8fafc"
+    table_background: str = "#f4f4f5"
+    content_chrome_background: str = "#ffffff"
 
 
 DEFAULT_UI_THEME = UiThemeColors()
@@ -574,9 +578,15 @@ UI_THEME_CONFIG_FIELDS: tuple[tuple[str, str], ...] = (
     ("Crew total row — text", "crew_total_foreground"),
     ("Tooltip — background", "tooltip_background"),
     ("Tooltip — text", "tooltip_foreground"),
-    ("Reports alert outline — background", "reports_outline_background"),
-    ("Reports alert outline — focus ring", "reports_outline_foreground"),
+    ("Top toolbar + progress row — background", "top_toolbar_background"),
+    ("Top toolbar + progress row — text", "top_toolbar_foreground"),
+    ("Main content area — background", "content_chrome_background"),
+    ("Table — cell background", "table_background"),
 )
+
+DSS_TABLE_TREEVIEW_STYLE = "DssTable.Treeview"
+DSS_TAB_SWATCH_W = 6
+DSS_TAB_SWATCH_H = 18
 
 
 def normalize_ui_hex_color(value: str) -> str | None:
@@ -592,6 +602,54 @@ def normalize_ui_hex_color(value: str) -> str | None:
     return f"#{body}"
 
 
+def _hex_to_rgb_triplet(hex_color: str) -> tuple[int, int, int]:
+    h = normalize_ui_hex_color(hex_color) or "#000000"
+    body = h[1:]
+    return int(body[0:2], 16), int(body[2:4], 16), int(body[4:6], 16)
+
+
+def lighten_hex_color(hex_color: str, delta: int) -> str:
+    """Lighten (or darken with negative delta) a #rrggbb colour for derived UI tones."""
+    r, g, b = _hex_to_rgb_triplet(hex_color)
+    r = min(255, max(0, r + delta))
+    g = min(255, max(0, g + delta))
+    b = min(255, max(0, b + delta))
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def solid_tab_swatch_photo(master: tk.Misc, color: str, width: int = DSS_TAB_SWATCH_W, height: int = DSS_TAB_SWATCH_H) -> tk.PhotoImage:
+    """Small vertical stripe for ttk.Notebook tabs (per-tab alert tint without restyling the whole tab bar)."""
+    photo = tk.PhotoImage(master=master, width=width, height=height)
+    row_pixels = "{" + " ".join([color] * width) + "}"
+    data = " ".join([row_pixels] * height)
+    photo.put(data)
+    return photo
+
+
+def configure_dss_table_treeview_style(master: tk.Misc, theme: UiThemeColors) -> None:
+    """Shared Treeview style for all DataTable instances."""
+    style = ttk.Style(master)
+    bg = theme.table_background
+    heading_bg = lighten_hex_color(bg, -18)
+    heading_fg = "#18181b"
+    cell_fg = "#18181b"
+    try:
+        style.configure(
+            DSS_TABLE_TREEVIEW_STYLE,
+            background=bg,
+            fieldbackground=bg,
+            foreground=cell_fg,
+        )
+        style.configure(f"{DSS_TABLE_TREEVIEW_STYLE}.Heading", background=heading_bg, foreground=heading_fg)
+        style.map(
+            DSS_TABLE_TREEVIEW_STYLE,
+            background=[("selected", "#bfdbfe")],
+            foreground=[("selected", "#1e3a8a")],
+        )
+    except tk.TclError:
+        pass
+
+
 def parse_ui_theme_payload(raw: object, defaults: UiThemeColors = DEFAULT_UI_THEME) -> UiThemeColors:
     if not isinstance(raw, dict):
         return defaults
@@ -605,6 +663,10 @@ def parse_ui_theme_payload(raw: object, defaults: UiThemeColors = DEFAULT_UI_THE
         "tooltip_foreground",
         "reports_outline_background",
         "reports_outline_foreground",
+        "top_toolbar_background",
+        "top_toolbar_foreground",
+        "table_background",
+        "content_chrome_background",
     ):
         fallback = getattr(defaults, key)
         raw_val = raw.get(key)
@@ -2832,6 +2894,17 @@ def build_tracker_data_with_status(
     )
 
 
+def tracker_data_invalidated_for_cache_clear(data: TrackerData) -> TrackerData:
+    """After on-disk cache files are removed, drop hashes and reuse flags so the next load does not memory-hit stale rows."""
+    status_keys = {*data.source_paths, *data.cache_status_by_path}
+    return replace(
+        data,
+        file_hashes={},
+        reused_paths=[],
+        cache_status_by_path={path: "Miss" for path in status_keys},
+    )
+
+
 def load_tracker_data(
     source_paths: Path | Iterable[Path],
     previous_data: TrackerData | None = None,
@@ -3228,8 +3301,14 @@ class DataTable(ttk.Frame):
         self._wrap_btn.pack(side="right", padx=(0, 8))
 
         self.tree = SortableTreeview(self, columns, headings)
-        self._tree_style_base = str(self.tree.cget("style") or "Treeview")
+        self._tree_style_base = DSS_TABLE_TREEVIEW_STYLE
+        self.tree.configure(style=self._tree_style_base)
         self._wrap_style_name = f"DssWrap{id(self)}.Treeview"
+        wrap_style = ttk.Style(self)
+        try:
+            wrap_style.layout(self._wrap_style_name, wrap_style.layout(self._tree_style_base))
+        except tk.TclError:
+            pass
         self.tree.custom_sort_key = custom_sort_key
         y_scroll = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
         x_scroll = ttk.Scrollbar(self, orient="horizontal", command=self.tree.xview)
@@ -3258,9 +3337,33 @@ class DataTable(ttk.Frame):
         self.tree.tag_configure("alert", background=t.alert_row_background, foreground=t.alert_row_foreground)
         self.tree.tag_configure("crew_total", background=t.crew_total_background, foreground=t.crew_total_foreground)
 
+    def _sync_wrap_style_colours(self) -> None:
+        t = self._ui_theme
+        style = ttk.Style(self)
+        bg = t.table_background
+        heading_bg = lighten_hex_color(bg, -18)
+        heading_fg = "#18181b"
+        cell_fg = "#18181b"
+        try:
+            style.configure(
+                self._wrap_style_name,
+                background=bg,
+                fieldbackground=bg,
+                foreground=cell_fg,
+            )
+            style.configure(f"{self._wrap_style_name}.Heading", background=heading_bg, foreground=heading_fg)
+            style.map(
+                self._wrap_style_name,
+                background=[("selected", "#bfdbfe")],
+                foreground=[("selected", "#1e3a8a")],
+            )
+        except tk.TclError:
+            pass
+
     def apply_ui_theme(self, theme: UiThemeColors) -> None:
         self._ui_theme = theme
         self._apply_ui_theme_tags()
+        self._sync_wrap_style_colours()
 
     def set_rows(self, rows: list[tuple[str, ...]], tags: list[tuple[str, ...]] | None = None) -> None:
         self._all_rows = list(rows)
@@ -3638,6 +3741,7 @@ class DataTable(ttk.Frame):
         line_px = max(1, int(font_obj.metrics("linespace")))
         height = min(max(line_px + 6, line_px * max_lines + 6), line_px * 14)
         style = ttk.Style(self)
+        self._sync_wrap_style_colours()
         try:
             style.configure(self._wrap_style_name, rowheight=height)
         except tk.TclError:
@@ -4353,55 +4457,106 @@ class DssHoursTrackerApp(tk.Tk):
         return theme.tooltip_background, theme.tooltip_foreground
 
     def _build_layout(self) -> None:
-        container = ttk.Frame(self, padding=12)
-        container.pack(fill="both", expand=True)
+        theme = self.app_settings.ui_theme
+        configure_dss_table_treeview_style(self, theme)
 
-        top = ttk.Frame(container)
-        top.pack(fill="x", pady=(0, 12))
+        self._shell_frame = tk.Frame(self, bg=theme.content_chrome_background, highlightthickness=0)
+        self._shell_frame.pack(fill="both", expand=True)
 
-        self.open_button = ttk.Button(top, text="Open DSS Workbook(s)", command=self.choose_sources)
-        self.open_button.pack(side="left")
-        self.add_button = ttk.Button(top, text="Add DSS", command=self.add_sources)
-        self.add_button.pack(side="left", padx=(8, 0))
-        self.remove_button = ttk.Button(top, text="Remove DSS(s)", command=self.remove_sources, state="disabled")
+        tb = theme.top_toolbar_background
+        tfg = theme.top_toolbar_foreground
+        btn_bg = lighten_hex_color(tb, 28)
+        btn_active = lighten_hex_color(tb, 44)
+
+        self._chrome_frame = tk.Frame(self._shell_frame, bg=tb, highlightthickness=0)
+        self._chrome_frame.pack(fill="x", padx=12, pady=(12, 0))
+
+        self._toolbar_top_row = tk.Frame(self._chrome_frame, bg=tb, highlightthickness=0)
+        self._toolbar_top_row.pack(fill="x")
+        top = self._toolbar_top_row
+
+        def _toolbar_button(master: tk.Misc, **kw: object) -> tk.Button:
+            return tk.Button(
+                master,
+                relief=tk.FLAT,
+                bd=0,
+                highlightthickness=0,
+                bg=btn_bg,
+                fg=tfg,
+                activebackground=btn_active,
+                activeforeground=tfg,
+                disabledforeground="#64748b",
+                cursor="hand2",
+                padx=10,
+                pady=4,
+                **kw,
+            )
+
+        self.add_dss_button = _toolbar_button(top, text="Add DSS Workbook(s)", command=self.add_sources)
+        self.add_dss_button.pack(side="left")
+        self.remove_button = _toolbar_button(top, text="Remove DSS(s)", command=self.remove_sources, state="disabled")
         self.remove_button.pack(side="left", padx=(8, 0))
-        self.reload_button = ttk.Button(top, text="Update View", command=self.reload_source, state="disabled")
+        self.reload_button = _toolbar_button(top, text="Update View", command=self.reload_source, state="disabled")
         self.reload_button.pack(side="left", padx=(8, 0))
-        self.export_button = ttk.Button(top, text="Export Current View", command=self.export_current_view)
+        self.export_button = _toolbar_button(top, text="Export Current View", command=self.export_current_view)
         self.export_button.pack(side="left", padx=(8, 0))
-        ttk.Label(top, text="Filter").pack(side="left", padx=(12, 4))
-        self.filter_button = ttk.Button(top, textvariable=self.filter_button_var, width=28, command=self._toggle_filter_popup)
+        self._filter_caption_label = tk.Label(top, text="Filter", bg=tb, fg=tfg)
+        self._filter_caption_label.pack(side="left", padx=(12, 4))
+        self.filter_button = _toolbar_button(top, textvariable=self.filter_button_var, width=22, command=self._toggle_filter_popup)
         self.filter_button.pack(side="left")
-        ttk.Label(top, text="PF").pack(side="left", padx=(8, 4))
-        self.pf_filter_button = ttk.Button(
+        self._pf_caption_label = tk.Label(top, text="PF", bg=tb, fg=tfg)
+        self._pf_caption_label.pack(side="left", padx=(8, 4))
+        self.pf_filter_button = _toolbar_button(
             top,
             textvariable=self.pf_filter_button_var,
-            width=18,
+            width=14,
             command=self._toggle_pf_filter_popup,
             state="disabled",
         )
         self.pf_filter_button.pack(side="left")
-        self.source_label = ttk.Label(top, text="No workbook loaded", anchor="w")
+        self.source_label = tk.Label(top, text="No workbook loaded", anchor="w", bg=tb, fg=tfg)
         self.source_label.pack(side="left", fill="x", expand=True, padx=(12, 0))
-        self.loading_label = ttk.Label(top, text="", anchor="e")
+        self.loading_label = tk.Label(top, text="", anchor="e", bg=tb, fg=tfg)
         self.loading_label.pack(side="right")
 
-        stats = ttk.Frame(container)
-        stats.pack(fill="x", pady=(0, 12))
-        self.stats_label = ttk.Label(stats, text="Load a DSS workbook to view daily and weekly labour summaries.")
-        self.stats_label.pack(side="left", fill="x", expand=True)
-        self.cancel_button = ttk.Button(stats, text="Cancel", command=self._cancel_current_action, state="disabled")
-        self.cancel_button.pack(side="right")
-        progress_column = ttk.Frame(stats)
-        progress_column.pack(side="right", padx=(12, 8))
-        self.progress_bar = ttk.Progressbar(
-            progress_column, variable=self.progress_var, maximum=100, mode="determinate", length=240
+        self._toolbar_stats_row = tk.Frame(self._chrome_frame, bg=tb, highlightthickness=0)
+        self._toolbar_stats_row.pack(fill="x", pady=(6, 8))
+        stats_row = self._toolbar_stats_row
+        self.stats_label = tk.Label(
+            stats_row,
+            text="Load a DSS workbook to view daily and weekly labour summaries.",
+            anchor="w",
+            justify="left",
+            bg=tb,
+            fg=tfg,
+            wraplength=520,
         )
-        self.progress_bar.pack(side="top")
-        self.quickload_hint_label = ttk.Label(progress_column, text="", wraplength=260, justify="center")
-        self.quickload_hint_label.pack(side="top", pady=(4, 0))
+        self.stats_label.pack(side="left", fill="x", expand=True)
 
-        self.group_notebook = ttk.Notebook(container)
+        self._progress_cluster = tk.Frame(stats_row, bg=tb, highlightthickness=0)
+        self._progress_cluster.pack(side="right")
+        progress_cluster = self._progress_cluster
+        self.quickload_hint_label = tk.Label(
+            progress_cluster,
+            text="",
+            bg=tb,
+            fg=tfg,
+            anchor="e",
+            justify="right",
+            wraplength=220,
+        )
+        self.quickload_hint_label.pack(side="left", padx=(0, 8))
+        self.progress_bar = ttk.Progressbar(
+            progress_cluster, variable=self.progress_var, maximum=100, mode="determinate", length=240
+        )
+        self.progress_bar.pack(side="left")
+        self.cancel_button = _toolbar_button(progress_cluster, text="Cancel", command=self._cancel_current_action, state="disabled")
+        self.cancel_button.pack(side="left", padx=(8, 0))
+
+        self._notebook_shell = tk.Frame(self._shell_frame, bg=theme.content_chrome_background, highlightthickness=0)
+        self._notebook_shell.pack(fill="both", expand=True, padx=12, pady=(8, 12))
+
+        self.group_notebook = ttk.Notebook(self._notebook_shell)
         self.group_notebook.pack(fill="both", expand=True)
 
         self.data_group = ttk.Frame(self.group_notebook, padding=6)
@@ -4630,6 +4785,11 @@ class DssHoursTrackerApp(tk.Tk):
         self.settings_notebook.add(self.groups_frame, text="Employee Groups")
         self.settings_notebook.add(self.rules_frame, text="Formatting Rules")
         self._refresh_filter_options()
+        self._apply_ui_theme_to_all_tables()
+        self._sync_reports_alert_chrome(
+            has_errors=self._last_reports_alert[0],
+            has_parse_warnings=self._last_reports_alert[1],
+        )
 
     def _build_rules_tab(self) -> None:
         self.rules_frame.columnconfigure(1, weight=1)
@@ -4772,8 +4932,12 @@ class DssHoursTrackerApp(tk.Tk):
             variable=self.auto_update_download_var,
         ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(0, 8))
 
-        appearance = ttk.LabelFrame(self.config_frame, text="Appearance (table and tooltip colours)", padding=8)
-        appearance.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        ttk.Label(self.config_frame, text=f"Application version: {APP_VERSION}").grid(
+            row=7, column=0, columnspan=2, sticky="w", pady=(0, 8)
+        )
+
+        appearance = ttk.LabelFrame(self.config_frame, text="Appearance (colours)", padding=8)
+        appearance.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         appearance.columnconfigure(1, weight=1)
         self._ui_theme_colour_vars: dict[str, tk.StringVar] = {}
         ut = self.app_settings.ui_theme
@@ -4781,29 +4945,29 @@ class DssHoursTrackerApp(tk.Tk):
             var = tk.StringVar(value=getattr(ut, attr))
             self._ui_theme_colour_vars[attr] = var
             ttk.Label(appearance, text=label).grid(row=row_idx, column=0, sticky="w", pady=2)
-            ttk.Entry(appearance, textvariable=var, width=14).grid(row=row_idx, column=1, sticky="w", padx=(8, 4), pady=2)
-            ttk.Button(
-                appearance,
-                text="Pick…",
-                command=lambda v=var: self._pick_ui_colour(v),
-                width=8,
-            ).grid(row=row_idx, column=2, sticky="w", pady=2)
+            entry_pick = ttk.Frame(appearance)
+            entry_pick.grid(row=row_idx, column=1, sticky="w", padx=(8, 0), pady=2)
+            ttk.Entry(entry_pick, textvariable=var, width=14).pack(side="left")
+            ttk.Button(entry_pick, text="Pick…", command=lambda v=var: self._pick_ui_colour(v), width=8).pack(
+                side="left", padx=(6, 0)
+            )
         ttk.Button(appearance, text="Reset colours to sample defaults", command=self._reset_ui_colour_vars_to_defaults).grid(
-            row=len(UI_THEME_CONFIG_FIELDS), column=0, columnspan=3, sticky="w", pady=(10, 0)
+            row=len(UI_THEME_CONFIG_FIELDS), column=0, columnspan=2, sticky="w", pady=(10, 0)
         )
         ttk.Label(
             appearance,
-            text="Use #RRGGBB hex (optional short form #RGB). Applies to highlighted rows, crew totals, tooltips on Formatting Rules, and the Reports group outline when errors or parse warnings exist.",
+            text="Use #RRGGBB hex (optional short form #RGB). Applies to table row highlights, crew totals, tooltips, "
+            "the top toolbar and progress row, main window chrome, table cell backgrounds, and alert tint on report tabs.",
             wraplength=680,
             justify="left",
-        ).grid(row=len(UI_THEME_CONFIG_FIELDS) + 1, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        ).grid(row=len(UI_THEME_CONFIG_FIELDS) + 1, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
         ttk.Button(self.config_frame, text="Apply Settings", command=self._apply_app_settings).grid(
-            row=8, column=0, sticky="w", pady=(12, 0)
+            row=9, column=0, sticky="w", pady=(12, 0)
         )
 
         maintenance = ttk.LabelFrame(self.config_frame, text="Maintenance", padding=8)
-        maintenance.grid(row=9, column=0, columnspan=2, sticky="ew", pady=(16, 0))
+        maintenance.grid(row=10, column=0, columnspan=2, sticky="ew", pady=(16, 0))
         ttk.Button(maintenance, text="Reset All Settings to Default", command=self._reset_all_settings).grid(
             row=0, column=0, sticky="w"
         )
@@ -4818,7 +4982,7 @@ class DssHoursTrackerApp(tk.Tk):
         )
 
         diagnostics = ttk.LabelFrame(self.config_frame, text="Diagnostics", padding=8)
-        diagnostics.grid(row=10, column=0, columnspan=2, sticky="ew", pady=(16, 0))
+        diagnostics.grid(row=11, column=0, columnspan=2, sticky="ew", pady=(16, 0))
         ttk.Button(diagnostics, text="Show App Data Folder", command=self._show_app_data_folder).grid(
             row=0, column=0, sticky="w"
         )
@@ -4844,10 +5008,10 @@ class DssHoursTrackerApp(tk.Tk):
         note = (
             "These settings control background notifications, how often the app checks loaded DSS files for changes, "
             "whether Daily Raw is visible, quick re-open of the last DSS set, the cancel hotkey for that load, "
-            "how the app checks GitHub for downloadable updates, and optional table / tooltip / report outline colours."
+            "how the app checks GitHub for downloadable updates, and optional UI colours (toolbar, tables, alerts)."
         )
         ttk.Label(self.config_frame, text=note, wraplength=700, justify="left").grid(
-            row=11, column=0, columnspan=2, sticky="w", pady=(12, 0)
+            row=12, column=0, columnspan=2, sticky="w", pady=(12, 0)
         )
 
     def _pick_ui_colour(self, var: tk.StringVar) -> None:
@@ -4990,9 +5154,61 @@ class DssHoursTrackerApp(tk.Tk):
 
     def _apply_ui_theme_to_all_tables(self) -> None:
         theme = self.app_settings.ui_theme
+        configure_dss_table_treeview_style(self, theme)
         for table in self._all_layout_tables():
             table.apply_ui_theme(theme)
         self.email_drafts_frame.apply_ui_theme(theme)
+        self._apply_main_chrome_theme()
+
+    def _apply_main_chrome_theme(self) -> None:
+        theme = self.app_settings.ui_theme
+        try:
+            self.configure(bg=theme.content_chrome_background)
+        except tk.TclError:
+            pass
+        tb = theme.top_toolbar_background
+        tfg = theme.top_toolbar_foreground
+        btn_bg = lighten_hex_color(tb, 28)
+        btn_active = lighten_hex_color(tb, 44)
+        content_bg = theme.content_chrome_background
+        shell = getattr(self, "_shell_frame", None)
+        if isinstance(shell, tk.Frame):
+            shell.configure(bg=content_bg)
+        nb_shell = getattr(self, "_notebook_shell", None)
+        if isinstance(nb_shell, tk.Frame):
+            nb_shell.configure(bg=content_bg)
+        chrome = getattr(self, "_chrome_frame", None)
+        if isinstance(chrome, tk.Frame):
+            chrome.configure(bg=tb)
+        for row in (
+            getattr(self, "_toolbar_top_row", None),
+            getattr(self, "_toolbar_stats_row", None),
+            getattr(self, "_progress_cluster", None),
+        ):
+            if isinstance(row, tk.Frame):
+                row.configure(bg=tb)
+        for w in (
+            getattr(self, "_filter_caption_label", None),
+            getattr(self, "_pf_caption_label", None),
+            self.source_label,
+            self.loading_label,
+            self.stats_label,
+            self.quickload_hint_label,
+        ):
+            if isinstance(w, tk.Label):
+                w.configure(bg=tb, fg=tfg)
+        for w in (
+            self.add_dss_button,
+            self.remove_button,
+            self.reload_button,
+            self.export_button,
+            self.filter_button,
+            self.pf_filter_button,
+            self.cancel_button,
+        ):
+            if isinstance(w, tk.Button):
+                w.configure(bg=btn_bg, fg=tfg, activebackground=btn_active, activeforeground=tfg, disabledforeground="#64748b")
+        self._refresh_quickload_hint_label()
 
     def _reload_defaults_into_ui(self) -> None:
         self.disable_name_typos_var.set(self.app_settings.disable_name_typo_notifications)
@@ -5113,9 +5329,17 @@ class DssHoursTrackerApp(tk.Tk):
         messagebox.showinfo("Configuration", "Settings were reset to defaults.")
 
     def _clear_cached_dsss(self) -> None:
-        if not messagebox.askyesno("Clear Cached DSSs", "Delete all cached parsed DSS files?"):
+        if not messagebox.askyesno(
+            "Clear Cached DSSs",
+            "Delete all cached parsed DSS files on disk and clear in-memory reuse flags for the "
+            "currently loaded workbooks?\n\n"
+            "The on-screen data stays as-is until you run Update View, which will re-read and re-parse as needed.",
+        ):
             return
         deleted = clear_cache_files(self.cache_dir)
+        if self.current_data is not None:
+            self.current_data = tracker_data_invalidated_for_cache_clear(self.current_data)
+            self._refresh_stats_summary()
         messagebox.showinfo("Configuration", f"Deleted {deleted} cached DSS file(s).")
 
     def _clear_stored_emails(self) -> None:
@@ -6163,14 +6387,6 @@ class DssHoursTrackerApp(tk.Tk):
         ttk.Button(buttons, text="Ignore Selected", command=ignore_selected).pack(side="left")
         ttk.Button(buttons, text="Close", command=dialog.destroy).pack(side="right")
 
-    def choose_sources(self) -> None:
-        selected = filedialog.askopenfilenames(
-            title="Select DSS workbook(s)",
-            filetypes=[("Excel Workbook", "*.xlsx")],
-        )
-        if selected:
-            self.load_source([Path(path) for path in selected])
-
     def add_sources(self) -> None:
         if self._cancel_event is not None:
             return
@@ -6269,8 +6485,7 @@ class DssHoursTrackerApp(tk.Tk):
 
     def _set_loading_state(self, is_loading: bool, source_paths: list[Path] | None = None) -> None:
         self._is_loading = is_loading
-        self.open_button.configure(state="disabled" if is_loading else "normal")
-        self.add_button.configure(state="disabled" if is_loading else "normal")
+        self.add_dss_button.configure(state="disabled" if is_loading else "normal")
         self.remove_button.configure(state="disabled" if is_loading or self.current_data is None else "normal")
         self.reload_button.configure(
             state="disabled" if is_loading or self.current_data is None else "normal"
@@ -6653,23 +6868,38 @@ class DssHoursTrackerApp(tk.Tk):
         pw_idx = self.reports_notebook.index(self.parse_warnings_table)
         base_er = "Error Report"
         base_pw = "Sheet Parse Warnings"
-        self.reports_notebook.tab(er_idx, text=f"{base_er} (!)" if has_errors else base_er)
-        self.reports_notebook.tab(pw_idx, text=f"{base_pw} (!)" if has_parse_warnings else base_pw)
         parent_alert = has_errors or has_parse_warnings
-        self.group_notebook.tab(self._reports_group_tab_index, text="Reports (!)" if parent_alert else "Reports")
         self._last_reports_alert = (has_errors, has_parse_warnings)
         theme = self.app_settings.ui_theme
+        alert_hex = normalize_ui_hex_color(theme.alert_row_background) or theme.alert_row_background
         try:
-            if parent_alert:
-                self.reports_outline.configure(
-                    highlightthickness=3,
-                    highlightbackground=theme.reports_outline_background,
-                    highlightcolor=theme.reports_outline_foreground,
-                )
-            else:
-                self.reports_outline.configure(highlightthickness=0)
+            alert_er = solid_tab_swatch_photo(self, alert_hex)
+            alert_pw = solid_tab_swatch_photo(self, alert_hex)
+            alert_reports = solid_tab_swatch_photo(self, alert_hex)
+            self._reports_tab_photo_refs = [alert_er, alert_pw, alert_reports]
+            self.reports_notebook.tab(
+                er_idx,
+                text=f"{base_er} (!)" if has_errors else base_er,
+                image=alert_er if has_errors else "",
+                compound="left" if has_errors else "none",
+            )
+            self.reports_notebook.tab(
+                pw_idx,
+                text=f"{base_pw} (!)" if has_parse_warnings else base_pw,
+                image=alert_pw if has_parse_warnings else "",
+                compound="left" if has_parse_warnings else "none",
+            )
+            rg_idx = self._reports_group_tab_index
+            self.group_notebook.tab(
+                rg_idx,
+                text="Reports (!)" if parent_alert else "Reports",
+                image=alert_reports if parent_alert else "",
+                compound="left" if parent_alert else "none",
+            )
         except tk.TclError:
-            pass
+            self.reports_notebook.tab(er_idx, text=f"{base_er} (!)" if has_errors else base_er)
+            self.reports_notebook.tab(pw_idx, text=f"{base_pw} (!)" if has_parse_warnings else base_pw)
+            self.group_notebook.tab(self._reports_group_tab_index, text="Reports (!)" if parent_alert else "Reports")
 
     def _open_displayed_source_file(self, source_display_name: str) -> None:
         if not source_display_name or self.current_data is None:
@@ -6716,12 +6946,17 @@ class DssHoursTrackerApp(tk.Tk):
         return None
 
     def _refresh_quickload_hint_label(self) -> None:
+        theme = self.app_settings.ui_theme
+        tb = theme.top_toolbar_background
+        tfg = theme.top_toolbar_foreground
         if self._is_loading and self._quickload_session:
             self.quickload_hint_label.configure(
-                text="Quick load — you can turn this off under Settings → Configuration."
+                text="Quick load — you can turn this off under Settings → Configuration.",
+                bg=tb,
+                fg=tfg,
             )
         else:
-            self.quickload_hint_label.configure(text="")
+            self.quickload_hint_label.configure(text="", bg=tb, fg=tfg)
 
     def _open_quickload_hotkey_capture(self) -> None:
         dialog = tk.Toplevel(self)

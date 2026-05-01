@@ -9,6 +9,14 @@ Small fixes and very short edits are intentionally omitted unless they materiall
 
 ## 2026-05-01
 
+### Main-window chrome, cache clear, reports tabs, toolbar UX
+
+- **Clear Cached DSSs** now also clears in-memory reuse flags (`file_hashes`, `reused_paths`, cache status ? Miss) for the loaded set so stats and the next **Update View** do not report stale memory hits after disk cache deletion (`tracker_data_invalidated_for_cache_clear`).
+- **Open DSS** removed; a single **Add DSS Workbook(s)** control always merges paths; **Remove DSS(s)** clears sources as before.
+- **Reports alerts:** dropped the pink outline frame; Error Report / Sheet Parse Warnings / parent **Reports** tabs show a left **swatch** in the alert-row background colour (PhotoImage stripe) while keeping the `(!)` labels.
+- **Toolbar row:** hint sits left of the progress bar; **Cancel** aligns on the same row as the bar; dark themed toolbar + progress strip with light text (`UiThemeColors` **top_toolbar_***, **table_background**, **content_chrome_background**); Configuration Appearance lists those fields with **PickÖ** beside each hex entry; **Application version** line on Configuration.
+- Shared **`DssTable.Treeview`** style for table backgrounds; word-wrap styles copy table colours.
+
 ### Test layout: fast default vs slow integration
 
 - Split workbook-heavy coverage into `test_dss_hours_tracker_integration.py`, gated with **`RUN_SLOW_TESTS`** (`1` / `true` / `yes` / `all`) and `@unittest.skipUnless` on the integration class so **`python -m unittest test_dss_hours_tracker`** stays fast.
@@ -20,8 +28,8 @@ Small fixes and very short edits are intentionally omitted unless they materiall
 
 ### GitHub Actions: Windows release workflow
 
-- Added **`.github/workflows/release-windows.yml`**: on **`v*` tag push** (or manual dispatch for an existing tag), checks out the ref, writes **`dss_app_version.txt`** (version without leading `v`), runs fast unit tests, runs **PyInstaller** `--onefile` with **`--collect-all pywin32`** and **`--add-data dss_app_version.txt;.`**, emits **`checksums.txt`** for the installer, and publishes **`DSSHoursTracker.exe`** + checksums to the GitHub Release via **`softprops/action-gh-release`** (`contents: write`).
-- **`discover_app_version()`** now honours **`DSS_APP_VERSION`** env, then **`dss_app_version.txt`** in **`sys._MEIPASS`** when **`sys.frozen`**, then package metadata / **`pyproject.toml`** ó so frozen CI builds report the correct version for update comparison.
+- Added **`.github/workflows/release-windows.yml`**: on **semver-style tag push** (`[0-9]*.[0-9]*.[0-9]*` or `v[0-9]*.[0-9]*.[0-9]*`) or manual dispatch for an existing tag, checks out the ref, writes **`dss_app_version.txt`**, runs fast unit tests, runs **PyInstaller** `--onefile` with **`--collect-all pywin32`**, compiles **`installer/DSSHoursTracker.iss`** via **Inno Setup** (`choco install innosetup`) to **`dist/DSSHoursTrackerSetup.exe`**, emits **`checksums.txt`** for that setup program, and publishes **setup + checksums** (not the loose PyInstaller exe) via **`softprops/action-gh-release`** (`contents: write`).
+- **`discover_app_version()`** now honours **`DSS_APP_VERSION`** env, then **`dss_app_version.txt`** in **`sys._MEIPASS`** when **`sys.frozen`**, then package metadata / **`pyproject.toml`** ù so frozen CI builds report the correct version for update comparison.
 
 ### UI theme colours (Configuration)
 

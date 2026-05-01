@@ -87,7 +87,7 @@ The app uses grouped navigation with two tab rows:
 - Background loading keeps the UI responsive
 - Overall progress bar shows multi-DSS progress; sheet progress text includes the **PF#-#** token from the filename where available
 - `Cancel` can abort DSS loading and Outlook email sync; during **quick load** (re-opening the last DSS set on startup) you can also cancel with a configurable hotkey (defaults to Escape; presets and key capture live under **Settings → Configuration**)
-- Optional **quick load**: on startup the app can re-open the same DSS workbook paths as last time (saved in config), with a short hint next to the progress bar; turn the behaviour off in Configuration
+- Optional **quick load**: on startup the app can re-open the same DSS workbook paths as last time (saved in config), with a short hint to the **left** of the progress bar on the toolbar row; turn the behaviour off in Configuration
 - Multi-file loads prefer **newer files first** (by filesystem modified time); the parser can emit an early partial preview while older workbooks are still loading
 - Same-file updates are skipped when the **DSS semantic hash** (dated sheets and `K25:AZ36` only) is unchanged; per-sheet digests allow **partial refresh** when only some dated sheets change
 - Parsed DSS data is cached on disk for up to 7 days
@@ -202,7 +202,8 @@ The `Configuration` page currently includes:
 - show/hide the `Daily Raw` tab
 - enable automatic update checks against GitHub releases
 - optionally download release installers automatically on unmetered Wi‑Fi
-- **Appearance:** eight configurable `#RRGGBB` colours (with **Pick…** dialogs) for alert table rows, crew-total rows, formatting-rule tooltips, and the Reports group outline when errors or parse warnings exist; **Reset colours to sample defaults** restores the built-in palette
+- **Application version** line (same value as the built-in / frozen version used for updates)
+- **Appearance:** configurable `#RRGGBB` colours (with **Pick…** next to each hex field) for alert rows, crew totals, tooltips, the **top toolbar + progress row**, **main content background**, and **table cell background**; report tabs use the alert-row tint when issues exist; **Reset colours to sample defaults** restores the built-in palette
 
 ### Maintenance Buttons
 
@@ -257,10 +258,10 @@ This includes:
 
 The workflow **`.github/workflows/release-windows.yml`** runs on:
 
-- **Push of a version tag** matching `v*` (for example `v0.2.0`), or  
+- **Push of a version tag** matching **`MAJOR.MINOR.PATCH`** (for example `0.2.0`) or the same with a leading **`v`** (`v0.2.0`), or  
 - **Manual run** (“Run workflow”) with an **existing** tag name to rebuild and re-upload assets for that tag.
 
-It builds **`dist/DSSHoursTracker.exe`** with PyInstaller (bundles `pywin32`), embeds the tag’s numeric version via **`dss_app_version.txt`** (so in-app “installed version” and GitHub update checks work), writes **`checksums.txt`** for the app’s optional SHA-256 verification, and publishes both files on the **GitHub Release** for that tag (`softprops/action-gh-release`).
+It builds **`dist/DSSHoursTracker.exe`** with PyInstaller (bundles `pywin32`), embeds the tag’s numeric version via **`dss_app_version.txt`**, compiles **`installer/DSSHoursTracker.iss`** with **Inno Setup** into **`dist/DSSHoursTrackerSetup.exe`** (click-through wizard, Start-menu entry, uninstaller in **Settings → Apps**), writes **`checksums.txt`** for the **setup** program’s SHA-256 (for the app’s optional download verification), and publishes **`DSSHoursTrackerSetup.exe`** + **`checksums.txt`** on the **GitHub Release** (`softprops/action-gh-release`). The raw PyInstaller `.exe` is not attached to the release so the in-app updater picks the installer asset.
 
 **Repository settings:** **Settings → Actions → General → Workflow permissions** → enable **Read and write permissions** (and allow GitHub Actions to create and approve pull requests if your org defaults to read-only), so `GITHUB_TOKEN` can attach release assets.
 
@@ -269,14 +270,23 @@ It builds **`dist/DSSHoursTracker.exe`** with PyInstaller (bundles `pywin32`), e
 **Commands (maintainer):**
 
 ```bash
-git tag -a v0.2.0 -m "Release 0.2.0"
-git push origin v0.2.0
+git tag -a 0.2.0 -m "Release 0.2.0"
+git push origin 0.2.0
 ```
 
-### Local PyInstaller build
+### Local build (PyInstaller + Inno wizard)
 
-Optional one-file build (version will follow `pyproject.toml` or installed package unless you set **`DSS_APP_VERSION`** or ship **`dss_app_version.txt`** next to the spec / add it with `--add-data` as in the workflow):
+1. **One-file app** (same flags as CI; version from tag in CI is simulated here with `dss_app_version.txt`):
 
 ```powershell
-pyinstaller --noconsole --onefile dss_hours_tracker.py
+Set-Content -NoNewline dss_app_version.txt "0.1.0"
+pyinstaller --noconsole --onefile --name DSSHoursTracker --collect-all pywin32 --add-data "dss_app_version.txt;." dss_hours_tracker.py
 ```
+
+2. **Installer** (requires [Inno Setup 6](https://jrsoftware.org/isdl.php) installed):
+
+```powershell
+& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DMyAppVersion=0.1.0 installer\DSSHoursTracker.iss
+```
+
+Output: **`dist\DSSHoursTrackerSetup.exe`**. Uninstall: **Settings → Apps → Installed apps → DSS Hours Tracker**.
