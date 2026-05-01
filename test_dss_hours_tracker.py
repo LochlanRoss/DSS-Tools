@@ -20,10 +20,17 @@ from dss_hours_tracker import (
     build_permission_denied_message,
     build_week_totals,
     build_weekly_rollup,
+    is_newer_version,
+    normalize_release_version,
+    parse_latest_release_payload,
     cache_file_path,
     clear_cache_files,
     compute_bytes_hash,
     compute_workbook_content_hash,
+    load_ignored_name_typos,
+    pf_numbers_for_records,
+    save_ignored_name_typos,
+    typo_warning_key,
     format_email_subject,
     default_formatting_profiles,
     deserialize_daily_record,
@@ -374,6 +381,26 @@ class DssHoursTrackerTests(unittest.TestCase):
         result = find_open_excel_workbook(FakeExcel([by_name]), Path(r"C:\Missing\Outage DSS.xlsx"))
         self.assertIs(result, by_name)
 
+    def test_normalize_release_version_and_compare(self) -> None:
+        self.assertEqual(normalize_release_version('v0.2.1'), '0.2.1')
+        self.assertTrue(is_newer_version('0.2.1', '0.2.0'))
+        self.assertFalse(is_newer_version('0.2.0', '0.2.1'))
+        self.assertFalse(is_newer_version('0.2.0', '0.2.0'))
+
+    def test_parse_latest_release_payload(self) -> None:
+        payload = {
+            'tag_name': 'v0.2.1',
+            'name': 'Release 0.2.1',
+            'html_url': 'https://github.com/LochlanRoss/DSS-Viewer/releases/tag/v0.2.1',
+            'published_at': '2026-05-01T00:00:00Z',
+            'body': 'Notes',
+            'assets': [{'name': 'DSSViewerSetup.exe'}, {'name': 'checksums.txt'}],
+        }
+        info = parse_latest_release_payload(payload)
+        self.assertEqual(info['version'], '0.2.1')
+        self.assertEqual(info['tag_name'], 'v0.2.1')
+        self.assertEqual(info['asset_names'], ['DSSViewerSetup.exe', 'checksums.txt'])
+
     def test_compute_bytes_hash_is_stable(self) -> None:
         payload = b"example workbook bytes"
         self.assertEqual(compute_bytes_hash(payload), compute_bytes_hash(payload))
@@ -576,6 +603,7 @@ class DssHoursTrackerTests(unittest.TestCase):
                 request.employee,
                 request.week_start,
                 request.week_end,
+                request.records,
             )
             html = build_email_html(
                 request.employee,
@@ -590,6 +618,29 @@ class DssHoursTrackerTests(unittest.TestCase):
             self.assertIn("Hi Alice", html)
             self.assertIn("Source File", html)
             self.assertIn("Week Total", html)
+
+    def test_ignored_name_typos_round_trip(self) -> None:
+        with self.workspace_json("ignored_typos") as path:
+            ignored = {typo_warning_key("Alic Smith", "Alice Smith")}
+            save_ignored_name_typos(path, ignored)
+            self.assertEqual(load_ignored_name_typos(path), ignored)
+
+    def test_pf_numbers_for_records_and_subject_formatting(self) -> None:
+        records = [
+            type('Record', (), {'source_file': 'PF26024-2 Alpha DSS.xlsx'})(),
+            type('Record', (), {'source_file': 'PF26024-3 Beta DSS.xlsx'})(),
+            type('Record', (), {'source_file': 'No PF Here.xlsx'})(),
+        ]
+        self.assertEqual(pf_numbers_for_records(records), 'PF26024-2, PF26024-3')
+        subject = format_email_subject(
+            'Hours for {first_name} - {week_start} to {week_end}',
+            'Alice Smith',
+            date(2026, 4, 6),
+            date(2026, 4, 12),
+            records,
+        )
+        self.assertIn('PF26024-2', subject)
+        self.assertIn('PF26024-3', subject)
 
     def test_email_templates_round_trip(self) -> None:
         with self.workspace_json("email_templates") as path:

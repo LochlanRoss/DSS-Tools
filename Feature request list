@@ -1,0 +1,1 @@
+I want to implement automatic updates and version control for the installed version of the software. I want to check my github repo for updates, automatically download the updates if on wifi (and not a metered network) and offer to install when the update is downloaded. How can this be implemented.

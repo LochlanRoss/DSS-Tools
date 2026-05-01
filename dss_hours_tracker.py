@@ -12,7 +12,11 @@ import re
 import sys
 import tempfile
 import threading
+import tomllib
+import urllib.error
+import urllib.request
 import zipfile
+from importlib import metadata as importlib_metadata
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -53,10 +57,92 @@ AUTO_OUTLOOK_SYNC_DELAY_MS = 60000
 DEFAULT_HASH_POLL_MINUTES = 5
 BUG_REPORT_EMAIL = "lross@jatechpowersystems.com"
 MAX_PARALLEL_PARSE_WORKERS = 2
+GITHUB_REPO_SLUG = "LochlanRoss/DSS-Viewer"
+GITHUB_LATEST_RELEASE_URL = f"https://api.github.com/repos/{GITHUB_REPO_SLUG}/releases/latest"
 
 
 class OperationCancelled(RuntimeError):
     pass
+
+
+def discover_app_version() -> str:
+    try:
+        return importlib_metadata.version("dss-hours-tracker")
+    except importlib_metadata.PackageNotFoundError:
+        pass
+    pyproject_path = Path(__file__).with_name("pyproject.toml")
+    try:
+        with pyproject_path.open("rb") as handle:
+            payload = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError):
+        return "0.0.0"
+    project = payload.get("project", {})
+    return str(project.get("version", "0.0.0")).strip() or "0.0.0"
+
+
+def normalize_release_version(version_text: str) -> str:
+    return version_text.strip().lstrip("vV")
+
+
+def version_key(version_text: str) -> tuple[tuple[int, object], ...]:
+    normalized = normalize_release_version(version_text)
+    tokens = re.findall(r"\d+|[A-Za-z]+", normalized)
+    if not tokens:
+        return ((0, 0),)
+    key: list[tuple[int, object]] = []
+    for token in tokens:
+        if token.isdigit():
+            key.append((0, int(token)))
+        else:
+            key.append((1, token.casefold()))
+    return tuple(key)
+
+
+def is_newer_version(candidate_version: str, current_version: str) -> bool:
+    return version_key(candidate_version) > version_key(current_version)
+
+
+def parse_latest_release_payload(payload: dict) -> dict[str, object]:
+    tag_name = str(payload.get("tag_name", "")).strip()
+    version = normalize_release_version(tag_name)
+    return {
+        "tag_name": tag_name,
+        "version": version,
+        "name": str(payload.get("name", "")).strip(),
+        "html_url": str(payload.get("html_url", "")).strip(),
+        "published_at": str(payload.get("published_at", "")).strip(),
+        "body": str(payload.get("body", "")),
+        "asset_names": [
+            str(asset.get("name", "")).strip()
+            for asset in payload.get("assets", [])
+            if isinstance(asset, dict) and str(asset.get("name", "")).strip()
+        ],
+    }
+
+
+def fetch_latest_release_info(url: str = GITHUB_LATEST_RELEASE_URL, timeout: int = 10) -> dict[str, object]:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": f"dss-hours-tracker/{discover_app_version()}",
+            "Accept": "application/vnd.github+json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"GitHub release check failed with HTTP {exc.code}.") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Could not reach GitHub to check for updates.") from exc
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise RuntimeError("Could not read the GitHub release response.") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("Unexpected GitHub release response.")
+    return parse_latest_release_payload(payload)
+
+
+APP_VERSION = discover_app_version()
 
 
 @dataclass(frozen=True)
@@ -348,6 +434,20 @@ def save_employee_emails(config_path: Path, employee_emails: dict[str, str]) -> 
         for name, email in sorted(employee_emails.items(), key=lambda item: item[0].lower())
         if name.strip()
     }
+    config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def load_ignored_name_typos(config_path: Path) -> set[str]:
+    payload = read_config_payload(config_path)
+    raw_values = payload.get("ignored_name_typos", [])
+    if not isinstance(raw_values, list):
+        return set()
+    return {str(value).strip() for value in raw_values if str(value).strip()}
+
+
+def save_ignored_name_typos(config_path: Path, ignored_name_typos: set[str]) -> None:
+    payload = read_config_payload(config_path)
+    payload["ignored_name_typos"] = sorted(value for value in ignored_name_typos if value.strip())
     config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
@@ -891,6 +991,10 @@ def normalize_person_name(name: str) -> str:
     return " ".join(name.split()).casefold()
 
 
+def typo_warning_key(employee: str, similar_employee: str) -> str:
+    return f"{normalize_person_name(employee)}|{normalize_person_name(similar_employee)}"
+
+
 def find_potential_name_typos(
     unresolved_names: Iterable[str],
     all_employee_names: Iterable[str],
@@ -1010,6 +1114,18 @@ def records_for_week(records: Iterable[DailyRecord], week_start: date) -> list[D
     return [record for record in records if week_start <= record.work_date <= week_end]
 
 
+def extract_pf_number(source_name: str) -> str | None:
+    match = PF_PATTERN.search(source_name)
+    if not match:
+        return None
+    return match.group(1).upper()
+
+
+def pf_numbers_for_records(records: Iterable[DailyRecord]) -> str:
+    pf_numbers = sorted({pf_number for record in records if (pf_number := extract_pf_number(record.source_file))})
+    return ", ".join(pf_numbers)
+
+
 def build_email_draft_requests(
     records: Iterable[DailyRecord],
     employee_emails: dict[str, str],
@@ -1035,14 +1151,24 @@ def build_email_draft_requests(
     return requests
 
 
-def format_email_subject(template: str, employee: str, week_start: date, week_end: date) -> str:
+def format_email_subject(
+    template: str,
+    employee: str,
+    week_start: date,
+    week_end: date,
+    records: Iterable[DailyRecord] | None = None,
+) -> str:
     subject_template = template.strip() or "Timesheet Reminder - Week of {week_start}"
     first_name = employee.strip().split()[0] if employee.strip() else employee
+    pf_numbers = pf_numbers_for_records(records or [])
+    if pf_numbers and "{pf_numbers}" not in subject_template:
+        subject_template = f"{subject_template} - {pf_numbers}"
     return subject_template.format(
         employee=employee,
         first_name=first_name,
         week_start=week_start.isoformat(),
         week_end=week_end.isoformat(),
+        pf_numbers=pf_numbers,
     )
 
 
@@ -1194,6 +1320,7 @@ def create_outlook_drafts(
                 request.employee,
                 request.week_start,
                 request.week_end,
+                request.records,
             )
             mail_item.HTMLBody = build_email_html(
                 request.employee,
@@ -2452,7 +2579,7 @@ class EmailDraftsFrame(ttk.Frame):
         self.preview_table.tree.bind("<Double-Button-1>", self._on_preview_double_click)
 
         note = (
-            "Use {employee}, {first_name}, {week_start}, {week_end}, and {hours_table} in the templates. "
+            "Use {employee}, {first_name}, {week_start}, {week_end}, {pf_numbers}, and {hours_table} in the templates. "
             "Drafts are saved in Outlook and are not sent automatically."
         )
         ttk.Label(self, text=note, wraplength=700, justify="left").grid(row=5, column=0, columnspan=5, sticky="w", pady=(8, 0))
@@ -2727,6 +2854,7 @@ class DssHoursTrackerApp(tk.Tk):
         self.employee_notes = load_employee_notes(self.config_path)
         self.email_subject_template, self.email_body_template = load_email_templates(self.config_path)
         self.employee_groups = load_employee_groups(self.config_path)
+        self.ignored_name_typos = load_ignored_name_typos(self.config_path)
         self.job_presets = load_job_presets(self.config_path)
         self.app_settings = load_app_settings(self.config_path)
         self.filter_button_var = tk.StringVar(value="All Employees")
@@ -2748,6 +2876,8 @@ class DssHoursTrackerApp(tk.Tk):
         self._hash_alerted_paths: set[Path] = set()
         self._outlook_sync_in_progress = False
         self._outlook_auto_sync_done = False
+        self._update_check_in_progress = False
+        self.update_status_var = tk.StringVar(value=f"Installed version: {APP_VERSION}")
         self.hash_poll_interval_ms = self.app_settings.hash_poll_minutes * 60 * 1000
         self._cancel_event: threading.Event | None = None
         self._active_operation_name = ""
@@ -3111,6 +3241,12 @@ class DssHoursTrackerApp(tk.Tk):
         ttk.Button(diagnostics, text="Submit Bug Report", command=self._submit_bug_report).grid(
             row=2, column=0, sticky="w", pady=(8, 0)
         )
+        ttk.Button(diagnostics, text="Check for Updates", command=self._check_for_updates).grid(
+            row=2, column=1, sticky="w", padx=(12, 0), pady=(8, 0)
+        )
+        ttk.Label(diagnostics, textvariable=self.update_status_var, wraplength=700, justify="left").grid(
+            row=3, column=0, columnspan=2, sticky="w", pady=(8, 0)
+        )
 
         note = (
             "These settings control background notifications, how often the app checks loaded DSS files for changes, "
@@ -3373,6 +3509,7 @@ class DssHoursTrackerApp(tk.Tk):
             "cache_dir": str(self.cache_dir),
             "config_path": str(self.config_path),
             "python_version": sys.version,
+            "app_version": APP_VERSION,
             "os_name": os.name,
             "app_settings": {
                 "disable_name_typo_notifications": self.app_settings.disable_name_typo_notifications,
@@ -3459,6 +3596,57 @@ class DssHoursTrackerApp(tk.Tk):
             lines.append("")
 
         messagebox.showinfo("Loaded DSS Status", "\n".join(lines).rstrip())
+
+    def _check_for_updates(self) -> None:
+        if self._update_check_in_progress:
+            return
+        self._update_check_in_progress = True
+        self.update_status_var.set(f"Checking GitHub releases from version {APP_VERSION}...")
+        worker = threading.Thread(target=self._check_for_updates_worker, daemon=True)
+        worker.start()
+
+    def _check_for_updates_worker(self) -> None:
+        try:
+            release_info = fetch_latest_release_info()
+        except Exception as exc:
+            self.after(0, lambda: self._handle_update_check_error(exc))
+            return
+        self.after(0, lambda: self._handle_update_check_result(release_info))
+
+    def _handle_update_check_error(self, exc: Exception) -> None:
+        self._update_check_in_progress = False
+        self.update_status_var.set(f"Installed version: {APP_VERSION}")
+        messagebox.showerror("Check for Updates", f"Could not check for updates.\n\n{exc}")
+
+    def _handle_update_check_result(self, release_info: dict[str, object]) -> None:
+        self._update_check_in_progress = False
+        latest_version = str(release_info.get("version", "")).strip()
+        latest_tag = str(release_info.get("tag_name", "")).strip()
+        html_url = str(release_info.get("html_url", "")).strip()
+        published_at = str(release_info.get("published_at", "")).strip()
+        asset_names = release_info.get("asset_names", [])
+        assets_text = ", ".join(asset_names) if isinstance(asset_names, list) and asset_names else "No assets listed"
+
+        if latest_version and is_newer_version(latest_version, APP_VERSION):
+            self.update_status_var.set(f"Update available: {latest_tag or latest_version} (installed: {APP_VERSION})")
+            messagebox.showinfo(
+                "Check for Updates",
+                "A newer version is available.\n\n"
+                f"Installed: {APP_VERSION}\n"
+                f"Latest: {latest_tag or latest_version}\n"
+                f"Published: {published_at or 'Unknown'}\n"
+                f"Assets: {assets_text}\n\n"
+                f"Release page:\n{html_url}",
+            )
+            return
+
+        self.update_status_var.set(f"Installed version: {APP_VERSION} (up to date)")
+        messagebox.showinfo(
+            "Check for Updates",
+            "You are up to date.\n\n"
+            f"Installed: {APP_VERSION}\n"
+            f"Latest release: {latest_tag or latest_version or 'Unknown'}",
+        )
 
     def _submit_bug_report(self) -> None:
         try:
@@ -4071,11 +4259,15 @@ class DssHoursTrackerApp(tk.Tk):
         typo_warnings: list[NameTypoWarning] = []
         if self.current_data is not None:
             unresolved_names = [employee for employee in employee_names if not results.get(employee, "").strip()]
-            typo_warnings = find_potential_name_typos(
-                unresolved_names,
-                self.current_data.employee_names,
-                self.current_data.daily_records,
-            )
+            typo_warnings = [
+                warning
+                for warning in find_potential_name_typos(
+                    unresolved_names,
+                    self.current_data.employee_names,
+                    self.current_data.daily_records,
+                )
+                if typo_warning_key(warning.employee, warning.similar_employee) not in self.ignored_name_typos
+            ]
 
         if manual:
             missing_after = sum(1 for employee in employee_names if not self.employee_emails.get(employee, "").strip())
@@ -4084,18 +4276,81 @@ class DssHoursTrackerApp(tk.Tk):
                 f"Matched emails: {updated}\nStill missing: {missing_after}",
             )
         if typo_warnings and not self.app_settings.disable_name_typo_notifications:
-            lines = ["Possible name typo(s) detected for unresolved Outlook matches:"]
-            for warning in typo_warnings[:10]:
-                lines.append("")
-                lines.append(
-                    f"{warning.employee} may match {warning.similar_employee} "
-                    f"({warning.similarity * 100:.0f}% similar)"
-                )
-                lines.extend(warning.locations[:5])
-            if len(typo_warnings) > 10:
-                lines.append("")
-                lines.append(f"...and {len(typo_warnings) - 10} more possible typo warning(s).")
-            messagebox.showwarning("Potential Name Typos", "\n".join(lines))
+            self._show_typo_warning_dialog(typo_warnings)
+
+    def _persist_ignored_name_typos(self) -> None:
+        save_ignored_name_typos(self.config_path, self.ignored_name_typos)
+
+    def _show_typo_warning_dialog(self, typo_warnings: list[NameTypoWarning]) -> None:
+        dialog = tk.Toplevel(self)
+        dialog.title("Potential Name Typos")
+        dialog.transient(self)
+        dialog.geometry("780x420")
+
+        ttk.Label(
+            dialog,
+            text="Possible name typo(s) were found for unresolved Outlook matches. Select any entry and choose Ignore Selected to stop warning on that inconsistency going forward.",
+            wraplength=740,
+            justify="left",
+        ).pack(fill="x", padx=12, pady=(12, 8))
+
+        content = ttk.Frame(dialog, padding=(12, 0, 12, 12))
+        content.pack(fill="both", expand=True)
+        content.columnconfigure(2, weight=1)
+        content.rowconfigure(0, weight=1)
+
+        listbox = tk.Listbox(content, selectmode="extended", exportselection=False)
+        listbox.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+        scrollbar = ttk.Scrollbar(content, orient="vertical", command=listbox.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        listbox.configure(yscrollcommand=scrollbar.set)
+        bind_vertical_mousewheel(listbox, listbox, units_per_notch=4)
+
+        details = tk.Text(content, wrap="word", height=12)
+        details.grid(row=0, column=2, sticky="nsew")
+        bind_vertical_mousewheel(details, details, units_per_notch=4)
+
+        def refresh_details(_event=None) -> None:
+            selection = listbox.curselection()
+            details.configure(state="normal")
+            details.delete("1.0", tk.END)
+            if selection:
+                warning = typo_warnings[selection[0]]
+                lines = [
+                    f"{warning.employee} may match {warning.similar_employee}",
+                    f"Similarity: {warning.similarity * 100:.0f}%",
+                    "",
+                    "Locations:",
+                    *(warning.locations or ["(No locations found)"]),
+                ]
+                details.insert("1.0", "\n".join(lines))
+            details.configure(state="disabled")
+
+        for warning in typo_warnings:
+            listbox.insert(
+                tk.END,
+                f"{warning.employee} -> {warning.similar_employee} ({warning.similarity * 100:.0f}% similar)",
+            )
+        if typo_warnings:
+            listbox.selection_set(0)
+        listbox.bind("<<ListboxSelect>>", refresh_details)
+        refresh_details()
+
+        buttons = ttk.Frame(dialog, padding=(12, 0, 12, 12))
+        buttons.pack(fill="x")
+
+        def ignore_selected() -> None:
+            selected = listbox.curselection()
+            if not selected:
+                return
+            for index in selected:
+                warning = typo_warnings[index]
+                self.ignored_name_typos.add(typo_warning_key(warning.employee, warning.similar_employee))
+            self._persist_ignored_name_typos()
+            dialog.destroy()
+
+        ttk.Button(buttons, text="Ignore Selected", command=ignore_selected).pack(side="left")
+        ttk.Button(buttons, text="Close", command=dialog.destroy).pack(side="right")
 
     def choose_sources(self) -> None:
         selected = filedialog.askopenfilenames(
@@ -4683,3 +4938,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
