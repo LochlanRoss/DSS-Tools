@@ -28,3 +28,6 @@ Thumbs.db
 *.xlsx
 *.xlx
 *.csv
+
+# CI / PyInstaller local (generated; not source of truth for version in git)
+dss_app_version.txt

@@ -253,7 +253,29 @@ This includes:
 
 ## Packaging
 
-Optional PyInstaller build:
+### GitHub Actions (automated Windows release)
+
+The workflow **`.github/workflows/release-windows.yml`** runs on:
+
+- **Push of a version tag** matching `v*` (for example `v0.2.0`), or  
+- **Manual run** (“Run workflow”) with an **existing** tag name to rebuild and re-upload assets for that tag.
+
+It builds **`dist/DSSHoursTracker.exe`** with PyInstaller (bundles `pywin32`), embeds the tag’s numeric version via **`dss_app_version.txt`** (so in-app “installed version” and GitHub update checks work), writes **`checksums.txt`** for the app’s optional SHA-256 verification, and publishes both files on the **GitHub Release** for that tag (`softprops/action-gh-release`).
+
+**Repository settings:** **Settings → Actions → General → Workflow permissions** → enable **Read and write permissions** (and allow GitHub Actions to create and approve pull requests if your org defaults to read-only), so `GITHUB_TOKEN` can attach release assets.
+
+**Before tagging:** bump **`pyproject.toml`** `[project] version` to match the release when you want the repo metadata and frozen bundle to agree (the workflow still stamps the exe from the **tag** for `discover_app_version()`).
+
+**Commands (maintainer):**
+
+```bash
+git tag -a v0.2.0 -m "Release 0.2.0"
+git push origin v0.2.0
+```
+
+### Local PyInstaller build
+
+Optional one-file build (version will follow `pyproject.toml` or installed package unless you set **`DSS_APP_VERSION`** or ship **`dss_app_version.txt`** next to the spec / add it with `--add-data` as in the workflow):
 
 ```powershell
 pyinstaller --noconsole --onefile dss_hours_tracker.py

@@ -1,0 +1,106 @@
+# Build a single-file Windows .exe with PyInstaller and publish GitHub Release assets.
+#
+# Trigger A — recommended: push an annotated tag (must match pyproject / release notes intent):
+#   git tag -a v0.2.0 -m "Release 0.2.0"
+#   git push origin v0.2.0
+#
+# Trigger B — rebuild an existing tag (after fixing the workflow, etc.):
+#   Actions → "Release Windows build" → Run workflow → enter the same tag (e.g. v0.2.0).
+#
+# Requires: Settings → Actions → General → Workflow permissions → "Read and write permissions"
+# (so the GITHUB_TOKEN can upload release assets).
+
+name: Release Windows build
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version_tag:
+        description: "Existing Git tag to checkout and attach (e.g. v0.2.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    steps:
+      - name: Resolve tag name
+        id: meta
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ github.event.inputs.version_tag }}
+        run: |
+          set -e
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            TAG="$INPUT_TAG"
+          else
+            TAG="$REF_NAME"
+          fi
+          if [ -z "$TAG" ]; then
+            echo "No tag resolved"; exit 1
+          fi
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', github.event.inputs.version_tag) || github.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install "pyinstaller>=6.6" "openpyxl>=3.1,<4" "pywin32>=306"
+
+      - name: Write bundled version for frozen executable
+        shell: bash
+        run: |
+          printf '%s' '${{ steps.meta.outputs.version }}' > dss_app_version.txt
+          cat dss_app_version.txt
+
+      - name: Run fast unit tests
+        run: python -m unittest test_dss_hours_tracker -q
+
+      - name: PyInstaller (one file)
+        run: pyinstaller --noconsole --onefile --name DSSHoursTracker --collect-all pywin32 --add-data "dss_app_version.txt;." dss_hours_tracker.py
+
+      - name: Write checksums.txt for in-app verification
+        shell: python
+        run: |
+          import hashlib
+          from pathlib import Path
+          exe = Path("dist") / "DSSHoursTracker.exe"
+          digest = hashlib.sha256(exe.read_bytes()).hexdigest()
+          Path("checksums.txt").write_text(
+              f"{digest}  *{exe.name}\n",
+              encoding="ascii",
+              newline="\n",
+          )
+          print(Path("checksums.txt").read_text())
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.tag }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/DSSHoursTracker.exe
+            checksums.txt

@@ -86,6 +86,19 @@ class OperationCancelled(RuntimeError):
 
 
 def discover_app_version() -> str:
+    """Resolve display / compare version: env, frozen bundle file, installed package, then pyproject."""
+    env_version = os.environ.get("DSS_APP_VERSION", "").strip()
+    if env_version:
+        return env_version
+    if getattr(sys, "frozen", False):
+        bundle_root = Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
+        bundled = bundle_root / "dss_app_version.txt"
+        try:
+            text = bundled.read_text(encoding="utf-8").strip()
+        except OSError:
+            text = ""
+        if text:
+            return text
     try:
         return importlib_metadata.version("dss-hours-tracker")
     except importlib_metadata.PackageNotFoundError:

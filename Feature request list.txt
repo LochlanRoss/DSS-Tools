@@ -48,3 +48,5 @@ Working scratchpad: check items off when they are done.
 - Right now when an error exists in either the error report or sheet parse warnings tabs, an exclamation point appears in their tab names, as well as their parent, and only the window around them changes the colour of its borders. I don't want to change the colour of this border. I want the tabs themselves (which are currently grey) to change to the same colour red as the error report listing red. 
 
 - I would like the cancel button aligned with the progress bar. Right now it is centered vertically between the progress bar and the hint below it. The hint below the progress bar now pushes the rest of the UI further down and leaves dead space, which I do not like. I would like to move this hint left of the progress bar and reclaim the space below the progress bar for the windows below. 
+
+- Please move the pick buttons closer to the colour codes. It is difficult to track across the screen visually and associate the correct pick button with the desired label.

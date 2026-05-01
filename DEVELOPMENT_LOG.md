@@ -18,6 +18,11 @@ Small fixes and very short edits are intentionally omitted unless they materiall
 - **`test_dss_hours_tracker.py`** was trimmed so workbook/cache/`load_tracker_data` cases exist only in the integration module (no duplicate `test_*` definitions); imports were reduced to match the slimmer fast suite. Integration module imports include helpers such as **`format_email_subject`** and **`compute_bytes_hash`** where cache and email tests need them.
 - **`README.md` Tests** subsection documents the split, the env var, fixture module path, and PowerShell examples for fast-only vs full discovery runs.
 
+### GitHub Actions: Windows release workflow
+
+- Added **`.github/workflows/release-windows.yml`**: on **`v*` tag push** (or manual dispatch for an existing tag), checks out the ref, writes **`dss_app_version.txt`** (version without leading `v`), runs fast unit tests, runs **PyInstaller** `--onefile` with **`--collect-all pywin32`** and **`--add-data dss_app_version.txt;.`**, emits **`checksums.txt`** for the installer, and publishes **`DSSHoursTracker.exe`** + checksums to the GitHub Release via **`softprops/action-gh-release`** (`contents: write`).
+- **`discover_app_version()`** now honours **`DSS_APP_VERSION`** env, then **`dss_app_version.txt`** in **`sys._MEIPASS`** when **`sys.frozen`**, then package metadata / **`pyproject.toml`** — so frozen CI builds report the correct version for update comparison.
+
 ### UI theme colours (Configuration)
 
 - Added **`UiThemeColors`** (frozen defaults: soft rose alert rows, teal-leaning crew totals, slate tooltips, pink report outline) persisted under `app_settings.ui_theme` in config JSON.

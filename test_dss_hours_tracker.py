@@ -8,6 +8,7 @@ Workbook / load_tracker_data / cache integration tests live in
 """
 
 import os
+import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
@@ -379,6 +380,23 @@ class DssHoursTrackerTests(DssHoursTrackerFixtures):
         merged = parse_ui_theme_payload({"alert_row_background": "#001122", "tooltip_foreground": "not-a-colour"})
         self.assertEqual(merged.alert_row_background, "#001122")
         self.assertEqual(merged.tooltip_foreground, DEFAULT_UI_THEME.tooltip_foreground)
+
+    def test_discover_app_version_env_override(self) -> None:
+        import dss_hours_tracker as m
+
+        with mock.patch.dict(os.environ, {"DSS_APP_VERSION": "9.8.7"}):
+            self.assertEqual(m.discover_app_version(), "9.8.7")
+
+    def test_discover_app_version_frozen_bundle_file(self) -> None:
+        import dss_hours_tracker as m
+
+        with tempfile.TemporaryDirectory() as tdir:
+            Path(tdir, "dss_app_version.txt").write_text("2.3.4", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"DSS_APP_VERSION": ""}):
+                with mock.patch.object(m.sys, "frozen", True, create=True), mock.patch.object(
+                    m.sys, "_MEIPASS", tdir, create=True
+                ):
+                    self.assertEqual(m.discover_app_version(), "2.3.4")
 
     def test_binding_sequence_from_keypress_event(self) -> None:
         class KeyEvt:
