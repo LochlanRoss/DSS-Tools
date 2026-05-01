@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "dss-hours-tracker"
+name = "dss-tools"
 version = "0.1.0"
-description = "Desktop DSS labour-hour tracker"
+description = "DSS Tools — desktop DSS labour-hour summaries and workflows"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.gui-scripts]
-dss-hours-tracker = "dss_hours_tracker:main"
+dss-tools = "dss_hours_tracker:main"
 
 [tool.setuptools]
 py-modules = ["dss_hours_tracker"]

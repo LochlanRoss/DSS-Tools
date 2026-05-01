@@ -4,7 +4,7 @@ from __future__ import annotations
 Fast unit tests (no RUN_SLOW_TESTS required).
 
 Workbook / load_tracker_data / cache integration tests live in
-`test_dss_hours_tracker_integration.py` and run when RUN_SLOW_TESTS=1.
+`test_dss_tools_integration.py` and run when RUN_SLOW_TESTS=1.
 """
 
 import os
@@ -73,10 +73,10 @@ from dss_hours_tracker import (
     save_table_layout,
     select_preferred_dated_sheets,
 )
-from test_dss_hours_tracker_fixtures import DssHoursTrackerFixtures
+from test_dss_tools_fixtures import DssToolsFixtures
 
 
-class DssHoursTrackerTests(DssHoursTrackerFixtures):
+class DssToolsTests(DssToolsFixtures):
     def test_daily_rollup_sort_key_keeps_sections_grouped(self) -> None:
         rows = [
             ("PF26024-2 Electrical", "2026-04-07", "Whole Crew", "255.5", "30", "60", "345.5", "420.5", "Crew Total"),
@@ -212,38 +212,38 @@ class DssHoursTrackerTests(DssHoursTrackerFixtures):
         payload = {
             'tag_name': 'v0.2.1',
             'name': 'Release 0.2.1',
-            'html_url': 'https://github.com/LochlanRoss/DSS-Viewer/releases/tag/v0.2.1',
+            'html_url': 'https://github.com/LochlanRoss/DSS-Tools/releases/tag/v0.2.1',
             'published_at': '2026-05-01T00:00:00Z',
             'body': 'Notes',
             'assets': [
-                {'name': 'DSSViewerSetup.exe', 'browser_download_url': 'https://example.invalid/setup.exe', 'size': 1234, 'content_type': 'application/octet-stream'},
+                {'name': 'DSSToolsSetup.exe', 'browser_download_url': 'https://example.invalid/setup.exe', 'size': 1234, 'content_type': 'application/octet-stream'},
                 {'name': 'checksums.txt', 'browser_download_url': 'https://example.invalid/checksums.txt'},
             ],
         }
         info = parse_latest_release_payload(payload)
         self.assertEqual(info['version'], '0.2.1')
         self.assertEqual(info['tag_name'], 'v0.2.1')
-        self.assertEqual(info['asset_names'], ['DSSViewerSetup.exe', 'checksums.txt'])
+        self.assertEqual(info['asset_names'], ['DSSToolsSetup.exe', 'checksums.txt'])
         self.assertEqual(info['assets'][0]['download_url'], 'https://example.invalid/setup.exe')
 
     def test_release_asset_selection_and_checksum_parsing(self) -> None:
         release_info = {
             'assets': [
                 {'name': 'notes.zip', 'download_url': 'https://example.invalid/notes.zip'},
-                {'name': 'DSSViewerSetup.exe', 'download_url': 'https://example.invalid/setup.exe'},
+                {'name': 'DSSToolsSetup.exe', 'download_url': 'https://example.invalid/setup.exe'},
                 {'name': 'checksums.txt', 'download_url': 'https://example.invalid/checksums.txt'},
             ]
         }
         installer = choose_release_installer_asset(release_info)
         checksum_asset = choose_release_checksum_asset(release_info)
         manifest = (
-            'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa *DSSViewerSetup.exe\n'
+            'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa *DSSToolsSetup.exe\n'
             'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  other.msi\n'
         )
-        self.assertEqual(installer['name'], 'DSSViewerSetup.exe')
+        self.assertEqual(installer['name'], 'DSSToolsSetup.exe')
         self.assertEqual(checksum_asset['name'], 'checksums.txt')
         self.assertEqual(
-            checksum_for_asset_name(manifest, 'DSSViewerSetup.exe'),
+            checksum_for_asset_name(manifest, 'DSSToolsSetup.exe'),
             'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
         )
         self.assertIn('other.msi', parse_checksum_manifest(manifest))
@@ -520,8 +520,8 @@ class DssHoursTrackerTests(DssHoursTrackerFixtures):
     def test_build_bug_report_html_includes_key_fields(self) -> None:
         html = build_bug_report_html(
             current_profile_name="Default",
-            app_root=Path(r"C:\Temp\DSSHoursTracker"),
-            snapshot_path=Path(r"C:\Temp\DSSHoursTracker\diagnostic_snapshot.json"),
+            app_root=Path(r"C:\Temp\DSSTools"),
+            snapshot_path=Path(r"C:\Temp\DSSTools\diagnostic_snapshot.json"),
             loaded_sources=[Path(r"C:\Work\Alpha.xlsx")],
             cache_status_by_path={Path(r"C:\Work\Alpha.xlsx"): "Disk Hit"},
         )
@@ -531,11 +531,34 @@ class DssHoursTrackerTests(DssHoursTrackerFixtures):
         self.assertIn("diagnostic_snapshot.json", html)
         self.assertIn("Alpha.xlsx", html)
         self.assertIn("Disk Hit", html)
+        self.assertIn("DSS Tools", html)
 
     def test_get_app_root_uses_localappdata_when_available(self) -> None:
         with mock.patch.dict(os.environ, {"LOCALAPPDATA": r"C:\Temp\AppData"}, clear=False):
             app_root = get_app_root()
-            self.assertTrue(str(app_root).endswith("DSSHoursTracker"))
+            self.assertTrue(str(app_root).endswith("DSSTools"))
+
+    def test_get_app_root_prefers_legacy_folder_when_present(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            legacy = Path(tmp) / "DSSHoursTracker"
+            legacy.mkdir()
+            with mock.patch.dict(os.environ, {"LOCALAPPDATA": tmp}, clear=False):
+                app_root = get_app_root()
+            self.assertEqual(app_root, legacy)
+
+    def test_get_app_root_prefers_primary_when_both_folders_exist(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            legacy = Path(tmp) / "DSSHoursTracker"
+            primary = Path(tmp) / "DSSTools"
+            legacy.mkdir()
+            primary.mkdir()
+            with mock.patch.dict(os.environ, {"LOCALAPPDATA": tmp}, clear=False):
+                app_root = get_app_root()
+            self.assertEqual(app_root, primary)
 
     def test_remove_config_keys_keeps_remaining_payload(self) -> None:
         with self.workspace_json("config_keys") as path:

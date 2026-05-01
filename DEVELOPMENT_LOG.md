@@ -9,6 +9,21 @@ Small fixes and very short edits are intentionally omitted unless they materiall
 
 ## 2026-05-01
 
+### Product rename: DSS Tools
+
+- User-facing name is **DSS Tools** (`DISPLAY_APP_NAME`); window title, dialogs, bug-report copy, argparse description, and HTTP **User-Agent** use **`dss-tools/`** plus the app version string.
+- **PyInstaller / Inno / CI:** executable **`DSSTools.exe`**, installer script **`installer/DSSTools.iss`**, published asset **`DSSToolsSetup.exe`**; workflow **`.github/workflows/release-windows.yml`** updated accordingly.
+- **Distribution:** **`pyproject.toml`** project name **`dss-tools`**, GUI entrypoint **`dss-tools`**; **`discover_app_version()`** tries **`dss-tools`** package metadata first, then any older registered distribution name for the same codebase so editable or transitional installs still resolve a version.
+- **Data directory:** default **`%LOCALAPPDATA%\DSSTools`** (`APP_DIRNAME`); if the previous per-user folder already exists it is reused automatically (`LEGACY_APP_DIRNAME`) so existing installs keep their config and cache until migrated manually.
+- **Updates:** **`GITHUB_REPO_SLUG`** is **`LochlanRoss/DSS-Tools`** (rename the GitHub repository to match, or adjust the constant if releases stay on another slug).
+- Removed obsolete root Inno script (superseded by **`installer/DSSTools.iss`**). PyInstaller spec renamed to **`DSSTools.spec`** with **`name='DSSTools'`**.
+- **Test modules:** **`test_dss_tools.py`** (fast), **`test_dss_tools_integration.py`** (slow, gated), **`test_dss_tools_fixtures.py`** (shared helpers); fast CI command is **`python -m unittest test_dss_tools -q`**.
+
+### Scrollable Settings / Email Drafts pages
+
+- **VerticalScrollablePage** (`Canvas` + `ttk.Scrollbar` + inner frame) wraps long notebook tabs so a vertical scrollbar appears when the window is short: **Configuration**, **Employee List**, **Employee Notes**, **Employee Groups**, **Formatting Rules**, and **Reports ? Email Drafts**; mouse wheel scrolls the page except on `Text` / `Listbox` / `Treeview` (those keep local scroll).
+- **Employee Groups**: vertical scrollbar on the **Groups** listbox; **Employee Notes**: scrollbar on the names listbox and on the note **Text**; **Email Drafts**: scrollbars on subject and body **Text** fields.
+
 ### Main-window chrome, cache clear, reports tabs, toolbar UX
 
 - **Clear Cached DSSs** now also clears in-memory reuse flags (`file_hashes`, `reused_paths`, cache status to Miss) for the loaded set so stats and the next **Update View** do not report stale memory hits after disk cache deletion (`tracker_data_invalidated_for_cache_clear`).
@@ -19,16 +34,16 @@ Small fixes and very short edits are intentionally omitted unless they materiall
 
 ### Test layout: fast default vs slow integration
 
-- Split workbook-heavy coverage into `test_dss_hours_tracker_integration.py`, gated with **`RUN_SLOW_TESTS`** (`1` / `true` / `yes` / `all`) and `@unittest.skipUnless` on the integration class so **`python -m unittest test_dss_hours_tracker`** stays fast.
-- Shared temp-file / sample-workbook helpers live in **`test_dss_hours_tracker_fixtures.py`** (`DssHoursTrackerFixtures`) to avoid duplicating setup between modules.
-- **`test_dss_hours_tracker.py`** keeps sort keys, pure helpers, settings/layout round-trips, updater helpers, and similar tests without requiring the env var.
-- Full DSS test discovery remains **`python -m unittest discover -s . -p "test_dss*.py"`**; with `RUN_SLOW_TESTS=1`, integration tests execute instead of skipping (still **63** tests total: **35** fast + **28** slow).
-- **`test_dss_hours_tracker.py`** was trimmed so workbook/cache/`load_tracker_data` cases exist only in the integration module (no duplicate `test_*` definitions); imports were reduced to match the slimmer fast suite. Integration module imports include helpers such as **`format_email_subject`** and **`compute_bytes_hash`** where cache and email tests need them.
+- Split workbook-heavy coverage into `test_dss_tools_integration.py`, gated with **`RUN_SLOW_TESTS`** (`1` / `true` / `yes` / `all`) and `@unittest.skipUnless` on the integration class so **`python -m unittest test_dss_tools`** stays fast.
+- Shared temp-file / sample-workbook helpers live in **`test_dss_tools_fixtures.py`** (`DssToolsFixtures`) to avoid duplicating setup between modules.
+- **`test_dss_tools.py`** keeps sort keys, pure helpers, settings/layout round-trips, updater helpers, and similar tests without requiring the env var.
+- Full DSS test discovery remains **`python -m unittest discover -s . -p "test_dss*.py"`**; with `RUN_SLOW_TESTS=1`, integration tests execute instead of skipping (still **71** tests total: **43** fast + **28** slow).
+- **`test_dss_tools.py`** was trimmed so workbook/cache/`load_tracker_data` cases exist only in the integration module (no duplicate `test_*` definitions); imports were reduced to match the slimmer fast suite. Integration module imports include helpers such as **`format_email_subject`** and **`compute_bytes_hash`** where cache and email tests need them.
 - **`README.md` Tests** subsection documents the split, the env var, fixture module path, and PowerShell examples for fast-only vs full discovery runs.
 
 ### GitHub Actions: Windows release workflow
 
-- Added **`.github/workflows/release-windows.yml`**: on **semver-style tag push** (`[0-9]*.[0-9]*.[0-9]*` or `v[0-9]*.[0-9]*.[0-9]*`) or manual dispatch for an existing tag, checks out the ref, writes **`dss_app_version.txt`**, runs fast unit tests, runs **PyInstaller** `--onefile` with **`--collect-all pywin32`**, compiles **`installer/DSSHoursTracker.iss`** via **Inno Setup** (`choco install innosetup`) to **`dist/DSSHoursTrackerSetup.exe`**, emits **`checksums.txt`** for that setup program, and publishes **setup + checksums** (not the loose PyInstaller exe) via **`softprops/action-gh-release`** (`contents: write`).
+- Added **`.github/workflows/release-windows.yml`**: on **semver-style tag push** (`[0-9]*.[0-9]*.[0-9]*` or `v[0-9]*.[0-9]*.[0-9]*`) or manual dispatch for an existing tag, checks out the ref, writes **`dss_app_version.txt`**, runs fast unit tests, runs **PyInstaller** `--onefile` with **`--collect-all pywin32`**, compiles **`installer/DSSTools.iss`** via **Inno Setup** (`choco install innosetup`) to **`dist/DSSToolsSetup.exe`**, emits **`checksums.txt`** for that setup program, and publishes **setup + checksums** (not the loose PyInstaller exe) via **`softprops/action-gh-release`** (`contents: write`).
 - **`discover_app_version()`** now honours **`DSS_APP_VERSION`** env, then **`dss_app_version.txt`** in **`sys._MEIPASS`** when **`sys.frozen`**, then package metadata / **`pyproject.toml`** ù so frozen CI builds report the correct version for update comparison.
 
 ### UI theme colours (Configuration)
@@ -39,7 +54,7 @@ Small fixes and very short edits are intentionally omitted unless they materiall
 
 ### Loading hints file (auxiliary; UI not wired yet)
 
-- Added **`LOADING_HINTS.txt`** at the repository root: many single-line hints covering parsing boundaries (`K25:AZ36`), revision behaviour, AZ2 warnings, cache and semantic hash, quick load and cancel hotkey, filters and layouts, Outlook and email drafts, formatting rules, combined-name caveats, maintenance buttons, `%LOCALAPPDATA%\DSSHoursTracker`, and similar limitations.
+- Added **`LOADING_HINTS.txt`** at the repository root: many single-line hints covering parsing boundaries (`K25:AZ36`), revision behaviour, AZ2 warnings, cache and semantic hash, quick load and cancel hotkey, filters and layouts, Outlook and email drafts, formatting rules, combined-name caveats, maintenance buttons, `%LOCALAPPDATA%\DSSTools`, and similar limitations.
 - First lines in the file are **`#` comments** documenting convention: a future loader can skip lines starting with `#` and rotate the rest on splash or progress UI.
 
 ### Maintainer / handoff notes (no code change)
@@ -121,7 +136,7 @@ Small fixes and very short edits are intentionally omitted unless they materiall
 - **UI:** double-click **source file** opens the workbook; column drag shows a vertical insertion indicator; Summaries notebook order is daily views before weekly (`Daily by PF#`, `Weekly by PF#`, combined day, combined week).
 - **Load order:** multi-DSS loads sort sources by file **mtime** (newest first); `process_workbook_bytes` progress text includes **PF#-#** plus sheet name.
 - **Quick load:** last successfully opened DSS paths persist in config; optional startup reload (800 ms after launch if no CLI sources), progress hint label, cancel button plus **configurable global hotkey** (presets and a "Press keys..." capture dialog, stored as a Tk virtual event string). `AppSettings` adds `quickload_last_sources_enabled` and `quickload_cancel_hotkey`.
-- **Tests:** app-settings round-trip and hotkey helper tests; full suite **63** tests passing (includes path-like column helper and cache/hash cases).
+- **Tests:** app-settings round-trip and hotkey helper tests; full suite **71** tests passing (includes path-like column helper and cache/hash cases).
 
 ### Comprehensive progress log (recent implementation work)
 
@@ -168,7 +183,7 @@ Consolidated detail for the same feature batch (parsing, cache, UI, settings, te
 
 **Testing**
 
-- Extended tests: revision parsing, preferred-sheet / AZ2 behaviour, `combine_sheet_hashes`, app-settings round-trip (quick-load fields), hotkey helpers, path-like column detection, disk cache `file_hash` contract, `rv` sheet suffix. **63** tests, `python -m unittest test_dss_hours_tracker -q`.
+- Extended tests: revision parsing, preferred-sheet / AZ2 behaviour, `combine_sheet_hashes`, app-settings round-trip (quick-load fields), hotkey helpers, path-like column detection, disk cache `file_hash` contract, `rv` sheet suffix. **71** tests, `python -m unittest test_dss_tools -q`.
 
 **Documentation**
 
@@ -181,7 +196,7 @@ Consolidated detail for the same feature batch (parsing, cache, UI, settings, te
 - **Path-like columns** (`source_file`, configured `source_file_column`, `sources`, any `*_path`) use a lower pixel cap than general text; other columns use a high ceiling so wide text (for example **Details**) still fits without unbounded growth.
 - **Saved `column_widths` in `table_layouts`:** Widths from disk are no longer applied on load so content-based sizing stays consistent; widths are still written when layouts save for backward compatibility.
 - **Stretch:** Only the last visible column uses `stretch=True` so extra horizontal space is absorbed there.
-- **Tests:** `is_path_like_table_column` unit coverage; full suite **63** tests with `python -m unittest test_dss_hours_tracker -q`.
+- **Tests:** `is_path_like_table_column` unit coverage; full suite **71** tests with `python -m unittest test_dss_tools -q`.
 
 ### Table UX and cache/revision fixes (same cycle)
 
@@ -189,7 +204,7 @@ Consolidated detail for the same feature batch (parsing, cache, UI, settings, te
 - **Word wrap:** per-`DataTable` toolbar button `Word wrap (off)` / `(on)`; wraps displayed cell text to the current column pixel width and applies a custom `ttk.Style` row height so wrapped lines show; source-file double-click strips embedded newlines before opening.
 - **Disk cache key:** after a **Partial Refresh**, `save_cached_daily_records` now stores the same **workbook content hash** as `load_cached_daily_records` expects (previously the semantic fingerprint was written, causing a perpetual disk miss for that file until re-parse).
 - **Sheet revision names:** `REVISION_PATTERN` recognises **`rv`** + digits (e.g. `2026-04-26 rv1`) so `parse_sheet_revision` aligns with AZ2 revision level `1`.
-- **Tests:** `parse_sheet_revision` cases for `rv1`/`RV2`; `test_disk_cache_load_requires_workbook_content_hash`; suite **63** tests.
+- **Tests:** `parse_sheet_revision` cases for `rv1`/`RV2`; `test_disk_cache_load_requires_workbook_content_hash`; suite **71** tests.
 
 ## Current Open Bugs
 These remain on `Known bugs List.txt` until explicitly confirmed fixed by the user.
@@ -208,5 +223,5 @@ These remain on `Known bugs List.txt` until explicitly confirmed fixed by the us
 - `UI Standardization Notes.md` is the reusable generalized UI handoff/reference document.
 - `DEVELOPMENT_LOG.md` is the higher-signal historical record for meaningful completed work and notable active items.
 - The repo path is now writable in-session:
-  - `C:\Users\LochlanRoss\Documents\GitHub\DSS Viewer`
+  - `C:\Users\LochlanRoss\Documents\GitHub\DSS-Tools` (local clone path; adjust to match your machine)
 - The current Codex config is using Windows `sandbox = "unelevated"` with per-project trust entries.

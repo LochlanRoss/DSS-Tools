@@ -65,7 +65,10 @@ RIGHT_NAME_COLS = tuple(range(29, 48))  # AC:AV
 RIGHT_HOUR_COLS = tuple(range(50, 53))  # AX:AZ
 CONFIG_FILENAME = "dss_hours_tracker_config.json"
 DEFAULT_PROFILE_NAME = "Default"
-APP_DIRNAME = "DSSHoursTracker"
+DISPLAY_APP_NAME = "DSS Tools"
+APP_DIRNAME = "DSSTools"
+LEGACY_APP_DIRNAME = "DSSHoursTracker"
+DISTRIBUTION_PACKAGE_NAMES = ("dss-tools", "dss-hours-tracker")
 CACHE_DIRNAME = "cache"
 CACHE_RETENTION_DAYS = 7
 HASH_CHECK_INTERVAL_MS = 300000
@@ -77,7 +80,7 @@ MAX_PARALLEL_PARSE_WORKERS = 2
 UPDATE_DIRNAME = "updates"
 INSTALLER_EXTENSIONS = (".exe", ".msi", ".msix", ".msixbundle")
 CHECKSUM_ASSET_NAMES = ("checksums.txt", "sha256sums.txt", "sha256sums", "sha256sum.txt")
-GITHUB_REPO_SLUG = "LochlanRoss/DSS-Viewer"
+GITHUB_REPO_SLUG = "LochlanRoss/DSS-Tools"
 GITHUB_LATEST_RELEASE_URL = f"https://api.github.com/repos/{GITHUB_REPO_SLUG}/releases/latest"
 
 
@@ -99,10 +102,11 @@ def discover_app_version() -> str:
             text = ""
         if text:
             return text
-    try:
-        return importlib_metadata.version("dss-hours-tracker")
-    except importlib_metadata.PackageNotFoundError:
-        pass
+    for package_name in DISTRIBUTION_PACKAGE_NAMES:
+        try:
+            return importlib_metadata.version(package_name)
+        except importlib_metadata.PackageNotFoundError:
+            continue
     pyproject_path = Path(__file__).with_name("pyproject.toml")
     try:
         with pyproject_path.open("rb") as handle:
@@ -170,7 +174,7 @@ def fetch_latest_release_info(url: str = GITHUB_LATEST_RELEASE_URL, timeout: int
     request = urllib.request.Request(
         url,
         headers={
-            "User-Agent": f"dss-hours-tracker/{discover_app_version()}",
+            "User-Agent": f"dss-tools/{discover_app_version()}",
             "Accept": "application/vnd.github+json",
         },
     )
@@ -250,7 +254,7 @@ def download_url_bytes(url: str, timeout: int = 60) -> bytes:
     request = urllib.request.Request(
         url,
         headers={
-            "User-Agent": f"dss-hours-tracker/{APP_VERSION}",
+            "User-Agent": f"dss-tools/{APP_VERSION}",
             "Accept": "application/octet-stream, text/plain, application/vnd.github+json",
         },
     )
@@ -700,14 +704,30 @@ class WorkbookHealthItem:
     details: str
 
 
+def _app_root_primary_and_legacy(base_dir: Path) -> Path:
+    primary = base_dir / APP_DIRNAME
+    legacy = base_dir / LEGACY_APP_DIRNAME
+    if primary.exists():
+        return primary
+    if legacy.exists():
+        return legacy
+    return primary
+
+
 def get_app_root() -> Path:
     if os.name == "nt":
         base = os.environ.get("LOCALAPPDATA")
         if base:
-            return Path(base) / APP_DIRNAME
+            return _app_root_primary_and_legacy(Path(base))
     if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent / APP_DIRNAME
-    return Path.home() / f".{APP_DIRNAME}"
+        return _app_root_primary_and_legacy(Path(sys.executable).resolve().parent)
+    primary = Path.home() / f".{APP_DIRNAME}"
+    legacy = Path.home() / f".{LEGACY_APP_DIRNAME}"
+    if primary.exists():
+        return primary
+    if legacy.exists():
+        return legacy
+    return primary
 
 
 def ensure_app_directories() -> tuple[Path, Path]:
@@ -2027,7 +2047,7 @@ def build_bug_report_html(
     ) or "<li>None loaded</li>"
     return (
         "<p>Hi Lochlan,</p>"
-        "<p>Please find a bug report for DSS Hours Tracker below.</p>"
+        f"<p>Please find a bug report for {DISPLAY_APP_NAME} below.</p>"
         "<p><strong>Summary:</strong><br>[Describe the bug briefly]</p>"
         "<p><strong>What I was trying to do:</strong><br>[Describe the task]</p>"
         "<p><strong>What happened:</strong><br>[Describe the actual result or error]</p>"
@@ -3953,6 +3973,51 @@ def bind_horizontal_mousewheel(widget: tk.Widget, scroll_target, units_per_notch
     widget.bind("<Shift-MouseWheel>", on_shift_mousewheel, add="+")
 
 
+class VerticalScrollablePage(ttk.Frame):
+    """Notebook (or similar) page with a vertical scrollbar when content is taller than the viewport."""
+
+    def __init__(self, master: tk.Misc):
+        super().__init__(master)
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+        style = ttk.Style(self)
+        canvas_bg = style.lookup("TFrame", "background") or "#f0f0f0"
+        self._canvas = tk.Canvas(self, highlightthickness=0, borderwidth=0, background=canvas_bg)
+        self._vscroll = ttk.Scrollbar(self, orient="vertical", command=self._canvas.yview)
+        self._canvas.configure(yscrollcommand=self._vscroll.set)
+        self._canvas.grid(row=0, column=0, sticky="nsew")
+        self._vscroll.grid(row=0, column=1, sticky="ns")
+        self.inner = ttk.Frame(self._canvas)
+        self._inner_window = self._canvas.create_window((0, 0), window=self.inner, anchor="nw")
+
+        def _on_inner_configure(_event: tk.Event | None = None) -> None:
+            self._canvas.configure(scrollregion=self._canvas.bbox("all"))
+
+        def _on_canvas_configure(event: tk.Event) -> None:
+            self._canvas.itemconfigure(self._inner_window, width=max(1, int(event.width)))
+
+        self.inner.bind("<Configure>", _on_inner_configure)
+        self._canvas.bind("<Configure>", _on_canvas_configure)
+
+    def wire_mousewheel_to_canvas(self) -> None:
+        """Route wheel events from descendants to the page canvas (except self-scrolling Text/Listbox/Treeview)."""
+        canvas = self._canvas
+
+        bind_vertical_mousewheel(canvas, canvas)
+
+        def visit(parent: tk.Misc) -> None:
+            for child in parent.winfo_children():
+                if isinstance(child, (tk.Text, tk.Listbox)):
+                    bind_vertical_mousewheel(child, child, units_per_notch=4)
+                elif isinstance(child, ttk.Treeview):
+                    pass
+                else:
+                    bind_vertical_mousewheel(child, canvas, units_per_notch=3)
+                visit(child)
+
+        visit(self.inner)
+
+
 class EmployeeListEditor(ttk.Frame):
     def __init__(
         self,
@@ -4085,8 +4150,14 @@ class EmailDraftsFrame(ttk.Frame):
         self.week_combo.grid(row=0, column=1, sticky="ew", pady=(0, 8))
 
         ttk.Label(self, text="Subject Template").grid(row=1, column=0, sticky="nw")
-        self.subject_template_text = tk.Text(self, wrap="word", height=2)
-        self.subject_template_text.grid(row=1, column=1, sticky="ew", pady=(0, 8))
+        subject_wrap = ttk.Frame(self)
+        subject_wrap.grid(row=1, column=1, sticky="ew", pady=(0, 8))
+        subject_wrap.columnconfigure(0, weight=1)
+        self.subject_template_text = tk.Text(subject_wrap, wrap="word", height=2)
+        subject_scroll = ttk.Scrollbar(subject_wrap, orient="vertical", command=self.subject_template_text.yview)
+        self.subject_template_text.configure(yscrollcommand=subject_scroll.set)
+        self.subject_template_text.grid(row=0, column=0, sticky="nsew")
+        subject_scroll.grid(row=0, column=1, sticky="ns")
         bind_vertical_mousewheel(self.subject_template_text, self.subject_template_text, units_per_notch=4)
 
         ttk.Button(self, text="Create Outlook Drafts", command=self.create_drafts_callback).grid(
@@ -4108,8 +4179,15 @@ class EmailDraftsFrame(ttk.Frame):
         self.summary_label.grid(row=2, column=0, columnspan=3, sticky="w", pady=(0, 8))
 
         ttk.Label(self, text="Body Template (HTML)").grid(row=3, column=0, sticky="nw")
-        self.body_template_text = tk.Text(self, wrap="word", height=8)
-        self.body_template_text.grid(row=3, column=1, columnspan=4, sticky="nsew", pady=(0, 8))
+        body_wrap = ttk.Frame(self)
+        body_wrap.grid(row=3, column=1, columnspan=4, sticky="nsew", pady=(0, 8))
+        body_wrap.columnconfigure(0, weight=1)
+        body_wrap.rowconfigure(0, weight=1)
+        self.body_template_text = tk.Text(body_wrap, wrap="word", height=8)
+        body_scroll = ttk.Scrollbar(body_wrap, orient="vertical", command=self.body_template_text.yview)
+        self.body_template_text.configure(yscrollcommand=body_scroll.set)
+        self.body_template_text.grid(row=0, column=0, sticky="nsew")
+        body_scroll.grid(row=0, column=1, sticky="ns")
         bind_vertical_mousewheel(self.body_template_text, self.body_template_text, units_per_notch=4)
 
         self.preview_table = DataTable(
@@ -4198,8 +4276,13 @@ class EmployeeGroupsFrame(ttk.Frame):
         left = ttk.Frame(self)
         left.grid(row=0, column=0, rowspan=3, sticky="nsw", padx=(0, 12))
         ttk.Label(left, text="Groups").pack(anchor="w")
-        self.group_listbox = tk.Listbox(left, exportselection=False, height=12)
-        self.group_listbox.pack(fill="both", expand=True, pady=(4, 8))
+        list_row = ttk.Frame(left)
+        list_row.pack(fill="both", expand=True, pady=(4, 8))
+        self.group_listbox = tk.Listbox(list_row, exportselection=False, height=12)
+        group_list_scroll = ttk.Scrollbar(list_row, orient="vertical", command=self.group_listbox.yview)
+        self.group_listbox.configure(yscrollcommand=group_list_scroll.set)
+        self.group_listbox.pack(side="left", fill="both", expand=True)
+        group_list_scroll.pack(side="right", fill="y")
         self.group_listbox.bind("<<ListboxSelect>>", self._on_group_selected)
         bind_vertical_mousewheel(self.group_listbox, self.group_listbox, units_per_notch=4)
         ttk.Button(left, text="New Group", command=self.create_group).pack(fill="x")
@@ -4333,8 +4416,15 @@ class EmployeeNotesEditor(ttk.Frame):
         self.columnconfigure(1, weight=1)
         self.rowconfigure(0, weight=1)
 
-        self.listbox = tk.Listbox(self, exportselection=False)
-        self.listbox.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+        list_col = ttk.Frame(self)
+        list_col.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+        list_col.rowconfigure(0, weight=1)
+        list_col.columnconfigure(0, weight=1)
+        self.listbox = tk.Listbox(list_col, exportselection=False)
+        notes_lb_scroll = ttk.Scrollbar(list_col, orient="vertical", command=self.listbox.yview)
+        self.listbox.configure(yscrollcommand=notes_lb_scroll.set)
+        self.listbox.grid(row=0, column=0, sticky="nsew")
+        notes_lb_scroll.grid(row=0, column=1, sticky="ns")
         self.listbox.bind("<<ListboxSelect>>", self._on_selection_changed)
         bind_vertical_mousewheel(self.listbox, self.listbox, units_per_notch=4)
 
@@ -4344,11 +4434,14 @@ class EmployeeNotesEditor(ttk.Frame):
         editor.rowconfigure(1, weight=1)
 
         self.selected_name_var = tk.StringVar(value="")
-        ttk.Label(editor, textvariable=self.selected_name_var).grid(row=0, column=0, sticky="w", pady=(0, 8))
+        ttk.Label(editor, textvariable=self.selected_name_var).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
         self.note_text = tk.Text(editor, wrap="word", height=10)
+        note_text_scroll = ttk.Scrollbar(editor, orient="vertical", command=self.note_text.yview)
+        self.note_text.configure(yscrollcommand=note_text_scroll.set)
         self.note_text.grid(row=1, column=0, sticky="nsew")
+        note_text_scroll.grid(row=1, column=1, sticky="ns")
         bind_vertical_mousewheel(self.note_text, self.note_text, units_per_notch=4)
-        ttk.Button(editor, text="Save Note", command=self.save_note).grid(row=2, column=0, sticky="w", pady=(8, 0))
+        ttk.Button(editor, text="Save Note", command=self.save_note).grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
     def set_data(self, names: list[str], notes_map: dict[str, str]) -> None:
         current = self.selected_employee()
@@ -4388,10 +4481,10 @@ class EmployeeNotesEditor(ttk.Frame):
         self.set_data(self.names, self.notes_map)
 
 
-class DssHoursTrackerApp(tk.Tk):
+class DssToolsApp(tk.Tk):
     def __init__(self, initial_source: Path | Iterable[Path] | None = None):
         super().__init__()
-        self.title("DSS Hours Tracker")
+        self.title(DISPLAY_APP_NAME)
         self.geometry("1200x760")
         self.minsize(760, 520)
         self.app_root, self.cache_dir = ensure_app_directories()
@@ -4553,11 +4646,14 @@ class DssHoursTrackerApp(tk.Tk):
             source_file_column="source_file",
             ui_theme=self.app_settings.ui_theme,
         )
+        self._employee_scroll_page = VerticalScrollablePage(self.settings_notebook)
         self.employee_editor = EmployeeListEditor(
-            self.settings_notebook,
+            self._employee_scroll_page.inner,
             on_email_changed=self._update_employee_email,
             on_request_edit_email=self._prompt_edit_employee_email,
         )
+        self.employee_editor.pack(fill="both", expand=True)
+        self._employee_scroll_page.wire_mousewheel_to_canvas()
         self.weekly_rollup_table = DataTable(
             self.summaries_notebook,
             columns=["source_file", "week_start", "week_end", "employee", "st", "ot", "dt", "total", "expanded", "row_type"],
@@ -4694,27 +4790,46 @@ class DssHoursTrackerApp(tk.Tk):
             source_file_column="source_file",
             ui_theme=self.app_settings.ui_theme,
         )
+        self._email_scroll_page = VerticalScrollablePage(self.reports_notebook)
         self.email_drafts_frame = EmailDraftsFrame(
-            self.reports_notebook,
+            self._email_scroll_page.inner,
             create_drafts_callback=self.create_email_drafts,
             sync_emails_callback=self.sync_outlook_emails,
             on_request_edit_email=self._prompt_edit_employee_email,
             save_templates_callback=self._save_email_templates,
             ui_theme=self.app_settings.ui_theme,
         )
+        self.email_drafts_frame.pack(fill="both", expand=True)
         self.email_drafts_frame.week_combo.bind("<<ComboboxSelected>>", self._on_email_week_changed)
         self.email_drafts_frame.set_templates(self.email_subject_template, self.email_body_template)
+        self._email_scroll_page.wire_mousewheel_to_canvas()
+
+        self._groups_scroll_page = VerticalScrollablePage(self.settings_notebook)
         self.groups_frame = EmployeeGroupsFrame(
-            self.settings_notebook,
+            self._groups_scroll_page.inner,
             on_groups_changed=self._update_employee_groups,
             on_request_edit_email=self._prompt_edit_employee_email,
             sync_emails_callback=self.sync_outlook_emails,
         )
-        self.notes_frame = EmployeeNotesEditor(self.settings_notebook, on_notes_changed=self._update_employee_note)
-        self.rules_frame = ttk.Frame(self.settings_notebook, padding=12)
+        self.groups_frame.pack(fill="both", expand=True)
+        self._groups_scroll_page.wire_mousewheel_to_canvas()
+
+        self._notes_scroll_page = VerticalScrollablePage(self.settings_notebook)
+        self.notes_frame = EmployeeNotesEditor(self._notes_scroll_page.inner, on_notes_changed=self._update_employee_note)
+        self.notes_frame.pack(fill="both", expand=True)
+        self._notes_scroll_page.wire_mousewheel_to_canvas()
+
+        self._rules_scroll_page = VerticalScrollablePage(self.settings_notebook)
+        self.rules_frame = ttk.Frame(self._rules_scroll_page.inner, padding=12)
+        self.rules_frame.pack(fill="both", expand=True)
         self._build_rules_tab()
-        self.config_frame = ttk.Frame(self.settings_notebook, padding=12)
+        self._rules_scroll_page.wire_mousewheel_to_canvas()
+
+        self._config_scroll_page = VerticalScrollablePage(self.settings_notebook)
+        self.config_frame = ttk.Frame(self._config_scroll_page.inner, padding=12)
+        self.config_frame.pack(fill="both", expand=True)
         self._build_config_tab()
+        self._config_scroll_page.wire_mousewheel_to_canvas()
 
         self.group_notebook.add(self.data_group, text="Data")
         self.group_notebook.add(self.summaries_group, text="Summaries")
@@ -4732,12 +4847,12 @@ class DssHoursTrackerApp(tk.Tk):
         self.reports_notebook.add(self.parse_warnings_table, text="Sheet Parse Warnings")
         self.reports_notebook.add(self.workbook_health_table, text="Workbook Health")
         self.reports_notebook.add(self.audit_data_trail_table, text="Audit Data Trail")
-        self.reports_notebook.add(self.email_drafts_frame, text="Email Drafts")
-        self.settings_notebook.add(self.config_frame, text="Configuration")
-        self.settings_notebook.add(self.employee_editor, text="Employee List")
-        self.settings_notebook.add(self.notes_frame, text="Employee Notes")
-        self.settings_notebook.add(self.groups_frame, text="Employee Groups")
-        self.settings_notebook.add(self.rules_frame, text="Formatting Rules")
+        self.reports_notebook.add(self._email_scroll_page, text="Email Drafts")
+        self.settings_notebook.add(self._config_scroll_page, text="Configuration")
+        self.settings_notebook.add(self._employee_scroll_page, text="Employee List")
+        self.settings_notebook.add(self._notes_scroll_page, text="Employee Notes")
+        self.settings_notebook.add(self._groups_scroll_page, text="Employee Groups")
+        self.settings_notebook.add(self._rules_scroll_page, text="Formatting Rules")
         self._refresh_filter_options()
         self._apply_ui_theme_to_all_tables()
         self._sync_reports_alert_chrome(
@@ -5319,6 +5434,7 @@ class DssHoursTrackerApp(tk.Tk):
     def _write_diagnostic_snapshot(self) -> Path:
         snapshot = {
             "created_at": datetime.now().isoformat(timespec="seconds"),
+            "app_name": DISPLAY_APP_NAME,
             "app_root": str(self.app_root),
             "cache_dir": str(self.cache_dir),
             "config_path": str(self.config_path),
@@ -5550,7 +5666,7 @@ class DssHoursTrackerApp(tk.Tk):
             f"File: {destination.name}\n"
             f"Saved to: {destination}\n"
             f"Checksum verified: {'Yes' if checksum_verified else 'No checksum asset found'}\n\n"
-            "Install it now? The DSS Hours Tracker window will close first.",
+            f"Install it now? The {DISPLAY_APP_NAME} window will close first.",
         )
         if should_install:
             self._launch_update_installer(destination)
@@ -5576,7 +5692,7 @@ class DssHoursTrackerApp(tk.Tk):
             snapshot_path = self._write_diagnostic_snapshot()
             loaded_sources = self.current_data.source_paths if self.current_data is not None else []
             cache_status_by_path = self.current_data.cache_status_by_path if self.current_data is not None else {}
-            subject = f"DSS Hours Tracker Bug Report - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+            subject = f"{DISPLAY_APP_NAME} Bug Report - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
             html_body = build_bug_report_html(
                 self.current_profile_name,
                 self.app_root,
@@ -5745,7 +5861,7 @@ class DssHoursTrackerApp(tk.Tk):
                 str(self.parse_warnings_table): self.parse_warnings_table,
                 str(self.workbook_health_table): self.workbook_health_table,
                 str(self.audit_data_trail_table): self.audit_data_trail_table,
-                str(self.email_drafts_frame): self.email_drafts_frame.preview_table,
+                str(self._email_scroll_page): self.email_drafts_frame.preview_table,
             }
             return mapping.get(current_page)
         return None
@@ -6499,7 +6615,7 @@ class DssHoursTrackerApp(tk.Tk):
             return
         self._set_loading_state(False)
         self._end_cancellable_action(cancel_event)
-        messagebox.showerror("DSS Hours Tracker", f"Failed to open workbook.\n\n{exc}")
+        messagebox.showerror(DISPLAY_APP_NAME, f"Failed to open workbook.\n\n{exc}")
 
     def _handle_partial_load_update(self, request_id: int, tracker_data: TrackerData, message: str) -> None:
         if request_id != self._load_request_id:
@@ -6552,7 +6668,7 @@ class DssHoursTrackerApp(tk.Tk):
                 summary_lines.append("Reprocessed files:")
                 summary_lines.extend(str(path) for path in tracker_data.reloaded_paths)
             messagebox.showinfo(
-                "DSS Hours Tracker",
+                DISPLAY_APP_NAME,
                 "\n".join(summary_lines),
             )
 
@@ -7072,12 +7188,12 @@ class DssHoursTrackerApp(tk.Tk):
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Desktop viewer for DSS labour-hour summaries.")
+    parser = argparse.ArgumentParser(description="DSS Tools — desktop DSS labour-hour summaries and workflows.")
     parser.add_argument("source", nargs="*", help="Optional DSS workbook(s) to open on launch.")
     args = parser.parse_args()
 
     initial_source = [Path(path).expanduser().resolve() for path in args.source] if args.source else None
-    app = DssHoursTrackerApp(initial_source=initial_source)
+    app = DssToolsApp(initial_source=initial_source)
     app.mainloop()
     return 0
 

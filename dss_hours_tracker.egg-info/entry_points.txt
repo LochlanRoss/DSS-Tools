@@ -1,2 +1,0 @@
-[gui_scripts]
-dss-hours-tracker = dss_hours_tracker:main

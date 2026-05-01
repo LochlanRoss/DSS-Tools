@@ -1,4 +1,4 @@
-"""Shared workbook / workspace helpers for DSS Hours Tracker tests."""
+"""Shared workbook / workspace helpers for DSS Tools tests."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import unittest
 from openpyxl import Workbook
 
 
-class DssHoursTrackerFixtures(unittest.TestCase):
+class DssToolsFixtures(unittest.TestCase):
     """Base with temp paths and minimal DSS workbooks (no test methods)."""
 
     @contextmanager

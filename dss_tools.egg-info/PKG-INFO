@@ -1,3 +1,12 @@
+Metadata-Version: 2.4
+Name: dss-tools
+Version: 0.1.0
+Summary: DSS Tools — desktop DSS labour-hour summaries and workflows
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: openpyxl<4,>=3.1
+Requires-Dist: pywin32>=306; platform_system == "Windows"
+
 # DSS Tools
 
 Desktop GUI for opening one or more DSS `.xlsx` workbooks, extracting labour hours from the protected daily sheets, and working with the results directly in the app.

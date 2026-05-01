@@ -1,4 +1,4 @@
-# DSS Hours Tracker — loading hints (one line per hint; lines starting with # are skipped in the UI)
+# DSS Tools — loading hints (one line per hint; lines starting with # are skipped in the UI)
 # Nuances, settings, features, and limitations for optional splash / progress display.
 
 Only the cell range K25:AZ36 on dated daily sheets is read as DSS labour data; everything else on the sheet is ignored for parsing.
@@ -16,7 +16,7 @@ The app uses a DSS semantic hash (dated sheets and K25:AZ36 only) so OneDrive au
 Per-sheet digests allow a partial refresh: only sheets that actually changed are re-read when the rest still matches cache.
 Parsed data is cached on disk for up to seven days; stale cache files can be purged from Configuration maintenance buttons.
 Clear Cached DSSs removes parsed cache only; Reset / Clear All affects broader stored data—read the button labels before confirming.
-Settings, layouts, emails, templates, and cache live under %LOCALAPPDATA%\DSSHoursTracker on Windows—Show App Data Folder opens it.
+Settings, layouts, emails, templates, and cache live under %LOCALAPPDATA%\DSSTools on Windows (existing installs may still use a prior folder until migrated)—Show App Data Folder opens the active path.
 Saved table column pixel widths are not reapplied on each refresh; widths follow current header and cell text so grids stay readable.
 Source File and other path-like columns use a tighter width cap so long paths do not stretch the entire table.
 Resizing one column does not shrink its neighbour; use the horizontal scrollbar when the table is wider than the window.

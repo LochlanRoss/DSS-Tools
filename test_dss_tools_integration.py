@@ -2,7 +2,7 @@
 Integration tests: workbook IO, parse_daily_records, load_tracker_data, cache.
 
 These are skipped unless RUN_SLOW_TESTS is set (1/true/yes/all) so default
-`python -m unittest test_dss_hours_tracker` stays fast during iteration.
+`python -m unittest test_dss_tools` stays fast during iteration.
 
 Full suite: RUN_SLOW_TESTS=1 python -m unittest discover -s . -p "test_dss*.py"
 """
@@ -45,7 +45,7 @@ from dss_hours_tracker import (
     save_cached_daily_records,
     serialize_daily_record,
 )
-from test_dss_hours_tracker_fixtures import DssHoursTrackerFixtures
+from test_dss_tools_fixtures import DssToolsFixtures
 
 _SLOW = os.environ.get("RUN_SLOW_TESTS", "").strip().lower() in {"1", "true", "yes", "all"}
 
@@ -54,7 +54,7 @@ _SLOW = os.environ.get("RUN_SLOW_TESTS", "").strip().lower() in {"1", "true", "y
     _SLOW,
     "Slow integration tests skipped. Set RUN_SLOW_TESTS=1 to run (see README).",
 )
-class DssHoursTrackerIntegrationTests(DssHoursTrackerFixtures):
+class DssToolsIntegrationTests(DssToolsFixtures):
     def test_parse_daily_records_ignores_numeric_name_cells(self) -> None:
         with self.workspace_files("sample") as source:
             self.build_source_workbook(source)

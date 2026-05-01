@@ -78,10 +78,10 @@ jobs:
           cat dss_app_version.txt
 
       - name: Run fast unit tests
-        run: python -m unittest test_dss_hours_tracker -q
+        run: python -m unittest test_dss_tools -q
 
       - name: PyInstaller (one file)
-        run: pyinstaller --noconsole --onefile --name DSSHoursTracker --collect-all pywin32 --add-data "dss_app_version.txt;." dss_hours_tracker.py
+        run: pyinstaller --noconsole --onefile --name DSSTools --collect-all pywin32 --add-data "dss_app_version.txt;." dss_hours_tracker.py
 
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
@@ -96,16 +96,16 @@ jobs:
             $iscc = Join-Path $env:ProgramFiles "Inno Setup 6\ISCC.exe"
           }
           if (-not (Test-Path -LiteralPath $iscc)) { throw "ISCC.exe not found after Inno Setup install." }
-          $iss = Join-Path $env:GITHUB_WORKSPACE "installer\DSSHoursTracker.iss"
+          $iss = Join-Path $env:GITHUB_WORKSPACE "installer\DSSTools.iss"
           & $iscc /DMyAppVersion=$env:MY_VERSION $iss
-          Get-Item (Join-Path $env:GITHUB_WORKSPACE "dist\DSSHoursTrackerSetup.exe") | Format-List *
+          Get-Item (Join-Path $env:GITHUB_WORKSPACE "dist\DSSToolsSetup.exe") | Format-List *
 
       - name: Write checksums.txt for in-app verification
         shell: python
         run: |
           import hashlib
           from pathlib import Path
-          setup_exe = Path("dist") / "DSSHoursTrackerSetup.exe"
+          setup_exe = Path("dist") / "DSSToolsSetup.exe"
           if not setup_exe.is_file():
               raise SystemExit(f"Missing installer: {setup_exe}")
           digest = hashlib.sha256(setup_exe.read_bytes()).hexdigest()
@@ -124,5 +124,5 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
-            dist/DSSHoursTrackerSetup.exe
+            dist/DSSToolsSetup.exe
             checksums.txt

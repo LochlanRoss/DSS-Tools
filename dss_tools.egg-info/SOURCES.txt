@@ -1,0 +1,9 @@
+README.md
+dss_hours_tracker.py
+pyproject.toml
+dss_tools.egg-info/PKG-INFO
+dss_tools.egg-info/SOURCES.txt
+dss_tools.egg-info/dependency_links.txt
+dss_tools.egg-info/entry_points.txt
+dss_tools.egg-info/requires.txt
+dss_tools.egg-info/top_level.txt
