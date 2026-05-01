@@ -1,0 +1,47 @@
+# DSS Hours Tracker — loading hints (one line per hint; lines starting with # are skipped in the UI)
+# Nuances, settings, features, and limitations for optional splash / progress display.
+
+Only the cell range K25:AZ36 on dated daily sheets is read as DSS labour data; everything else on the sheet is ignored for parsing.
+Dated sheets must look like a calendar date (YYYY-MM-DD); optional revision suffixes include R1, rev 2, r.3, rv1, and similar—highest revision wins for the same date.
+If two tabs share the same calendar day, the app keeps only the highest revision tab for that day’s hours.
+Cell AZ2 is compared to the sheet name’s revision story; a mismatch adds a Sheet Parse Warning, not a silent fix.
+Weeks run Monday through Sunday; weekly totals use that week boundary even if your jobsite thinks of weeks differently.
+Combined summaries match employees by exact spelling across files; typos in one file do not merge with a differently spelled name in another.
+Multi-file loads process newer files first (by file modified time); you may see a partial preview while older workbooks are still loading.
+Update View reloads every DSS you currently have selected; it does not hunt the disk for new files unless you add them again.
+The progress line shows PF#-# from the filename when it can, so you can tell which job a slow sheet belongs to.
+Cancel stops DSS loading and Outlook sync; during quick load you can also cancel with the hotkey set in Settings → Configuration (Escape by default).
+Quick load re-opens your last successful DSS paths after startup; turn it off, change the cancel hotkey, or pick a hotkey preset under Settings → Configuration.
+The app uses a DSS semantic hash (dated sheets and K25:AZ36 only) so OneDrive autosave metadata churn does not force a full re-parse every time.
+Per-sheet digests allow a partial refresh: only sheets that actually changed are re-read when the rest still matches cache.
+Parsed data is cached on disk for up to seven days; stale cache files can be purged from Configuration maintenance buttons.
+Clear Cached DSSs removes parsed cache only; Reset / Clear All affects broader stored data—read the button labels before confirming.
+Settings, layouts, emails, templates, and cache live under %LOCALAPPDATA%\DSSHoursTracker on Windows—Show App Data Folder opens it.
+Saved table column pixel widths are not reapplied on each refresh; widths follow current header and cell text so grids stay readable.
+Source File and other path-like columns use a tighter width cap so long paths do not stretch the entire table.
+Resizing one column does not shrink its neighbour; use the horizontal scrollbar when the table is wider than the window.
+Drag column headers to reorder columns; a vertical line shows where the column will land; order is saved with the rest of the layout.
+Right-click a column header for sort and for checkbox filters where filtering is supported; left-click alone is not the only path.
+Each data table can toggle Word wrap on or off from its toolbar so long text wraps inside the column instead of clipping.
+Double-click a source file cell in supported tables to open that workbook in Windows—embedded newlines are stripped before opening.
+The Filter checklist applies to main data views and the email draft preview; Esc or clicking away closes the filter popup.
+Employee List is built from names seen in loaded data; Employee Groups are reusable crews you define for filtering and drafts.
+Email Drafts can build one Outlook draft per employee for a chosen week; select rows in the preview to limit who gets a draft.
+If nothing is selected in the email preview table, drafts are prepared for everyone shown for that week.
+Subject and body templates support placeholders like {first_name}, {week_start}, {week_end}, and {hours_table}.
+PF numbers from loaded filenames can appear in email subjects when templates include the relevant tokens.
+Outlook integration needs desktop Outlook and pywin32 on Windows; sync, test connection, and draft creation all depend on that.
+About a minute after startup, with DSS data loaded, the app may ask Outlook once for missing employee email addresses.
+Name typo warnings can be turned off in Configuration; Error Report still offers a manual Check Name Typos action.
+Formatting Rules profiles can set Daily ST, Weekly ST, Weekly OT, and Max Hours Per Day alerts; blank fields disable that rule.
+The Daily Raw tab can be hidden from Configuration if you do not need row-level raw parse output.
+Optional GitHub update checks and optional auto-download on unmetered Wi-Fi are controlled in Configuration.
+After an update installer downloads, the app may prompt you to install when you exit—follow the prompt rather than hunting temp folders.
+Export Diagnostic Snapshot from Configuration when you need a single file to share for troubleshooting.
+The app reads DSS workbooks; it does not write changes back to your original source xlsx paths.
+Very large or network-hosted workbooks may load slowly; cache hits after the first successful parse are usually much faster.
+Sheet names that are not dated daily tabs (for example Notes) are skipped for hour extraction but may still affect semantic hashing where applicable.
+If Windows or OneDrive denies read access, the permission message mentions keeping files on this device and using Update View after sync.
+Outlook draft creation does not send mail automatically—you review and send from Outlook when ready.
+Crew total rows and Whole Crew rollups are computed rows; they are not separate employees in the source sheet blocks.
+Error Report and parse-warning tabs gain a visual alert outline on the Reports group until the underlying issues are cleared by data or filters.

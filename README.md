@@ -34,6 +34,25 @@ pip install .
 dss-hours-tracker
 ```
 
+## Tests
+
+Workbook parsing, `load_tracker_data`, disk cache, and related cases live in `test_dss_hours_tracker_integration.py`. That module’s class is **skipped by default** so day-to-day runs stay quick.
+
+**Fast suite** (unit tests and JSON round-trips only; integration skipped):
+
+```powershell
+python -m unittest test_dss_hours_tracker -q
+```
+
+**Full suite** (include integration; allow roughly a minute on a typical machine):
+
+```powershell
+$env:RUN_SLOW_TESTS = "1"
+python -m unittest discover -s . -p "test_dss*.py" -q
+```
+
+`RUN_SLOW_TESTS` is treated as enabled when its value is `1`, `true`, `yes`, or `all` (case-insensitive). Shared workbook helpers for both modules are in `test_dss_hours_tracker_fixtures.py`.
+
 ## Current Interface
 
 The app uses grouped navigation with two tab rows:
@@ -82,6 +101,8 @@ The app uses grouped navigation with two tab rows:
   - sort column and direction
   - per-column header filter selections (where filters are used)
 - Column widths **auto-fit** to the heading and visible cell text after each refresh (saved pixel widths in config are not reapplied so layout stays data-driven); **Source File** / path-like columns (`sources`, `*_path`) use a tighter cap so long filenames stay readable without stretching the whole grid
+- Column headers use **no stretch-to-fill**: resizing one column does not steal width from the neighbour; if the combined column widths exceed the view, use the **horizontal scrollbar**
+- Each data table has a **Word wrap (off) / (on)** toolbar toggle (per table): when on, long cell text wraps within the column width and row height increases so wrapped lines stay visible
 - Double-click a **source file** cell in supported tables to open that workbook in the desktop shell
 - **AZ2** is checked against the sheet name revision pattern; mismatches appear as sheet parse warnings, and Reports tab chrome highlights when errors or parse warnings are present
 
@@ -181,6 +202,7 @@ The `Configuration` page currently includes:
 - show/hide the `Daily Raw` tab
 - enable automatic update checks against GitHub releases
 - optionally download release installers automatically on unmetered Wi‑Fi
+- **Appearance:** eight configurable `#RRGGBB` colours (with **Pick…** dialogs) for alert table rows, crew-total rows, formatting-rule tooltips, and the Reports group outline when errors or parse warnings exist; **Reset colours to sample defaults** restores the built-in palette
 
 ### Maintenance Buttons
 

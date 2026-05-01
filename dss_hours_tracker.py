@@ -20,14 +20,14 @@ import urllib.request
 import zipfile
 import xml.etree.ElementTree as ET
 from importlib import metadata as importlib_metadata
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Callable, Iterable
 
 import tkinter as tk
-from tkinter import filedialog, font as tkfont, messagebox, simpledialog, ttk
+from tkinter import colorchooser, filedialog, font as tkfont, messagebox, simpledialog, ttk
 
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
@@ -41,9 +41,9 @@ except ImportError:  # pragma: no cover - optional Windows integration
 
 
 DATE_PATTERN = re.compile(r"(\d{4}-\d{2}-\d{2})")
-# Revision suffix after the date token: rev 1, r1, r 1, r-1, r.1, Revision 1, etc.
+# Revision suffix after the date token: rev 1, rv1, r1, r 1, r-1, r.1, Revision 1, etc.
 REVISION_PATTERN = re.compile(
-    r"(?:^|[\s._-])(?:rev(?:ision)?[\s._-]*|r[\s._-]*)(\d+)(?=$|[\s._-])",
+    r"(?:^|[\s._-])(?:rev(?:ision)?[\s._-]*|rv[\s._-]*|r[\s._-]*)(\d+)(?=$|[\s._-])",
     re.IGNORECASE,
 )
 DSS_HASH_AZ2_COL = 52  # AZ
@@ -538,6 +538,72 @@ class FilterSelection:
 
 
 @dataclass(frozen=True)
+class UiThemeColors:
+    """Semantic UI colours (hex #RRGGBB) for tables, tooltips, and report chrome."""
+
+    alert_row_background: str = "#fde2e7"
+    alert_row_foreground: str = "#9f1239"
+    crew_total_background: str = "#e0f2f1"
+    crew_total_foreground: str = "#134e4a"
+    tooltip_background: str = "#f1f5f9"
+    tooltip_foreground: str = "#334155"
+    reports_outline_background: str = "#fbcfe8"
+    reports_outline_foreground: str = "#be123c"
+
+
+DEFAULT_UI_THEME = UiThemeColors()
+
+# (human label, UiThemeColors attribute name) for Configuration → Appearance.
+UI_THEME_CONFIG_FIELDS: tuple[tuple[str, str], ...] = (
+    ("Alert table row — background", "alert_row_background"),
+    ("Alert table row — text", "alert_row_foreground"),
+    ("Crew total row — background", "crew_total_background"),
+    ("Crew total row — text", "crew_total_foreground"),
+    ("Tooltip — background", "tooltip_background"),
+    ("Tooltip — text", "tooltip_foreground"),
+    ("Reports alert outline — background", "reports_outline_background"),
+    ("Reports alert outline — focus ring", "reports_outline_foreground"),
+)
+
+
+def normalize_ui_hex_color(value: str) -> str | None:
+    """Return canonical #rrggbb or None if the string is not a valid 24-bit hex colour."""
+    text = str(value).strip().lower()
+    if not text.startswith("#"):
+        return None
+    body = text[1:]
+    if len(body) == 3 and all(c in "0123456789abcdef" for c in body):
+        body = "".join(c * 2 for c in body)
+    if len(body) != 6 or any(c not in "0123456789abcdef" for c in body):
+        return None
+    return f"#{body}"
+
+
+def parse_ui_theme_payload(raw: object, defaults: UiThemeColors = DEFAULT_UI_THEME) -> UiThemeColors:
+    if not isinstance(raw, dict):
+        return defaults
+    kwargs: dict[str, str] = {}
+    for key in (
+        "alert_row_background",
+        "alert_row_foreground",
+        "crew_total_background",
+        "crew_total_foreground",
+        "tooltip_background",
+        "tooltip_foreground",
+        "reports_outline_background",
+        "reports_outline_foreground",
+    ):
+        fallback = getattr(defaults, key)
+        raw_val = raw.get(key)
+        if raw_val is None or (isinstance(raw_val, str) and not str(raw_val).strip()):
+            kwargs[key] = fallback
+            continue
+        normalized = normalize_ui_hex_color(str(raw_val).strip())
+        kwargs[key] = normalized if normalized is not None else fallback
+    return UiThemeColors(**kwargs)
+
+
+@dataclass(frozen=True)
 class AppSettings:
     disable_name_typo_notifications: bool = False
     hash_poll_minutes: int = DEFAULT_HASH_POLL_MINUTES
@@ -546,6 +612,7 @@ class AppSettings:
     quickload_cancel_hotkey: str = "<Escape>"
     auto_update_check_enabled: bool = True
     auto_download_updates_on_unmetered_wifi: bool = True
+    ui_theme: UiThemeColors = field(default_factory=lambda: DEFAULT_UI_THEME)
 
 
 @dataclass(frozen=True)
@@ -1047,6 +1114,7 @@ def load_app_settings(config_path: Path) -> AppSettings:
         quickload_cancel_hotkey=cancel_hotkey,
         auto_update_check_enabled=bool(raw_settings.get("auto_update_check_enabled", True)),
         auto_download_updates_on_unmetered_wifi=bool(raw_settings.get("auto_download_updates_on_unmetered_wifi", True)),
+        ui_theme=parse_ui_theme_payload(raw_settings.get("ui_theme")),
     )
 
 
@@ -1060,6 +1128,7 @@ def save_app_settings(config_path: Path, settings: AppSettings) -> None:
         "quickload_cancel_hotkey": settings.quickload_cancel_hotkey,
         "auto_update_check_enabled": settings.auto_update_check_enabled,
         "auto_download_updates_on_unmetered_wifi": settings.auto_download_updates_on_unmetered_wifi,
+        "ui_theme": asdict(settings.ui_theme),
     }
     config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
@@ -2940,11 +3009,10 @@ def load_tracker_data(
                         daily_records.extend(merged_records)
                         parse_warnings.extend(merged_warnings)
                         workbook_health.extend(merged_health)
-                    file_hashes[source_path] = merged_fp
                     save_cached_daily_records(
                         cache_dir,
                         source_path,
-                        merged_fp,
+                        file_hash,
                         merged_records,
                         parse_warnings=merged_warnings,
                         workbook_health=merged_health,
@@ -3033,7 +3101,7 @@ class SortableTreeview(ttk.Treeview):
         self.custom_sort_key: Callable[[str, tuple[str, ...], bool], object] | None = None
         for column, heading in zip(columns, headings):
             self.heading(column, text=heading, command=lambda col=column: self.sort_by(col))
-            self.column(column, anchor="w", width=120, stretch=True)
+            self.column(column, anchor="w", width=120, stretch=False)
 
     def set_rows(self, rows: list[tuple[str, ...]], tags: list[tuple[str, ...]] | None = None) -> None:
         self._rows = []
@@ -3119,6 +3187,7 @@ class DataTable(ttk.Frame):
         custom_sort_key: Callable[[str, tuple[str, ...], bool], object] | None = None,
         open_source_file_callback: Callable[[str], None] | None = None,
         source_file_column: str | None = None,
+        ui_theme: UiThemeColors | None = None,
     ):
         super().__init__(master)
         self._table_id = table_id
@@ -3136,12 +3205,18 @@ class DataTable(ttk.Frame):
         self._open_source_file_callback = open_source_file_callback
         self._source_file_column = source_file_column if source_file_column in columns else None
         self._column_drag_line: tk.Frame | None = None
+        self._ui_theme = ui_theme or DEFAULT_UI_THEME
 
         toolbar = ttk.Frame(self)
         toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        self._word_wrap_enabled = False
         ttk.Button(toolbar, text="Columns", command=self.open_column_picker).pack(side="right")
+        self._wrap_btn = ttk.Button(toolbar, text="Word wrap (off)", command=self._toggle_word_wrap)
+        self._wrap_btn.pack(side="right", padx=(0, 8))
 
         self.tree = SortableTreeview(self, columns, headings)
+        self._tree_style_base = str(self.tree.cget("style") or "Treeview")
+        self._wrap_style_name = f"DssWrap{id(self)}.Treeview"
         self.tree.custom_sort_key = custom_sort_key
         y_scroll = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
         x_scroll = ttk.Scrollbar(self, orient="horizontal", command=self.tree.xview)
@@ -3152,8 +3227,7 @@ class DataTable(ttk.Frame):
         self.rowconfigure(1, weight=1)
         self.columnconfigure(0, weight=1)
 
-        self.tree.tag_configure("alert", background="#ffc7ce", foreground="#9c0006")
-        self.tree.tag_configure("crew_total", background="#e2f0d9", foreground="#1f1f1f")
+        self._apply_ui_theme_tags()
         self.tree.bind("<ButtonPress-1>", self._on_tree_button_press, add="+")
         self.tree.bind("<ButtonRelease-1>", self._on_tree_button_release, add="+")
         self.tree.bind("<B1-Motion>", self._on_tree_b1_motion, add="+")
@@ -3165,6 +3239,15 @@ class DataTable(ttk.Frame):
         bind_horizontal_mousewheel(self.tree, self.tree, units_per_notch=4)
 
         self._load_saved_layout()
+
+    def _apply_ui_theme_tags(self) -> None:
+        t = self._ui_theme
+        self.tree.tag_configure("alert", background=t.alert_row_background, foreground=t.alert_row_foreground)
+        self.tree.tag_configure("crew_total", background=t.crew_total_background, foreground=t.crew_total_foreground)
+
+    def apply_ui_theme(self, theme: UiThemeColors) -> None:
+        self._ui_theme = theme
+        self._apply_ui_theme_tags()
 
     def set_rows(self, rows: list[tuple[str, ...]], tags: list[tuple[str, ...]] | None = None) -> None:
         self._all_rows = list(rows)
@@ -3361,7 +3444,7 @@ class DataTable(ttk.Frame):
         col_index = self._all_columns.index(self._source_file_column)
         if col_index >= len(values):
             return
-        name = str(values[col_index]).strip()
+        name = str(values[col_index]).replace("\n", "").replace("\r", "").strip()
         if name:
             self._open_source_file_callback(name)
 
@@ -3428,6 +3511,10 @@ class DataTable(ttk.Frame):
                 filtered_tags.append(row_tags)
         self.tree.set_rows(filtered_rows, filtered_tags)
         self._autofit_column_widths_to_content()
+        if self._word_wrap_enabled:
+            self._apply_word_wrap_to_visible_rows()
+        else:
+            self.tree.configure(style=self._tree_style_base)
 
     def _measure_font_for_tree(self) -> tkfont.Font:
         try:
@@ -3456,7 +3543,7 @@ class DataTable(ttk.Frame):
             visible = [column for column in list(display_columns_value) if column in self._all_columns]
         if not visible:
             return
-        for col_index_vis, column in enumerate(visible):
+        for column in visible:
             heading = self._headings_by_column.get(column, column)
             max_px = font_obj.measure(str(heading)) + AUTO_COLUMN_WIDTH_PAD_PX
             col_index = self._all_columns.index(column)
@@ -3478,8 +3565,71 @@ class DataTable(ttk.Frame):
                 width = min(width, cap)
             else:
                 width = min(width, AUTO_NON_PATH_MAX_WIDTH_PX)
-            stretch = col_index_vis == len(visible) - 1
-            self.tree.column(column, width=width, stretch=stretch)
+            self.tree.column(column, width=width, stretch=False)
+
+    def _toggle_word_wrap(self) -> None:
+        self._word_wrap_enabled = not self._word_wrap_enabled
+        self._wrap_btn.configure(text=f"Word wrap {'(on)' if self._word_wrap_enabled else '(off)'}")
+        self._apply_filters_and_render()
+
+    def _wrap_plain_text_to_pixels(self, text: str, font_obj: tkfont.Font, max_px: int) -> str:
+        single = str(text).replace("\r\n", "\n").replace("\r", "\n").replace("\n", " ")
+        if max_px < 24 or not single.strip():
+            return str(text)
+        if font_obj.measure(single) <= max_px:
+            return str(text)
+        words = single.split(" ")
+        lines: list[str] = []
+        current = ""
+        for word in words:
+            trial = f"{current} {word}".strip() if current else word
+            if font_obj.measure(trial) <= max_px:
+                current = trial
+            else:
+                if current:
+                    lines.append(current)
+                if font_obj.measure(word) <= max_px:
+                    current = word
+                else:
+                    frag = ""
+                    for ch in word:
+                        cand = frag + ch
+                        if font_obj.measure(cand) <= max_px:
+                            frag = cand
+                        else:
+                            if frag:
+                                lines.append(frag)
+                            frag = ch
+                    current = frag
+        if current:
+            lines.append(current)
+        return "\n".join(lines)
+
+    def _apply_word_wrap_to_visible_rows(self) -> None:
+        font_obj = self._measure_font_for_tree()
+        pad = AUTO_COLUMN_WIDTH_PAD_PX
+        max_lines = 1
+        col_widths = {col: max(24, int(self.tree.column(col, "width")) - pad) for col in self._all_columns}
+        for item_id in self.tree.get_children():
+            raw = self.tree.item(item_id, "values")
+            new_vals: list[str] = []
+            for idx, column in enumerate(self._all_columns):
+                if idx >= len(raw):
+                    new_vals.append("")
+                    continue
+                wpx = col_widths.get(column, 120)
+                wrapped = self._wrap_plain_text_to_pixels(str(raw[idx]), font_obj, wpx)
+                max_lines = max(max_lines, wrapped.count("\n") + 1)
+                new_vals.append(wrapped)
+            self.tree.item(item_id, values=tuple(new_vals))
+        line_px = max(1, int(font_obj.metrics("linespace")))
+        height = min(max(line_px + 6, line_px * max_lines + 6), line_px * 14)
+        style = ttk.Style(self)
+        try:
+            style.configure(self._wrap_style_name, rowheight=height)
+        except tk.TclError:
+            return
+        self.tree.configure(style=self._wrap_style_name)
 
     def _open_header_filter_menu(self, column: str, event) -> None:
         self._close_filter_menu()
@@ -3566,10 +3716,12 @@ class DataTable(ttk.Frame):
             self._filter_menu = None
 
     def reset_layout(self) -> None:
+        self._word_wrap_enabled = False
+        self._wrap_btn.configure(text="Word wrap (off)")
         for column in self._all_columns:
             self._column_visibility[column] = True
-            self.tree.column(column, width=120)
-        self.tree.configure(displaycolumns="#all")
+            self.tree.column(column, width=120, stretch=False)
+        self.tree.configure(displaycolumns="#all", style=self._tree_style_base)
         self._column_filters.clear()
         self._header_drag_column = None
         self._hide_column_drag_line()
@@ -3592,9 +3744,15 @@ class DataTable(ttk.Frame):
 
 
 class ToolTip:
-    def __init__(self, widget: tk.Widget, text: str):
+    def __init__(
+        self,
+        widget: tk.Widget,
+        text: str,
+        color_getter: Callable[[], tuple[str, str]] | None = None,
+    ):
         self.widget = widget
         self.text = text
+        self._color_getter = color_getter
         self.tip_window: tk.Toplevel | None = None
         self._after_id: str | None = None
         existing = getattr(widget, "_tooltip_refs", [])
@@ -3623,11 +3781,16 @@ class ToolTip:
         self.tip_window = tk.Toplevel(self.widget)
         self.tip_window.wm_overrideredirect(True)
         self.tip_window.wm_geometry(f"+{x}+{y}")
+        if self._color_getter is not None:
+            bg, fg = self._color_getter()
+        else:
+            bg, fg = DEFAULT_UI_THEME.tooltip_background, DEFAULT_UI_THEME.tooltip_foreground
         label = tk.Label(
             self.tip_window,
             text=self.text,
             justify="left",
-            background="#fff8dc",
+            background=bg,
+            foreground=fg,
             relief="solid",
             borderwidth=1,
             wraplength=320,
@@ -3791,12 +3954,14 @@ class EmailDraftsFrame(ttk.Frame):
         sync_emails_callback: Callable[[], None],
         on_request_edit_email: Callable[[str], None],
         save_templates_callback: Callable[[], None],
+        ui_theme: UiThemeColors | None = None,
     ):
         super().__init__(master, padding=12)
         self.create_drafts_callback = create_drafts_callback
         self.sync_emails_callback = sync_emails_callback
         self.on_request_edit_email = on_request_edit_email
         self.save_templates_callback = save_templates_callback
+        self._ui_theme = ui_theme or DEFAULT_UI_THEME
 
         self.columnconfigure(1, weight=1)
         self.rowconfigure(4, weight=1)
@@ -3840,6 +4005,7 @@ class EmailDraftsFrame(ttk.Frame):
             self,
             columns=["employee", "email", "days", "st", "ot", "dt", "total", "expanded"],
             headings=["Employee", "Email", "Rows", "ST", "OT", "DT", "Total", "Expanded Hours"],
+            ui_theme=self._ui_theme,
         )
         self.preview_table.grid(row=4, column=0, columnspan=5, sticky="nsew")
         self.preview_table.tree.bind("<Double-Button-1>", self._on_preview_double_click)
@@ -3849,6 +4015,10 @@ class EmailDraftsFrame(ttk.Frame):
             "Drafts are saved in Outlook and are not sent automatically."
         )
         ttk.Label(self, text=note, wraplength=700, justify="left").grid(row=5, column=0, columnspan=5, sticky="w", pady=(8, 0))
+
+    def apply_ui_theme(self, theme: UiThemeColors) -> None:
+        self._ui_theme = theme
+        self.preview_table.apply_ui_theme(theme)
 
     def set_week_options(self, week_options: list[tuple[date, date]]) -> None:
         self.week_options = week_options
@@ -4155,6 +4325,7 @@ class DssHoursTrackerApp(tk.Tk):
 
         self._quickload_session = False
         self._quickload_cancel_sequence: str | None = None
+        self._last_reports_alert: tuple[bool, bool] = (False, False)
         self._build_layout()
         self.after(AUTO_OUTLOOK_SYNC_DELAY_MS, self._auto_sync_outlook_emails)
         self.after(AUTO_UPDATE_CHECK_DELAY_MS, self._auto_check_for_updates)
@@ -4163,6 +4334,10 @@ class DssHoursTrackerApp(tk.Tk):
         else:
             self.after(800, self._maybe_quickload_last_sources)
         self._register_quickload_cancel_hotkey()
+
+    def _tooltip_colours(self) -> tuple[str, str]:
+        theme = self.app_settings.ui_theme
+        return theme.tooltip_background, theme.tooltip_foreground
 
     def _build_layout(self) -> None:
         container = ttk.Frame(self, padding=12)
@@ -4254,6 +4429,7 @@ class DssHoursTrackerApp(tk.Tk):
             default_sort_descending=True,
             open_source_file_callback=self._open_displayed_source_file,
             source_file_column="source_file",
+            ui_theme=self.app_settings.ui_theme,
         )
         self.employee_editor = EmployeeListEditor(
             self.settings_notebook,
@@ -4271,6 +4447,7 @@ class DssHoursTrackerApp(tk.Tk):
             custom_sort_key=weekly_rollup_sort_key,
             open_source_file_callback=self._open_displayed_source_file,
             source_file_column="source_file",
+            ui_theme=self.app_settings.ui_theme,
         )
         self.daily_by_pf_table = DataTable(
             self.summaries_notebook,
@@ -4283,6 +4460,7 @@ class DssHoursTrackerApp(tk.Tk):
             custom_sort_key=daily_rollup_sort_key,
             open_source_file_callback=self._open_displayed_source_file,
             source_file_column="source_file",
+            ui_theme=self.app_settings.ui_theme,
         )
         self.combined_weekly_summary_table = DataTable(
             self.summaries_notebook,
@@ -4292,6 +4470,7 @@ class DssHoursTrackerApp(tk.Tk):
             config_path=self.config_path,
             default_sort_column="week_start",
             default_sort_descending=True,
+            ui_theme=self.app_settings.ui_theme,
         )
         self.combined_daily_summary_table = DataTable(
             self.summaries_notebook,
@@ -4301,6 +4480,7 @@ class DssHoursTrackerApp(tk.Tk):
             config_path=self.config_path,
             default_sort_column="work_date",
             default_sort_descending=True,
+            ui_theme=self.app_settings.ui_theme,
         )
         self.week_totals_table = DataTable(
             self.data_notebook,
@@ -4310,6 +4490,7 @@ class DssHoursTrackerApp(tk.Tk):
             config_path=self.config_path,
             default_sort_column="week_start",
             default_sort_descending=True,
+            ui_theme=self.app_settings.ui_theme,
         )
         self.error_report_page = ttk.Frame(self.reports_notebook)
         self.error_report_page.columnconfigure(0, weight=1)
@@ -4355,6 +4536,7 @@ class DssHoursTrackerApp(tk.Tk):
             config_path=self.config_path,
             default_sort_column="week_start",
             default_sort_descending=True,
+            ui_theme=self.app_settings.ui_theme,
         )
         self.parse_warnings_table = DataTable(
             self.reports_notebook,
@@ -4366,6 +4548,7 @@ class DssHoursTrackerApp(tk.Tk):
             default_sort_descending=True,
             open_source_file_callback=self._open_displayed_source_file,
             source_file_column="source_file",
+            ui_theme=self.app_settings.ui_theme,
         )
         self.workbook_health_table = DataTable(
             self.reports_notebook,
@@ -4375,6 +4558,7 @@ class DssHoursTrackerApp(tk.Tk):
             config_path=self.config_path,
             open_source_file_callback=self._open_displayed_source_file,
             source_file_column="source_file",
+            ui_theme=self.app_settings.ui_theme,
         )
         self.audit_data_trail_table = DataTable(
             self.reports_notebook,
@@ -4386,6 +4570,7 @@ class DssHoursTrackerApp(tk.Tk):
             default_sort_descending=True,
             open_source_file_callback=self._open_displayed_source_file,
             source_file_column="source_file",
+            ui_theme=self.app_settings.ui_theme,
         )
         self.email_drafts_frame = EmailDraftsFrame(
             self.reports_notebook,
@@ -4393,6 +4578,7 @@ class DssHoursTrackerApp(tk.Tk):
             sync_emails_callback=self.sync_outlook_emails,
             on_request_edit_email=self._prompt_edit_employee_email,
             save_templates_callback=self._save_email_templates,
+            ui_theme=self.app_settings.ui_theme,
         )
         self.email_drafts_frame.week_combo.bind("<<ComboboxSelected>>", self._on_email_week_changed)
         self.email_drafts_frame.set_templates(self.email_subject_template, self.email_body_template)
@@ -4471,32 +4657,32 @@ class DssHoursTrackerApp(tk.Tk):
         daily_st_entry = ttk.Entry(self.rules_frame, textvariable=self.daily_st_threshold_var)
         daily_st_entry.grid(row=2, column=1, sticky="ew", pady=(0, 8))
         daily_st_help = "How many regular time hours per week an employee can work (Usually 8 or 10)."
-        ToolTip(daily_st_label, daily_st_help)
-        ToolTip(daily_st_entry, daily_st_help)
+        ToolTip(daily_st_label, daily_st_help, color_getter=self._tooltip_colours)
+        ToolTip(daily_st_entry, daily_st_help, color_getter=self._tooltip_colours)
 
         weekly_st_label = ttk.Label(self.rules_frame, text="Weekly ST Alert")
         weekly_st_label.grid(row=3, column=0, sticky="w", pady=(0, 8))
         weekly_st_entry = ttk.Entry(self.rules_frame, textvariable=self.st_threshold_var)
         weekly_st_entry.grid(row=3, column=1, sticky="ew", pady=(0, 8))
         weekly_st_help = "How many regular time hours per week an employee can work."
-        ToolTip(weekly_st_label, weekly_st_help)
-        ToolTip(weekly_st_entry, weekly_st_help)
+        ToolTip(weekly_st_label, weekly_st_help, color_getter=self._tooltip_colours)
+        ToolTip(weekly_st_entry, weekly_st_help, color_getter=self._tooltip_colours)
 
         weekly_ot_label = ttk.Label(self.rules_frame, text="Weekly OT Alert")
         weekly_ot_label.grid(row=4, column=0, sticky="w", pady=(0, 8))
         weekly_ot_entry = ttk.Entry(self.rules_frame, textvariable=self.ot_threshold_var)
         weekly_ot_entry.grid(row=4, column=1, sticky="ew", pady=(0, 8))
         weekly_ot_help = "Some sites have limits to how much OT you can work before you automatically start making DT."
-        ToolTip(weekly_ot_label, weekly_ot_help)
-        ToolTip(weekly_ot_entry, weekly_ot_help)
+        ToolTip(weekly_ot_label, weekly_ot_help, color_getter=self._tooltip_colours)
+        ToolTip(weekly_ot_entry, weekly_ot_help, color_getter=self._tooltip_colours)
 
         max_hours_label = ttk.Label(self.rules_frame, text="Max Hours Per Day")
         max_hours_label.grid(row=5, column=0, sticky="w", pady=(0, 8))
         max_hours_entry = ttk.Entry(self.rules_frame, textvariable=self.max_hours_per_day_var)
         max_hours_entry.grid(row=5, column=1, sticky="ew", pady=(0, 8))
         max_hours_help = "Max hours before fatigue management per day"
-        ToolTip(max_hours_label, max_hours_help)
-        ToolTip(max_hours_entry, max_hours_help)
+        ToolTip(max_hours_label, max_hours_help, color_getter=self._tooltip_colours)
+        ToolTip(max_hours_entry, max_hours_help, color_getter=self._tooltip_colours)
 
         ttk.Button(self.rules_frame, text="Apply Rules", command=self._apply_rule_changes).grid(row=6, column=1, sticky="w", pady=(8, 0))
 
@@ -4573,12 +4759,38 @@ class DssHoursTrackerApp(tk.Tk):
             variable=self.auto_update_download_var,
         ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(0, 8))
 
+        appearance = ttk.LabelFrame(self.config_frame, text="Appearance (table and tooltip colours)", padding=8)
+        appearance.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        appearance.columnconfigure(1, weight=1)
+        self._ui_theme_colour_vars: dict[str, tk.StringVar] = {}
+        ut = self.app_settings.ui_theme
+        for row_idx, (label, attr) in enumerate(UI_THEME_CONFIG_FIELDS):
+            var = tk.StringVar(value=getattr(ut, attr))
+            self._ui_theme_colour_vars[attr] = var
+            ttk.Label(appearance, text=label).grid(row=row_idx, column=0, sticky="w", pady=2)
+            ttk.Entry(appearance, textvariable=var, width=14).grid(row=row_idx, column=1, sticky="w", padx=(8, 4), pady=2)
+            ttk.Button(
+                appearance,
+                text="Pick…",
+                command=lambda v=var: self._pick_ui_colour(v),
+                width=8,
+            ).grid(row=row_idx, column=2, sticky="w", pady=2)
+        ttk.Button(appearance, text="Reset colours to sample defaults", command=self._reset_ui_colour_vars_to_defaults).grid(
+            row=len(UI_THEME_CONFIG_FIELDS), column=0, columnspan=3, sticky="w", pady=(10, 0)
+        )
+        ttk.Label(
+            appearance,
+            text="Use #RRGGBB hex (optional short form #RGB). Applies to highlighted rows, crew totals, tooltips on Formatting Rules, and the Reports group outline when errors or parse warnings exist.",
+            wraplength=680,
+            justify="left",
+        ).grid(row=len(UI_THEME_CONFIG_FIELDS) + 1, column=0, columnspan=3, sticky="w", pady=(8, 0))
+
         ttk.Button(self.config_frame, text="Apply Settings", command=self._apply_app_settings).grid(
-            row=7, column=0, sticky="w", pady=(8, 0)
+            row=8, column=0, sticky="w", pady=(12, 0)
         )
 
         maintenance = ttk.LabelFrame(self.config_frame, text="Maintenance", padding=8)
-        maintenance.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(16, 0))
+        maintenance.grid(row=9, column=0, columnspan=2, sticky="ew", pady=(16, 0))
         ttk.Button(maintenance, text="Reset All Settings to Default", command=self._reset_all_settings).grid(
             row=0, column=0, sticky="w"
         )
@@ -4593,7 +4805,7 @@ class DssHoursTrackerApp(tk.Tk):
         )
 
         diagnostics = ttk.LabelFrame(self.config_frame, text="Diagnostics", padding=8)
-        diagnostics.grid(row=9, column=0, columnspan=2, sticky="ew", pady=(16, 0))
+        diagnostics.grid(row=10, column=0, columnspan=2, sticky="ew", pady=(16, 0))
         ttk.Button(diagnostics, text="Show App Data Folder", command=self._show_app_data_folder).grid(
             row=0, column=0, sticky="w"
         )
@@ -4619,11 +4831,36 @@ class DssHoursTrackerApp(tk.Tk):
         note = (
             "These settings control background notifications, how often the app checks loaded DSS files for changes, "
             "whether Daily Raw is visible, quick re-open of the last DSS set, the cancel hotkey for that load, "
-            "and how the app checks GitHub for downloadable updates."
+            "how the app checks GitHub for downloadable updates, and optional table / tooltip / report outline colours."
         )
         ttk.Label(self.config_frame, text=note, wraplength=700, justify="left").grid(
-            row=10, column=0, columnspan=2, sticky="w", pady=(12, 0)
+            row=11, column=0, columnspan=2, sticky="w", pady=(12, 0)
         )
+
+    def _pick_ui_colour(self, var: tk.StringVar) -> None:
+        initial = var.get().strip()
+        if not initial.startswith("#"):
+            initial = "#ffffff"
+        picked = colorchooser.askcolor(color=initial, title="Choose colour", parent=self)
+        if picked and picked[1]:
+            var.set(str(picked[1]).lower())
+
+    def _reset_ui_colour_vars_to_defaults(self) -> None:
+        defaults = DEFAULT_UI_THEME
+        for _label, attr in UI_THEME_CONFIG_FIELDS:
+            self._ui_theme_colour_vars[attr].set(getattr(defaults, attr))
+
+    def _coerce_ui_theme_from_config_vars(self) -> tuple[UiThemeColors | None, str]:
+        kwargs: dict[str, str] = {}
+        for label, attr in UI_THEME_CONFIG_FIELDS:
+            var = self._ui_theme_colour_vars.get(attr)
+            if var is None:
+                return None, "Appearance fields are not initialised."
+            normalized = normalize_ui_hex_color(var.get().strip())
+            if normalized is None:
+                return None, f'Invalid colour for "{label}". Use #RRGGBB (digits 0-9 and letters a-f), for example #e0f2f1.'
+            kwargs[attr] = normalized
+        return UiThemeColors(**kwargs), ""
 
     def _profile_names(self) -> list[str]:
         return sorted(self.formatting_profiles)
@@ -4738,6 +4975,12 @@ class DssHoursTrackerApp(tk.Tk):
             self.audit_data_trail_table,
         ]
 
+    def _apply_ui_theme_to_all_tables(self) -> None:
+        theme = self.app_settings.ui_theme
+        for table in self._all_layout_tables():
+            table.apply_ui_theme(theme)
+        self.email_drafts_frame.apply_ui_theme(theme)
+
     def _reload_defaults_into_ui(self) -> None:
         self.disable_name_typos_var.set(self.app_settings.disable_name_typo_notifications)
         self.show_daily_raw_var.set(self.app_settings.show_daily_raw_tab)
@@ -4746,6 +4989,11 @@ class DssHoursTrackerApp(tk.Tk):
         self.hash_poll_minutes_var.set(str(self.app_settings.hash_poll_minutes))
         self.auto_update_check_var.set(self.app_settings.auto_update_check_enabled)
         self.auto_update_download_var.set(self.app_settings.auto_download_updates_on_unmetered_wifi)
+        ut = self.app_settings.ui_theme
+        if getattr(self, "_ui_theme_colour_vars", None):
+            for _label, attr in UI_THEME_CONFIG_FIELDS:
+                if attr in self._ui_theme_colour_vars:
+                    self._ui_theme_colour_vars[attr].set(getattr(ut, attr))
         self.email_drafts_frame.set_templates(self.email_subject_template, self.email_body_template)
         self._populate_rule_editor()
         self._refresh_data_tabs()
@@ -4763,6 +5011,13 @@ class DssHoursTrackerApp(tk.Tk):
             table.reset_layout()
         if self.current_data is not None:
             self._render_data(self.current_data)
+        else:
+            self._last_reports_alert = (False, False)
+        self._apply_ui_theme_to_all_tables()
+        self._sync_reports_alert_chrome(
+            has_errors=self._last_reports_alert[0],
+            has_parse_warnings=self._last_reports_alert[1],
+        )
 
     def _save_email_templates(self) -> None:
         self.email_subject_template = self.email_drafts_frame.get_subject_template()
@@ -4787,6 +5042,11 @@ class DssHoursTrackerApp(tk.Tk):
             )
             return
 
+        ui_theme, ui_err = self._coerce_ui_theme_from_config_vars()
+        if ui_theme is None:
+            messagebox.showerror("Configuration", ui_err or "Invalid appearance colours.")
+            return
+
         self.app_settings = AppSettings(
             disable_name_typo_notifications=bool(self.disable_name_typos_var.get()),
             hash_poll_minutes=hash_poll_minutes,
@@ -4795,12 +5055,18 @@ class DssHoursTrackerApp(tk.Tk):
             quickload_cancel_hotkey=hotkey_norm,
             auto_update_check_enabled=bool(self.auto_update_check_var.get()),
             auto_download_updates_on_unmetered_wifi=bool(self.auto_update_download_var.get()),
+            ui_theme=ui_theme,
         )
         self.hash_poll_interval_ms = self.app_settings.hash_poll_minutes * 60 * 1000
         self._persist_app_settings()
         self._register_quickload_cancel_hotkey()
         self._refresh_data_tabs()
         self._schedule_hash_monitor()
+        self._apply_ui_theme_to_all_tables()
+        self._sync_reports_alert_chrome(
+            has_errors=self._last_reports_alert[0],
+            has_parse_warnings=self._last_reports_alert[1],
+        )
         messagebox.showinfo("Configuration", "Saved application settings.")
 
     def _reset_all_settings(self) -> None:
@@ -4911,6 +5177,7 @@ class DssHoursTrackerApp(tk.Tk):
                 "quickload_cancel_hotkey": self.app_settings.quickload_cancel_hotkey,
                 "auto_update_check_enabled": self.app_settings.auto_update_check_enabled,
                 "auto_download_updates_on_unmetered_wifi": self.app_settings.auto_download_updates_on_unmetered_wifi,
+                "ui_theme": asdict(self.app_settings.ui_theme),
             },
             "formatting_profiles": sorted(self.formatting_profiles),
             "current_profile_name": self.current_profile_name,
@@ -6377,9 +6644,15 @@ class DssHoursTrackerApp(tk.Tk):
         self.reports_notebook.tab(pw_idx, text=f"{base_pw} (!)" if has_parse_warnings else base_pw)
         parent_alert = has_errors or has_parse_warnings
         self.group_notebook.tab(self._reports_group_tab_index, text="Reports (!)" if parent_alert else "Reports")
+        self._last_reports_alert = (has_errors, has_parse_warnings)
+        theme = self.app_settings.ui_theme
         try:
             if parent_alert:
-                self.reports_outline.configure(highlightthickness=3, highlightbackground="#ffc7ce", highlightcolor="#9c0006")
+                self.reports_outline.configure(
+                    highlightthickness=3,
+                    highlightbackground=theme.reports_outline_background,
+                    highlightcolor=theme.reports_outline_foreground,
+                )
             else:
                 self.reports_outline.configure(highlightthickness=0)
         except tk.TclError:

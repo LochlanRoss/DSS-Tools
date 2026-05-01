@@ -9,6 +9,31 @@ Small fixes and very short edits are intentionally omitted unless they materiall
 
 ## 2026-05-01
 
+### Test layout: fast default vs slow integration
+
+- Split workbook-heavy coverage into `test_dss_hours_tracker_integration.py`, gated with **`RUN_SLOW_TESTS`** (`1` / `true` / `yes` / `all`) and `@unittest.skipUnless` on the integration class so **`python -m unittest test_dss_hours_tracker`** stays fast.
+- Shared temp-file / sample-workbook helpers live in **`test_dss_hours_tracker_fixtures.py`** (`DssHoursTrackerFixtures`) to avoid duplicating setup between modules.
+- **`test_dss_hours_tracker.py`** keeps sort keys, pure helpers, settings/layout round-trips, updater helpers, and similar tests without requiring the env var.
+- Full DSS test discovery remains **`python -m unittest discover -s . -p "test_dss*.py"`**; with `RUN_SLOW_TESTS=1`, integration tests execute instead of skipping (still **63** tests total: **35** fast + **28** slow).
+- **`test_dss_hours_tracker.py`** was trimmed so workbook/cache/`load_tracker_data` cases exist only in the integration module (no duplicate `test_*` definitions); imports were reduced to match the slimmer fast suite. Integration module imports include helpers such as **`format_email_subject`** and **`compute_bytes_hash`** where cache and email tests need them.
+- **`README.md` Tests** subsection documents the split, the env var, fixture module path, and PowerShell examples for fast-only vs full discovery runs.
+
+### UI theme colours (Configuration)
+
+- Added **`UiThemeColors`** (frozen defaults: soft rose alert rows, teal-leaning crew totals, slate tooltips, pink report outline) persisted under `app_settings.ui_theme` in config JSON.
+- **Settings ? Configuration ? Appearance:** hex entry + colour picker per semantic slot, **Reset colours to sample defaults**, validated on Apply; all `DataTable` instances and email preview table refresh tags; Reports outline and Formatting Rules **ToolTip** popups use the saved tooltip colours.
+- Helpers: **`normalize_ui_hex_color`**, **`parse_ui_theme_payload`** (partial / invalid keys fall back to defaults).
+
+### Loading hints file (auxiliary; UI not wired yet)
+
+- Added **`LOADING_HINTS.txt`** at the repository root: many single-line hints covering parsing boundaries (`K25:AZ36`), revision behaviour, AZ2 warnings, cache and semantic hash, quick load and cancel hotkey, filters and layouts, Outlook and email drafts, formatting rules, combined-name caveats, maintenance buttons, `%LOCALAPPDATA%\DSSHoursTracker`, and similar limitations.
+- First lines in the file are **`#` comments** documenting convention: a future loader can skip lines starting with `#` and rotate the rest on splash or progress UI.
+
+### Maintainer / handoff notes (no code change)
+
+- **Distribution:** Clarified for maintainers that end users should receive a single Windows installer (e.g. PyInstaller-built binary wrapped with Inno Setup, NSIS, or WiX) for double-click install without separate Python or `pip`; standard installers register **Settings ? Apps** uninstall and do not require a separate uninstaller download.
+- **Visual design:** Reviewed current styling (`DataTable` alert and crew-total tags, Reports outline highlight, default `ttk` elsewhere); recorded recommendation to centralize palette tokens and optionally add a header/toolbar band and accent before larger dark-mode work.
+
 ### Completed Changes
 - Added GitHub-based update checking with installed-version detection.
 - Added automatic background update checks on startup.
@@ -83,7 +108,7 @@ Small fixes and very short edits are intentionally omitted unless they materiall
 - **UI:** double-click **source file** opens the workbook; column drag shows a vertical insertion indicator; Summaries notebook order is daily views before weekly (`Daily by PF#`, `Weekly by PF#`, combined day, combined week).
 - **Load order:** multi-DSS loads sort sources by file **mtime** (newest first); `process_workbook_bytes` progress text includes **PF#-#** plus sheet name.
 - **Quick load:** last successfully opened DSS paths persist in config; optional startup reload (800 ms after launch if no CLI sources), progress hint label, cancel button plus **configurable global hotkey** (presets and a "Press keys..." capture dialog, stored as a Tk virtual event string). `AppSettings` adds `quickload_last_sources_enabled` and `quickload_cancel_hotkey`.
-- **Tests:** app-settings round-trip and hotkey helper tests; full suite **62** tests passing (includes path-like column helper).
+- **Tests:** app-settings round-trip and hotkey helper tests; full suite **63** tests passing (includes path-like column helper and cache/hash cases).
 
 ### Comprehensive progress log (recent implementation work)
 
@@ -109,7 +134,7 @@ Consolidated detail for the same feature batch (parsing, cache, UI, settings, te
 - **Tab chrome:** `reports_outline` and `_sync_reports_alert_chrome` drive outline / `(!)` labelling on **Error Report**, **Sheet Parse Warnings**, and the parent **Reports** group when filtered errors or parse warnings exist; cleared when data is refreshed clean or views are cleared.
 - **Open source file:** `DataTable` uses `open_source_file_callback` / `source_file_column`; double-click opens via `_open_displayed_source_file` (shell open) on supported tables (daily, summaries, parse warnings, workbook health, audit trail, etc.).
 - **Column reorder:** Drag shows a vertical insertion line (`_column_drag_line`); hidden on release or invalid drop.
-- **Column auto-width:** `DataTable` measures heading + cell strings (`tkinter.font`) after each render; path-like column ids are capped tighter; saved layout `column_widths` are no longer restored on load.
+- **Column auto-width:** `DataTable` measures heading + cell strings (`tkinter.font`) after each render; path-like column ids are capped tighter; saved layout `column_widths` are no longer restored on load; columns use `stretch=False` so neighbour columns are not resized by the layout engine (see later toolbar word wrap).
 - **Summaries tab order:** Notebook order is **Daily by PF#**, **Weekly by PF#**, **Combined Summary by Day**, **Combined Summary by Week**.
 
 **Progress text**
@@ -130,7 +155,7 @@ Consolidated detail for the same feature batch (parsing, cache, UI, settings, te
 
 **Testing**
 
-- Extended tests: revision parsing, preferred-sheet / AZ2 behaviour, `combine_sheet_hashes`, app-settings round-trip (quick-load fields), hotkey helpers, path-like column detection. **62** tests, `python -m unittest test_dss_hours_tracker -q`.
+- Extended tests: revision parsing, preferred-sheet / AZ2 behaviour, `combine_sheet_hashes`, app-settings round-trip (quick-load fields), hotkey helpers, path-like column detection, disk cache `file_hash` contract, `rv` sheet suffix. **63** tests, `python -m unittest test_dss_hours_tracker -q`.
 
 **Documentation**
 
@@ -143,7 +168,15 @@ Consolidated detail for the same feature batch (parsing, cache, UI, settings, te
 - **Path-like columns** (`source_file`, configured `source_file_column`, `sources`, any `*_path`) use a lower pixel cap than general text; other columns use a high ceiling so wide text (for example **Details**) still fits without unbounded growth.
 - **Saved `column_widths` in `table_layouts`:** Widths from disk are no longer applied on load so content-based sizing stays consistent; widths are still written when layouts save for backward compatibility.
 - **Stretch:** Only the last visible column uses `stretch=True` so extra horizontal space is absorbed there.
-- **Tests:** `is_path_like_table_column` unit coverage; full suite **62** tests with `python -m unittest test_dss_hours_tracker -q`.
+- **Tests:** `is_path_like_table_column` unit coverage; full suite **63** tests with `python -m unittest test_dss_hours_tracker -q`.
+
+### Table UX and cache/revision fixes (same cycle)
+
+- **Treeview columns:** all logical columns use `stretch=False` so interactive width changes do not auto-shrink the next column; horizontal scroll covers overflow.
+- **Word wrap:** per-`DataTable` toolbar button `Word wrap (off)` / `(on)`; wraps displayed cell text to the current column pixel width and applies a custom `ttk.Style` row height so wrapped lines show; source-file double-click strips embedded newlines before opening.
+- **Disk cache key:** after a **Partial Refresh**, `save_cached_daily_records` now stores the same **workbook content hash** as `load_cached_daily_records` expects (previously the semantic fingerprint was written, causing a perpetual disk miss for that file until re-parse).
+- **Sheet revision names:** `REVISION_PATTERN` recognises **`rv`** + digits (e.g. `2026-04-26 rv1`) so `parse_sheet_revision` aligns with AZ2 revision level `1`.
+- **Tests:** `parse_sheet_revision` cases for `rv1`/`RV2`; `test_disk_cache_load_requires_workbook_content_hash`; suite **63** tests.
 
 ## Current Open Bugs
 These remain on `Known bugs List.txt` until explicitly confirmed fixed by the user.

@@ -37,6 +37,14 @@ Working scratchpad: check items off when they are done.
 
 - [x] Auto-size column widths from header + cell text; cap **Source File** / `source_file` and other path-like columns (`sources`, `*_path`) so long filenames do not blow out the layout; other columns cap at a large pixel ceiling for sanity.
 
-I want to add a feature. When I click and drag to resize a column, I don't want it to knock on adjust the size of the next column. I want the size of every other column to remain constant and end up with either a greater or a lesser total width. If the width exceeds the width of the page, I want a scrollbar to appear. 
+- [x] Column resize: **no column uses `stretch`**, so resizing one column does not shrink the next; total table width follows the sum of column widths and the horizontal scrollbar appears when the table is wider than the view.
 
-I want to add a feature. I want a word wrap button with a status "(on)" or "(off)" to appear on any page with a row whose contents are not fully displayed on the width of the page or are cut off by the next column. This button should be per-page and not global. It should appear even when the conditions to trigger it are not present. This setting should wrap the contents of each row in their respective columns and occupy the equivalent space of multiple rows on the page until all info is displayed, but still be one single row.
+- [x] **Word wrap (off) / (on)** toggle per `DataTable` (toolbar); wraps cell text to column width with newlines, increases Treeview row height via a per-table style so wrapped lines are visible; double-click source strips newlines before opening.
+
+- When I click the clear cached DSS button, it does not clear memory hits, it only clears stored data. Can you dump the memory as well?
+
+- I want to merge the funcitonality of the open DSS workbooks and add DSSs buttons. Currenly the open DSS workbooks clears whats open and opens new ones. Add DSSs adds to the existing open books. Tests with users have indicated this is unclear. I want to effectively only have the Add DSSs button so this only ever adds workbooks, and simply count on the remove DSSs button to clear when the user wants to
+
+- Right now when an error exists in either the error report or sheet parse warnings tabs, an exclamation point appears in their tab names, as well as their parent, and only the window around them changes the colour of its borders. I don't want to change the colour of this border. I want the tabs themselves (which are currently grey) to change to the same colour red as the error report listing red. 
+
+- I would like the cancel button aligned with the progress bar. Right now it is centered vertically between the progress bar and the hint below it. The hint below the progress bar now pushes the rest of the UI further down and leaves dead space, which I do not like. I would like to move this hint left of the progress bar and reclaim the space below the progress bar for the windows below. 
