@@ -78,6 +78,8 @@ AUTO_UPDATE_CHECK_DELAY_MS = 15000
 DEFAULT_HASH_POLL_MINUTES = 5
 BUG_REPORT_EMAIL = "lross@jatechpowersystems.com"
 MAX_PARALLEL_PARSE_WORKERS = 2
+OUTLOOK_NAME_RULE_LABEL = "Name does not match email address book"
+OUTLOOK_DISPLAY_NAME_TYPO_MIN_SIMILARITY = 0.84
 UPDATE_DIRNAME = "updates"
 UPDATER_EXE_NAME = "DSSToolsUpdater.exe"
 INSTALLER_EXTENSIONS = (".exe", ".msi", ".msix", ".msixbundle")
@@ -537,6 +539,13 @@ class ErrorFinding:
     source_files: str
     reason: str
     breakdown: str
+    outlook_name_rule: bool = False
+
+
+@dataclass(frozen=True)
+class OutlookResolution:
+    email: str
+    display_name: str
 
 
 @dataclass(frozen=True)
@@ -1082,13 +1091,38 @@ def load_employee_emails(config_path: Path) -> dict[str, str]:
     return emails
 
 
-def save_employee_emails(config_path: Path, employee_emails: dict[str, str]) -> None:
+def load_employee_outlook_display_names(config_path: Path) -> dict[str, str]:
+    payload = read_config_payload(config_path)
+    raw_map = payload.get("employee_outlook_display_names", {})
+    if not isinstance(raw_map, dict):
+        return {}
+    names: dict[str, str] = {}
+    for name, display_value in raw_map.items():
+        employee = str(name).strip()
+        display = str(display_value).strip()
+        if employee and display:
+            names[employee] = display
+    return names
+
+
+def save_employee_emails(
+    config_path: Path,
+    employee_emails: dict[str, str],
+    employee_outlook_display_names: dict[str, str] | None = None,
+) -> None:
     payload = read_config_payload(config_path)
     payload["employee_emails"] = {
         name: email.strip()
         for name, email in sorted(employee_emails.items(), key=lambda item: item[0].lower())
         if name.strip()
     }
+    if employee_outlook_display_names is not None:
+        with_email = {n.strip() for n, e in employee_emails.items() if n.strip() and e.strip()}
+        payload["employee_outlook_display_names"] = {
+            name: display.strip()
+            for name, display in sorted(employee_outlook_display_names.items(), key=lambda item: item[0].lower())
+            if name.strip() and display.strip() and name in with_email
+        }
     config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
@@ -1791,6 +1825,114 @@ def build_error_findings(records: Iterable[DailyRecord], profile: FormattingProf
     return findings
 
 
+def outlook_dss_vs_book_similarity(dss_name: str, outlook_display_name: str) -> float | None:
+    """Return 0–1 similarity when names differ but look like a typo; None if not a typo signal."""
+    book = outlook_display_name.strip()
+    if not book:
+        return None
+    dss_norm = normalize_person_name(dss_name)
+    out_norm = normalize_person_name(book)
+    if dss_norm == out_norm:
+        return None
+    ratio = difflib.SequenceMatcher(None, dss_norm, out_norm).ratio()
+    if ratio < OUTLOOK_DISPLAY_NAME_TYPO_MIN_SIMILARITY:
+        return None
+    return ratio
+
+
+def build_outlook_name_mismatch_findings(
+    records: Iterable[DailyRecord],
+    outlook_display_by_employee: dict[str, str],
+    ignored_name_typos: set[str],
+) -> list[ErrorFinding]:
+    findings: list[ErrorFinding] = []
+    by_triple: dict[tuple[str, date, str], list[DailyRecord]] = {}
+    for record in records:
+        outlook_name = outlook_display_by_employee.get(record.employee, "").strip()
+        if not outlook_name:
+            continue
+        ratio = outlook_dss_vs_book_similarity(record.employee, outlook_name)
+        if ratio is None:
+            continue
+        if typo_warning_key(record.employee, outlook_name) in ignored_name_typos:
+            continue
+        key = (record.employee, record.work_date, record.source_file)
+        by_triple.setdefault(key, []).append(record)
+
+    for (employee, work_date, source_file), day_records in sorted(
+        by_triple.items(), key=lambda item: (item[0][1], item[0][0].casefold(), item[0][2])
+    ):
+        outlook_name = outlook_display_by_employee[employee].strip()
+        ratio = outlook_dss_vs_book_similarity(employee, outlook_name)
+        if ratio is None:
+            continue
+        week_start = monday_week_start(work_date)
+        week_end = week_start + timedelta(days=6)
+        day_st = round(sum(r.st for r in day_records), 2)
+        day_ot = round(sum(r.ot for r in day_records), 2)
+        day_dt = round(sum(r.dt for r in day_records), 2)
+        day_total = round(day_st + day_ot + day_dt, 2)
+        sheets = ", ".join(sorted({r.source_sheet for r in day_records}))
+        breakdown = (
+            f"{work_date.isoformat()} ST {fmt_hours(day_st)} OT {fmt_hours(day_ot)} "
+            f"DT {fmt_hours(day_dt)} Total {fmt_hours(day_total)} ({source_file})"
+        )
+        reason = (
+            f"DSS roster name {employee!r} differs from the Outlook address book display name {outlook_name!r} "
+            f"({ratio * 100:.0f}% text similarity). Compare spelling on the DSS against Outlook contacts / GAL."
+        )
+        findings.append(
+            ErrorFinding(
+                employee=employee,
+                week_start=week_start,
+                week_end=week_end,
+                hour_type=OUTLOOK_NAME_RULE_LABEL,
+                threshold=1.0,
+                actual_total=ratio,
+                delta=round(1.0 - ratio, 4),
+                trigger_date=work_date,
+                trigger_day_st=day_st,
+                trigger_day_ot=day_ot,
+                trigger_day_dt=day_dt,
+                source_files=source_file,
+                reason=reason,
+                breakdown=f"Sheets: {sheets} | {breakdown}",
+                outlook_name_rule=True,
+            )
+        )
+    return findings
+
+
+def error_report_table_row(finding: ErrorFinding) -> tuple:
+    if finding.outlook_name_rule:
+        rule = finding.hour_type
+        actual = f"{finding.actual_total * 100:.1f}% text match"
+        limit = "100% (exact)"
+        delta = f"{finding.delta * 100:.1f}% gap"
+    else:
+        threshold_hours = fmt_hours(finding.threshold)
+        rule = f"{finding.hour_type} > {threshold_hours}"
+        actual = fmt_hours(finding.actual_total)
+        limit = threshold_hours
+        delta = fmt_hours(finding.delta)
+    return (
+        finding.employee,
+        finding.week_start.isoformat(),
+        finding.week_end.isoformat(),
+        rule,
+        finding.trigger_date.isoformat(),
+        actual,
+        limit,
+        delta,
+        fmt_hours(finding.trigger_day_st),
+        fmt_hours(finding.trigger_day_ot),
+        fmt_hours(finding.trigger_day_dt),
+        finding.source_files,
+        finding.reason,
+        finding.breakdown,
+    )
+
+
 def filter_employee_names(
     employee_names: Iterable[str],
     filter_selection: FilterSelection,
@@ -1858,6 +2000,35 @@ def find_potential_name_typos(
     return warnings
 
 
+def find_outlook_display_name_typos(
+    employee_names: Iterable[str],
+    outlook_display_by_employee: dict[str, str],
+    daily_records: Iterable[DailyRecord],
+) -> list[NameTypoWarning]:
+    warnings: list[NameTypoWarning] = []
+    for employee in sorted({name for name in employee_names if name.strip()}):
+        outlook_name = outlook_display_by_employee.get(employee, "").strip()
+        if not outlook_name:
+            continue
+        ratio = outlook_dss_vs_book_similarity(employee, outlook_name)
+        if ratio is None:
+            continue
+        locations: list[str] = []
+        for record in daily_records:
+            if record.employee != employee:
+                continue
+            locations.append(f"{record.work_date.isoformat()} | {record.source_sheet} | {record.source_file}")
+        warnings.append(
+            NameTypoWarning(
+                employee=employee,
+                similar_employee=outlook_name,
+                similarity=ratio,
+                locations=locations,
+            )
+        )
+    return warnings
+
+
 def find_similar_employee_name_pairs(
     all_employee_names: Iterable[str],
     daily_records: Iterable[DailyRecord],
@@ -1917,10 +2088,46 @@ def extract_smtp_address(recipient) -> str:
     return str(address).strip()
 
 
+def extract_resolved_display_name(recipient) -> str:
+    try:
+        if not getattr(recipient, "Resolved", False):
+            return ""
+        address_entry = recipient.AddressEntry
+    except Exception:
+        address_entry = None
+
+    if address_entry is not None:
+        for attr in ("Name", "DisplayName"):
+            try:
+                val = getattr(address_entry, attr, "")
+                if str(val).strip():
+                    return str(val).strip()
+            except Exception:
+                pass
+        try:
+            exchange_user = address_entry.GetExchangeUser()
+            if exchange_user is not None:
+                for attr in ("Name", "DisplayName"):
+                    try:
+                        val = getattr(exchange_user, attr, "")
+                        if str(val).strip():
+                            return str(val).strip()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    try:
+        val = getattr(recipient, "Name", "")
+        return str(val).strip()
+    except Exception:
+        return ""
+
+
 def lookup_outlook_emails(
     employee_names: Iterable[str],
     should_cancel: Callable[[], bool] | None = None,
-) -> dict[str, str]:
+) -> dict[str, OutlookResolution]:
     if pythoncom is None or win32com is None:
         raise RuntimeError("Outlook lookup requires pywin32 and desktop Outlook.")
 
@@ -1937,7 +2144,7 @@ def lookup_outlook_emails(
         except Exception as exc:
             raise RuntimeError("Could not open Outlook to query email addresses.") from exc
 
-        results: dict[str, str] = {}
+        results: dict[str, OutlookResolution] = {}
         for employee in names:
             if check_cancel():
                 raise OperationCancelled("Cancelled Outlook email sync.")
@@ -1949,8 +2156,10 @@ def lookup_outlook_emails(
             if not getattr(recipient, "Resolved", False):
                 continue
             email = extract_smtp_address(recipient)
-            if email:
-                results[employee] = email
+            if not email:
+                continue
+            display_name = extract_resolved_display_name(recipient)
+            results[employee] = OutlookResolution(email=email, display_name=display_name)
         return results
     finally:
         pythoncom.CoUninitialize()
@@ -4627,6 +4836,7 @@ class DssToolsApp(tk.Tk):
         self.config_path = self.app_root / CONFIG_FILENAME
         self.formatting_profiles, self.current_profile_name = load_formatting_profiles(self.config_path)
         self.employee_emails = load_employee_emails(self.config_path)
+        self.employee_outlook_display_names = load_employee_outlook_display_names(self.config_path)
         self.employee_notes = load_employee_notes(self.config_path)
         self.email_subject_template, self.email_body_template = load_email_templates(self.config_path)
         self.employee_groups = load_employee_groups(self.config_path)
@@ -5333,7 +5543,7 @@ class DssToolsApp(tk.Tk):
         save_formatting_profiles(self.config_path, self.formatting_profiles, self.current_profile_name)
 
     def _persist_employee_emails(self) -> None:
-        save_employee_emails(self.config_path, self.employee_emails)
+        save_employee_emails(self.config_path, self.employee_emails, self.employee_outlook_display_names)
 
     def _persist_employee_groups(self) -> None:
         save_employee_groups(self.config_path, self.employee_groups)
@@ -5520,7 +5730,8 @@ class DssToolsApp(tk.Tk):
         if not messagebox.askyesno("Clear Stored Emails", "Delete all saved employee email addresses?"):
             return
         self.employee_emails = {}
-        remove_config_keys(self.config_path, ["employee_emails"])
+        self.employee_outlook_display_names = {}
+        remove_config_keys(self.config_path, ["employee_emails", "employee_outlook_display_names"])
         if self.current_data is not None:
             self._render_data(self.current_data)
         else:
@@ -5542,6 +5753,7 @@ class DssToolsApp(tk.Tk):
             self.config_path.unlink()
 
         self.employee_emails = {}
+        self.employee_outlook_display_names = {}
         self.employee_groups = {}
         self.employee_notes = {}
         self.job_presets = {}
@@ -6030,7 +6242,11 @@ class DssToolsApp(tk.Tk):
             self.data_notebook.add(self.week_totals_table, text="Week Totals")
 
     def _update_employee_email(self, employee: str, email: str) -> None:
-        self.employee_emails[employee] = email.strip()
+        old = self.employee_emails.get(employee, "").strip()
+        new_val = email.strip()
+        self.employee_emails[employee] = new_val
+        if old != new_val or not new_val:
+            self.employee_outlook_display_names.pop(employee, None)
         self._persist_employee_emails()
         if self.current_data is not None:
             self._refresh_email_preview(self.current_data)
@@ -6583,7 +6799,7 @@ class DssToolsApp(tk.Tk):
 
     def _handle_outlook_sync_success(
         self,
-        results: dict[str, str],
+        results: dict[str, OutlookResolution],
         employee_names: list[str],
         manual: bool,
         cancel_event: threading.Event | None = None,
@@ -6591,11 +6807,16 @@ class DssToolsApp(tk.Tk):
         self._outlook_sync_in_progress = False
         self._end_cancellable_action(cancel_event)
         updated = 0
-        for employee, email in results.items():
-            if email and not self.employee_emails.get(employee, "").strip():
-                self.employee_emails[employee] = email
+        outlook_dirty = False
+        for employee, resolution in results.items():
+            if resolution.email and not self.employee_emails.get(employee, "").strip():
+                self.employee_emails[employee] = resolution.email
                 updated += 1
-        if updated:
+            disp = resolution.display_name.strip()
+            if disp and self.employee_outlook_display_names.get(employee, "") != disp:
+                self.employee_outlook_display_names[employee] = disp
+                outlook_dirty = True
+        if updated or outlook_dirty:
             self._persist_employee_emails()
             if self.current_data is not None:
                 self._render_data(self.current_data)
@@ -6603,7 +6824,11 @@ class DssToolsApp(tk.Tk):
 
         typo_warnings: list[NameTypoWarning] = []
         if self.current_data is not None:
-            unresolved_names = [employee for employee in employee_names if not results.get(employee, "").strip()]
+            unresolved_names = [
+                employee
+                for employee in employee_names
+                if not (results.get(employee) and results[employee].email.strip())
+            ]
             typo_warnings = [
                 warning
                 for warning in find_potential_name_typos(
@@ -6613,6 +6838,22 @@ class DssToolsApp(tk.Tk):
                 )
                 if typo_warning_key(warning.employee, warning.similar_employee) not in self.ignored_name_typos
             ]
+            outlook_typos = [
+                warning
+                for warning in find_outlook_display_name_typos(
+                    self.current_data.employee_names,
+                    self.employee_outlook_display_names,
+                    self.current_data.daily_records,
+                )
+                if typo_warning_key(warning.employee, warning.similar_employee) not in self.ignored_name_typos
+            ]
+            seen_typo: set[str] = {typo_warning_key(w.employee, w.similar_employee) for w in typo_warnings}
+            for warning in outlook_typos:
+                key = typo_warning_key(warning.employee, warning.similar_employee)
+                if key in seen_typo:
+                    continue
+                seen_typo.add(key)
+                typo_warnings.append(warning)
 
         if manual:
             missing_after = sum(1 for employee in employee_names if not self.employee_emails.get(employee, "").strip())
@@ -6630,24 +6871,38 @@ class DssToolsApp(tk.Tk):
         if self.current_data is None or not self.current_data.employee_names:
             messagebox.showinfo("Check Name Typos", "Load DSS data first.")
             return
-        names_to_check = [
-            employee for employee in self.current_data.employee_names
-            if not self.employee_emails.get(employee, "").strip()
-        ]
+        employee_names = self.current_data.employee_names
+        daily_records = self.current_data.daily_records
+        names_to_check = [employee for employee in employee_names if not self.employee_emails.get(employee, "").strip()]
+        raw_warnings: list[NameTypoWarning] = []
         if names_to_check:
-            raw_warnings = find_potential_name_typos(
-                names_to_check,
-                self.current_data.employee_names,
-                self.current_data.daily_records,
+            raw_warnings.extend(
+                find_potential_name_typos(
+                    names_to_check,
+                    employee_names,
+                    daily_records,
+                )
             )
         else:
-            raw_warnings = find_similar_employee_name_pairs(
-                self.current_data.employee_names,
-                self.current_data.daily_records,
+            raw_warnings.extend(find_similar_employee_name_pairs(employee_names, daily_records))
+        raw_warnings.extend(
+            find_outlook_display_name_typos(
+                employee_names,
+                self.employee_outlook_display_names,
+                daily_records,
             )
+        )
+        deduped: list[NameTypoWarning] = []
+        seen_keys: set[str] = set()
+        for warning in raw_warnings:
+            key = typo_warning_key(warning.employee, warning.similar_employee)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            deduped.append(warning)
         warnings = [
             warning
-            for warning in raw_warnings
+            for warning in deduped
             if typo_warning_key(warning.employee, warning.similar_employee) not in self.ignored_name_typos
         ]
         if not warnings:
@@ -6663,7 +6918,7 @@ class DssToolsApp(tk.Tk):
 
         ttk.Label(
             dialog,
-            text="Possible name typo(s) were found for unresolved Outlook matches. Select any entry and choose Ignore Selected to stop warning on that inconsistency going forward. This warning can also be disabled in Settings > Configuration.",
+            text="Possible name typo(s): similar names on the DSS roster, or a roster name that does not match the Outlook address book display name (after Sync Outlook Emails). Select an entry and choose Ignore Selected to stop warning on that pair. Notifications can also be disabled in Settings > Configuration.",
             wraplength=740,
             justify="left",
         ).pack(fill="x", padx=12, pady=(12, 8))
@@ -7132,26 +7387,24 @@ class DssToolsApp(tk.Tk):
             ]
         )
         error_findings = build_error_findings(filtered_daily_records, self._active_profile())
+        error_findings.extend(
+            build_outlook_name_mismatch_findings(
+                filtered_daily_records,
+                self.employee_outlook_display_names,
+                self.ignored_name_typos,
+            )
+        )
+        error_findings.sort(
+            key=lambda f: (
+                f.week_start,
+                f.employee.casefold(),
+                f.trigger_date,
+                1 if f.outlook_name_rule else 0,
+                f.hour_type,
+            )
+        )
         self.error_report_table.set_rows(
-            [
-                (
-                    finding.employee,
-                    finding.week_start.isoformat(),
-                    finding.week_end.isoformat(),
-                    f"{finding.hour_type} > {fmt_hours(finding.threshold)}",
-                    finding.trigger_date.isoformat(),
-                    fmt_hours(finding.actual_total),
-                    fmt_hours(finding.threshold),
-                    fmt_hours(finding.delta),
-                    fmt_hours(finding.trigger_day_st),
-                    fmt_hours(finding.trigger_day_ot),
-                    fmt_hours(finding.trigger_day_dt),
-                    finding.source_files,
-                    finding.reason,
-                    finding.breakdown,
-                )
-                for finding in error_findings
-            ],
+            [error_report_table_row(finding) for finding in error_findings],
             tags=[("alert",) for _ in error_findings],
         )
         self.parse_warnings_table.set_rows(

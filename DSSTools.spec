@@ -4,7 +4,7 @@ from pathlib import Path
 from PyInstaller.utils.hooks import collect_all
 
 _repo = Path(__file__).resolve().parent
-# Run: python tools/ensure_dss_tools_ico.py  (uses DSS-Tools Icon.png, a lone .ico, or tools/default_dss_tools.ico)
+# Run: python tools/ensure_dss_tools_ico.py [--force]  (DSS-Tools Icon.png, lone .ico, or tools/default_dss_tools.ico)
 _icon = _repo / "dss_tools.ico"
 datas = [('dss_app_version.txt', '.')]
 if _icon.is_file():

@@ -78,7 +78,7 @@ jobs:
           cat dss_app_version.txt
 
       - name: Ensure dss_tools.ico (PyInstaller + Inno)
-        run: python tools/ensure_dss_tools_ico.py
+        run: python tools/ensure_dss_tools_ico.py --force
 
       - name: Run fast unit tests
         run: python -m unittest test_dss_tools test_dss_tools_updater -q

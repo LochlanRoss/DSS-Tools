@@ -5,6 +5,17 @@ Small fixes and very short edits are intentionally omitted unless they materiall
 
 ## 2026-05-04
 
+### App icon committed (no CI placeholder)
+
+- **Cause:** Root `*.png` was gitignored until recently; clean clones had no **`DSS-Tools Icon.png`**, so **`tools/ensure_dss_tools_ico.py`** fell through to **`tools/default_dss_tools.ico`** (generic blue tile) for **`dss_tools.ico`**, PyInstaller, Inno, and the Tk title bar.
+- **Fix:** Added **`DSS-Tools Icon.png`** (timesheet artwork) and regenerated **`dss_tools.ico`** in the repo root. Release workflow runs **`ensure_dss_tools_ico.py --force`** so the ICO always tracks the PNG when both are present. Script **`--force`** regenerates even if **`dss_tools.ico`** already exists.
+
+### DSS roster vs Outlook address book (Error Report + name typo checks)
+
+- **Cause:** Name typo detection only compared **unresolved** DSS names to other DSS names. Once Outlook filled an email, the roster could still spell the person differently than the address book (e.g. Kolodinski vs Kolodinsky) with no warning.
+- **Change:** Outlook sync now stores **`employee_outlook_display_names`** in config (resolved display name when SMTP is found). **`find_outlook_display_name_typos`** / **`build_outlook_name_mismatch_findings`** compare normalized DSS text to that display name (difflib floor **0.84**); ignored pairs reuse **`ignored_name_typos`** / **`typo_warning_key`**. **Error Report** adds rows with rule **“Name does not match email address book”**, **Trigger Date**, **Source Files** (workbook), day ST/OT/DT for that day+file, and narrative in **Reason** / **Daily Breakdown**. **`ErrorFinding.outlook_name_rule`** drives non-hour formatting in the Actual/Limit/Delta columns. Manual **Check Name Typos** always includes address-book mismatches when display names exist. Editing or clearing an employee email drops the cached Outlook display name for that person.
+- **Tests:** `test_dss_tools.py` (round-trip, preserve-on-email-only-save, Kolodinski vs Kolodinsky findings and typo list).
+
 ### In-app update mini-app (silent uninstall / clean / reinstall)
 
 - **`dss_tools_updater.py`** is now a compact **Tk** window after **Install now**: waits for the main PID, runs **Inno silent uninstall** (registry `UninstallString` for the fixed `AppId`), clears **`%LOCALAPPDATA%\DSSTools`** transients (**`cache/`**, **`updates/`**, `*.log`, `diagnostic_snapshot_*.json`) while keeping **`dss_hours_tracker_config.json`**, then runs **`DSSToolsSetup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS`**. A **determinate** progress bar shows **0–50%** during uninstall and **50–100%** during install (time-smoothed while each subprocess runs; Inno does not expose byte-level progress). On silent failure, offers the **full wizard**. Launches **`DSSTools.exe`** from `InstallLocation` when done.

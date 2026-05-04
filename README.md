@@ -241,12 +241,13 @@ The app uses desktop Outlook through `pywin32` when available.
 Supported Outlook features:
 
 - sync missing employee email addresses
+- store each resolved employee’s **Outlook display name** (address book / GAL) next to their email for **DSS roster vs address book** checks
 - create Outlook draft emails
 - test Outlook connectivity from Configuration
 
 The app also performs one automatic Outlook email lookup about one minute after startup when DSS data is loaded.
 
-If Outlook cannot resolve a name and the name looks similar to another loaded employee, the app can warn about a possible typo unless that notification is disabled in Configuration.
+If Outlook cannot resolve a name and the name looks similar to another loaded employee, the app can warn about a possible typo unless that notification is disabled in Configuration. After a successful sync, if the **DSS spelling** still differs from the **resolved Outlook display name** (for example a one-letter surname typo), **Check Name Typos** and the **Error Report** can flag those mismatches with the **trigger date** and **source file** so you can fix the roster.
 
 ## App Data
 
@@ -263,6 +264,7 @@ This includes:
 - config
 - formatting profiles
 - employee emails
+- Outlook display names (paired with saved emails for typo checks)
 - employee groups
 - email templates
 - table layouts
@@ -293,7 +295,7 @@ git push origin 0.2.0
 
 ### Local build (PyInstaller + Inno wizard)
 
-0. **Icon (recommended):** `pip install pillow` then `python tools/ensure_dss_tools_ico.py` so **`dss_tools.ico`** exists at the repo root (from **`DSS-Tools Icon.png`**, a lone **`.ico`**, or the built-in placeholder).
+0. **Icon:** The repo ships **`DSS-Tools Icon.png`** and generated **`dss_tools.ico`** at the root (PyInstaller and Inno use them; no separate download). To refresh the `.ico` after editing the PNG: `pip install pillow` then `python tools/ensure_dss_tools_ico.py --force`. Without sources, the script falls back to **`tools/default_dss_tools.ico`** (generic blue tile).
 
 1. **One-file app** (same flags as CI; version from tag in CI is simulated here with `dss_app_version.txt`):
 

@@ -19,6 +19,7 @@ from unittest import mock
 from dss_hours_tracker import (
     AppSettings,
     DEFAULT_UI_THEME,
+    OUTLOOK_NAME_RULE_LABEL,
     _bug_report_attachment_strings_to_try,
     binding_sequence_from_keypress_event,
     az2_revision_matches_sheet_name,
@@ -42,6 +43,7 @@ from dss_hours_tracker import (
     extract_pf_identifier,
     FilterSelection,
     find_open_excel_workbook,
+    find_outlook_display_name_typos,
     filter_employee_names,
     FormattingProfile,
     get_app_root,
@@ -55,9 +57,11 @@ from dss_hours_tracker import (
     normalize_ui_hex_color,
     parse_ui_theme_payload,
     DailyRecord,
+    build_outlook_name_mismatch_findings,
     build_tracker_data_with_status,
     tracker_data_invalidated_for_cache_clear,
     load_employee_emails,
+    load_employee_outlook_display_names,
     load_employee_groups,
     load_table_layouts,
     normalize_person_name,
@@ -309,6 +313,76 @@ class DssToolsTests(DssToolsFixtures):
             loaded = load_employee_emails(path)
             self.assertEqual(loaded["Alice Smith"], "alice@example.com")
             self.assertEqual(loaded["Bob Jones"], "bob@example.com")
+
+    def test_employee_outlook_display_names_round_trip(self) -> None:
+        with self.workspace_json("outlook_names") as path:
+            save_employee_emails(
+                path,
+                {"Andrea Kolodinski": "a@example.com"},
+                {"Andrea Kolodinski": "Andrea Kolodinsky"},
+            )
+            self.assertEqual(load_employee_emails(path)["Andrea Kolodinski"], "a@example.com")
+            self.assertEqual(
+                load_employee_outlook_display_names(path)["Andrea Kolodinski"],
+                "Andrea Kolodinsky",
+            )
+
+    def test_save_employee_emails_without_outlook_arg_preserves_display_names(self) -> None:
+        with self.workspace_json("preserve_outlook") as path:
+            save_employee_emails(
+                path,
+                {"Andrea Kolodinski": "a@example.com"},
+                {"Andrea Kolodinski": "Andrea Kolodinsky"},
+            )
+            save_employee_emails(path, {"Andrea Kolodinski": "a@example.com"})
+            self.assertEqual(
+                load_employee_outlook_display_names(path)["Andrea Kolodinski"],
+                "Andrea Kolodinsky",
+            )
+
+    def test_build_outlook_name_mismatch_findings_lists_day_and_file(self) -> None:
+        records = [
+            DailyRecord(
+                source_path=Path("C:/data/PF1.xlsx"),
+                source_file="PF26024-1.xlsx",
+                work_date=date(2026, 4, 8),
+                source_sheet="Sheet1",
+                employee="Andrea Kolodinski",
+                st=8.0,
+                ot=0.0,
+                dt=0.0,
+                source_ranges="",
+            ),
+        ]
+        outlook = {"Andrea Kolodinski": "Andrea Kolodinsky"}
+        findings = build_outlook_name_mismatch_findings(records, outlook, set())
+        self.assertEqual(len(findings), 1)
+        f = findings[0]
+        self.assertTrue(f.outlook_name_rule)
+        self.assertEqual(f.hour_type, OUTLOOK_NAME_RULE_LABEL)
+        self.assertEqual(f.trigger_date, date(2026, 4, 8))
+        self.assertEqual(f.source_files, "PF26024-1.xlsx")
+        self.assertIn("Andrea Kolodinsky", f.reason)
+
+    def test_find_outlook_display_name_typos_matches_address_book_spelling(self) -> None:
+        records = [
+            DailyRecord(
+                source_path=Path("C:/data/PF1.xlsx"),
+                source_file="PF26024-1.xlsx",
+                work_date=date(2026, 4, 8),
+                source_sheet="Sheet1",
+                employee="Andrea Kolodinski",
+                st=1.0,
+                ot=0.0,
+                dt=0.0,
+                source_ranges="",
+            ),
+        ]
+        outlook = {"Andrea Kolodinski": "Andrea Kolodinsky"}
+        warnings = find_outlook_display_name_typos(["Andrea Kolodinski"], outlook, records)
+        self.assertEqual(len(warnings), 1)
+        self.assertEqual(warnings[0].similar_employee, "Andrea Kolodinsky")
+        self.assertIn("PF26024-1.xlsx", warnings[0].locations[0])
 
     def test_employee_groups_round_trip(self) -> None:
         with self.workspace_json("groups") as path:
@@ -585,6 +659,29 @@ class DssToolsTests(DssToolsFixtures):
             self.assertEqual(proc.returncode, 0, msg=proc.stderr + proc.stdout)
             ico = root / "dss_tools.ico"
             self.assertTrue(ico.is_file())
+            self.assertGreater(ico.stat().st_size, 100)
+
+    def test_ensure_dss_tools_ico_force_overwrites_existing_ico(self) -> None:
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest("pillow not installed")
+        script = Path(__file__).resolve().parent / "tools" / "ensure_dss_tools_ico.py"
+        if not script.is_file():
+            self.skipTest("ensure_dss_tools_ico.py not present")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            png = root / "dss_tools.png"
+            Image.new("RGBA", (64, 48), (200, 40, 40, 255)).save(png, format="PNG")
+            ico = root / "dss_tools.ico"
+            ico.write_bytes(b"not-a-real-ico")
+            proc = subprocess.run(
+                [sys.executable, str(script), "--repo", str(root), "--force"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, msg=proc.stderr + proc.stdout)
             self.assertGreater(ico.stat().st_size, 100)
 
     def test_get_app_root_uses_localappdata_when_available(self) -> None:

@@ -2,7 +2,7 @@
 """Create repo-root ``dss_tools.ico`` for Windows (PyInstaller PE icon + Inno Setup shortcuts).
 
 Order of resolution (repository root only):
-1. If ``dss_tools.ico`` already exists — done.
+1. If ``dss_tools.ico`` already exists — done (unless ``--force``).
 2. If there is exactly one other ``*.ico`` file — copy it to ``dss_tools.ico``.
 3. If a known PNG exists — convert to a multi-resolution ICO (requires Pillow).
 4. Otherwise copy ``tools/default_dss_tools.ico`` (built-in placeholder) unless ``--strict``.
@@ -73,6 +73,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Do not use the built-in placeholder; exit 1 if no real icon or PNG source is available.",
     )
     parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Regenerate dss_tools.ico even if it already exists (PNG or lone .ico still wins over placeholder).",
+    )
+    parser.add_argument(
         "--repo",
         type=Path,
         default=REPO_ROOT,
@@ -82,7 +87,7 @@ def main(argv: list[str] | None = None) -> int:
     repo = args.repo.resolve()
     target = repo / "dss_tools.ico"
 
-    if target.is_file():
+    if target.is_file() and not args.force:
         print(f"OK: {target.name} already present.")
         return 0
 
