@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-"""Create repo-root ``dss_tools.ico`` for Windows (PyInstaller PE icon + Inno Setup shortcuts).
+"""Create repo-root ``dss_tools.ico`` for Windows (PyInstaller PE icon + Inno Setup).
 
-Order of resolution (repository root only):
+**Branded repositories:** If ``DSS-Tools Icon.png`` exists at the repo root, ``dss_tools.ico`` is
+**always** produced from that file only (no lone ``*.ico`` shortcut, no placeholder). Existing
+``dss_tools.ico`` is verified against the PNG and regenerated when it does not match.
+
+**Other repositories:** Without the canonical PNG, resolution follows (unless ``--strict``):
+
 1. If ``dss_tools.ico`` already exists — done (unless ``--force``).
 2. If there is exactly one other ``*.ico`` file — copy it to ``dss_tools.ico``.
-3. If a known PNG exists — convert to a multi-resolution ICO (requires Pillow). The ICO writer
-   saves the **256×256** frame first (Pillow skips larger ``sizes`` if the primary image is small).
-   A quick PNG↔ICO pixel check rejects outputs that do not match the source visually.
+3. If another known PNG exists — convert to a multi-resolution ICO (requires Pillow).
 4. Otherwise copy ``tools/default_dss_tools.ico`` (built-in placeholder) unless ``--strict``.
 
-PNG file names checked first: ``dss_tools.png``, ``DSS-Tools Icon.png``, ``DSSTools Icon.png``,
-then any single root ``*.png`` whose name contains ``icon`` (case-insensitive). More than one
-such loose match is an error.
+PNG file names (non-canonical): ``dss_tools.png``, ``DSSTools Icon.png``, then any single root
+``*.png`` whose name contains ``icon`` (case-insensitive). More than one loose match is an error.
 """
 
 from __future__ import annotations
@@ -23,6 +25,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TOOLS_DIR = Path(__file__).resolve().parent
+# Single source of truth for release branding (must match .gitignore exception).
+CANONICAL_BRAND_PNG = "DSS-Tools Icon.png"
 PNG_CANDIDATE_NAMES = ("dss_tools.png", "DSS-Tools Icon.png", "DSSTools Icon.png")
 ICO_SIZES = (16, 24, 32, 48, 64, 128, 256)
 
@@ -147,6 +151,46 @@ def _verify_ico_matches_png(png: Path, ico: Path, *, max_mean_abs_rgb: float = 3
         )
 
 
+def _write_branded_ico_from_canonical(target: Path, canonical: Path, *, no_verify: bool) -> int:
+    """Regenerate ``dss_tools.ico`` from ``DSS-Tools Icon.png`` and verify."""
+    try:
+        _png_to_ico(canonical, target)
+        if not no_verify:
+            _verify_ico_matches_png(canonical, target)
+    except ImportError:
+        print("error: Pillow is required to convert PNG to ICO (`pip install pillow`).", file=sys.stderr)
+        return 1
+    except (OSError, ValueError) as exc:
+        try:
+            target.unlink(missing_ok=True)
+        except OSError:
+            pass
+        print(f"error: could not write or verify {target}: {exc}", file=sys.stderr)
+        return 1
+    print(f"OK: wrote {target.name} from {canonical.name} (canonical brand; square frames + check)")
+    return 0
+
+
+def _ensure_branded_icon(repo: Path, target: Path, args: argparse.Namespace) -> int | None:
+    """If ``DSS-Tools Icon.png`` exists, enforce ICO from that file only. Returns None if not branded."""
+    canonical = repo / CANONICAL_BRAND_PNG
+    if not canonical.is_file():
+        return None
+
+    need_write = args.force or not target.is_file()
+    if not need_write and not args.no_verify:
+        try:
+            _verify_ico_matches_png(canonical, target)
+        except (ValueError, OSError, ImportError, FileNotFoundError):
+            need_write = True
+
+    if need_write:
+        return _write_branded_ico_from_canonical(target, canonical, no_verify=args.no_verify)
+
+    print(f"OK: {target.name} already matches {CANONICAL_BRAND_PNG}.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument(
@@ -157,7 +201,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Regenerate dss_tools.ico even if it already exists (PNG or lone .ico still wins over placeholder).",
+        help="Regenerate dss_tools.ico even if it already matches (canonical PNG or unbranded flow).",
     )
     parser.add_argument(
         "--repo",
@@ -173,6 +217,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     repo = args.repo.resolve()
     target = repo / "dss_tools.ico"
+
+    branded = _ensure_branded_icon(repo, target, args)
+    if branded is not None:
+        return int(branded)
 
     if target.is_file() and not args.force:
         print(f"OK: {target.name} already present.")
@@ -209,7 +257,7 @@ def main(argv: list[str] | None = None) -> int:
             shutil.copy2(fallback, target)
             print(
                 "WARN: using built-in placeholder for dss_tools.ico. "
-                "Commit DSS-Tools Icon.png (or dss_tools.ico) at the repo root for your branded icon.",
+                "Add DSS-Tools Icon.png at the repo root for release branding.",
                 file=sys.stderr,
             )
             return 0

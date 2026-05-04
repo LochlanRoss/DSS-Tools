@@ -32,6 +32,11 @@ Small fixes and very short edits are intentionally omitted unless they materiall
 - **Cause:** Root `*.png` was gitignored until recently; clean clones had no **`DSS-Tools Icon.png`**, so **`tools/ensure_dss_tools_ico.py`** fell through to **`tools/default_dss_tools.ico`** (generic blue tile) for **`dss_tools.ico`**, PyInstaller, Inno, and the Tk title bar.
 - **Fix:** Added **`DSS-Tools Icon.png`** (timesheet artwork) and regenerated **`dss_tools.ico`** in the repo root. Release workflow runs **`ensure_dss_tools_ico.py --force`** so the ICO always tracks the PNG when both are present. Script **`--force`** regenerates even if **`dss_tools.ico`** already exists.
 
+### Icon tests + updater exe branding (follow-up)
+
+- **Tests:** Canonical ICO tests used a per-pixel gradient PNG; post-write **MAE** verification correctly failed (>32). Tests now use **flat 256×256** canonical PNGs and an in-test **stray.ico** (no dependency on missing **`tools/default_dss_tools.ico`**).
+- **CI / spec:** **`DSSToolsUpdater`** PyInstaller step now passes **`--icon`** / **`--add-data`** for **`dss_tools.ico`** (matches main exe). **`DSSTools.spec`** mirrors this for local **`pyinstaller DSSTools.spec`** builds.
+
 ### DSS roster vs Outlook address book (Error Report + name typo checks)
 
 - **Cause:** Name typo detection only compared **unresolved** DSS names to other DSS names. Once Outlook filled an email, the roster could still spell the person differently than the address book (e.g. Kolodinski vs Kolodinsky) with no warning.

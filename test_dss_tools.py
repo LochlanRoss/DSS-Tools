@@ -696,6 +696,61 @@ class DssToolsTests(DssToolsFixtures):
             self.assertEqual(proc.returncode, 0, msg=proc.stderr + proc.stdout)
             self.assertGreater(ico.stat().st_size, 100)
 
+    def test_ensure_dss_tools_ico_canonical_png_beats_lone_ico(self) -> None:
+        """When DSS-Tools Icon.png exists, a single stray *.ico must not replace the branded output."""
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest("pillow not installed")
+        script = Path(__file__).resolve().parent / "tools" / "ensure_dss_tools_ico.py"
+        if not script.is_file():
+            self.skipTest("ensure_dss_tools_ico.py not present")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            canonical = root / "DSS-Tools Icon.png"
+            # Flat color survives ICO encode/verify (high-frequency gradients do not).
+            Image.new("RGB", (256, 256), (80, 120, 200)).save(canonical, format="PNG")
+            stray = root / "stray.ico"
+            Image.new("RGBA", (32, 32), (10, 20, 30, 255)).save(
+                stray, format="ICO", sizes=[(32, 32)]
+            )
+            proc = subprocess.run(
+                [sys.executable, str(script), "--repo", str(root)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, msg=proc.stderr + proc.stdout)
+            self.assertIn("canonical brand", proc.stdout.lower())
+            with Image.open(root / "dss_tools.ico") as im:
+                im.load()
+                self.assertEqual(im.size, (256, 256))
+
+    def test_ensure_dss_tools_ico_canonical_regenerates_corrupt_ico_without_force(self) -> None:
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest("pillow not installed")
+        script = Path(__file__).resolve().parent / "tools" / "ensure_dss_tools_ico.py"
+        if not script.is_file():
+            self.skipTest("ensure_dss_tools_ico.py not present")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            canonical = root / "DSS-Tools Icon.png"
+            Image.new("RGB", (256, 256), (80, 120, 200)).save(canonical, format="PNG")
+            ico = root / "dss_tools.ico"
+            ico.write_bytes(b"bogus")
+            proc = subprocess.run(
+                [sys.executable, str(script), "--repo", str(root)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, msg=proc.stderr + proc.stdout)
+            with Image.open(ico) as im:
+                im.load()
+                self.assertEqual(im.size, (256, 256))
+
     def test_get_app_root_uses_localappdata_when_available(self) -> None:
         with mock.patch.dict(os.environ, {"LOCALAPPDATA": r"C:\Temp\AppData"}, clear=False):
             app_root = get_app_root()

@@ -53,11 +53,15 @@ if _icon.is_file():
     _exe_kw['icon'] = str(_icon)
 exe = EXE(pyz, a.scripts, a.binaries, a.datas, [], **_exe_kw)
 
+_updater_datas: list = []
+if _icon.is_file():
+    _updater_datas.append((str(_icon), '.'))
+
 updater_a = Analysis(
     ['dss_tools_updater.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=_updater_datas,
     hiddenimports=['tkinter', 'tkinter.ttk', 'tkinter.messagebox', 'tkinter.scrolledtext'],
     hookspath=[],
     hooksconfig={},
@@ -83,4 +87,6 @@ _updater_exe_kw = dict(
     codesign_identity=None,
     entitlements_file=None,
 )
+if _icon.is_file():
+    _updater_exe_kw['icon'] = str(_icon)
 updater_exe = EXE(updater_pyz, updater_a.scripts, updater_a.binaries, updater_a.datas, [], **_updater_exe_kw)

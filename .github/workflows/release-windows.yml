@@ -77,8 +77,20 @@ jobs:
           printf '%s' '${{ steps.meta.outputs.version }}' > dss_app_version.txt
           cat dss_app_version.txt
 
-      - name: Ensure dss_tools.ico (PyInstaller + Inno)
-        run: python tools/ensure_dss_tools_ico.py --force
+      - name: Require canonical branding PNG (DSS-Tools Icon.png)
+        shell: bash
+        run: |
+          if [ ! -f "DSS-Tools Icon.png" ]; then
+            echo "Release builds require DSS-Tools Icon.png at repo root (single source for dss_tools.ico)."
+            exit 1
+          fi
+
+      - name: Ensure dss_tools.ico (must match DSS-Tools Icon.png)
+        run: python tools/ensure_dss_tools_ico.py --force --strict
+
+      - name: Assert dss_tools.ico present for PyInstaller
+        shell: bash
+        run: test -f dss_tools.ico || exit 1
 
       - name: Run fast unit tests
         run: python -m unittest test_dss_tools test_dss_tools_updater -q
@@ -90,7 +102,8 @@ jobs:
           $ico = Join-Path $root "dss_tools.ico"
           $upArgs = @(
             "--noconsole", "--onefile", "--name", "DSSToolsUpdater",
-            "--uac-admin", "--collect-all", "tkinter"
+            "--uac-admin", "--collect-all", "tkinter",
+            "--icon", "dss_tools.ico", "--add-data", "dss_tools.ico;."
           )
           pyinstaller @upArgs (Join-Path $root "dss_tools_updater.py")
           $upExe = Join-Path $root "dist\DSSToolsUpdater.exe"
@@ -101,9 +114,10 @@ jobs:
             "--add-data", "dss_app_version.txt;.",
             "--add-binary", "dist\DSSToolsUpdater.exe;."
           )
-          if (Test-Path -LiteralPath $ico) {
-            $args += @("--icon", "dss_tools.ico", "--add-data", "dss_tools.ico;.")
+          if (-not (Test-Path -LiteralPath $ico)) {
+            throw "dss_tools.ico missing; ensure step must run before PyInstaller."
           }
+          $args += @("--icon", "dss_tools.ico", "--add-data", "dss_tools.ico;.")
           pyinstaller @args (Join-Path $root "dss_hours_tracker.py")
 
       - name: Install Inno Setup
