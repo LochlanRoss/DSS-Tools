@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Create repo-root ``dss_tools.ico`` for Windows (PyInstaller PE icon + Inno Setup).
 
-**Branded repositories:** If ``DSS-Tools Icon.png`` exists at the repo root, ``dss_tools.ico`` is
-**always** produced from that file only (no lone ``*.ico`` shortcut, no placeholder). Existing
-``dss_tools.ico`` is verified against the PNG and regenerated when it does not match.
+**Branded repositories:** If any **priority** branding PNG exists at the repo root (see
+``BRAND_PNG_PRIORITY``), ``dss_tools.ico`` is **always** produced from the first match only
+(no lone ``*.ico`` shortcut, no placeholder). Existing
+``dss_tools.ico`` is verified against the PNG and regenerated when it does not match. Each ICO
+size strips a **near-white outer band** to full transparency (removes matte/halos), then paints
+a **1px opaque blue rim** sampled from saturated blues in the source art so the outermost pixels
+read as brand blue in shell / taskbar previews.
 
 **Other repositories:** Without the canonical PNG, resolution follows (unless ``--strict``):
 
@@ -25,10 +29,20 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TOOLS_DIR = Path(__file__).resolve().parent
-# Single source of truth for release branding (must match .gitignore exception).
-CANONICAL_BRAND_PNG = "DSS-Tools Icon.png"
-PNG_CANDIDATE_NAMES = ("dss_tools.png", "DSS-Tools Icon.png", "DSSTools Icon.png")
+# First existing file wins (must match .gitignore ``!`` exceptions for tracked PNGs).
+BRAND_PNG_PRIORITY = (
+    "DSS-Tools Icon.png",
+    "DSS Tools Icon.png",
+    "DSS-Tools-Icon.png",
+    "app-icon.png",
+    "DSSTools Icon.png",
+    "dss_tools.png",
+)
+CANONICAL_BRAND_PNG = BRAND_PNG_PRIORITY[0]  # preferred name for docs / CI messaging
+PNG_CANDIDATE_NAMES = ("dss_tools.png", "DSS-Tools Icon.png", "DSS Tools Icon.png", "DSSTools Icon.png")
 ICO_SIZES = (16, 24, 32, 48, 64, 128, 256)
+# Fallback BGR when the PNG has no obvious saturated blues to sample.
+_FALLBACK_BRAND_BLUE = (15, 76, 129)
 
 
 def _aspect_fit_square(source_rgba, edge: int):
@@ -42,6 +56,84 @@ def _aspect_fit_square(source_rgba, edge: int):
     oy = (edge - layer.height) // 2
     canvas.paste(layer, (ox, oy), layer)
     return canvas
+
+
+def _sample_brand_blue_rgb(master_rgba) -> tuple[int, int, int]:
+    """Pick an opaque blue from the artwork for the ICO perimeter (RGB)."""
+    from PIL import Image
+
+    im = master_rgba.convert("RGBA")
+    w, h = im.size
+    px = im.load()
+    blues: list[tuple[int, int, int]] = []
+    for y in range(h):
+        for x in range(w):
+            r, g, b, a = px[x, y]
+            if a < 160:
+                continue
+            if b >= max(r, g) + 12 and b >= 90:
+                blues.append((r, g, b))
+    if len(blues) < 24:
+        return _FALLBACK_BRAND_BLUE
+    blues.sort(key=lambda t: (t[2], t[0], t[1]))
+    return blues[len(blues) // 2]
+
+
+def _transparent_near_white_border_band(source_rgba, *, band_px: int, white_thresh: int = 242) -> None:
+    """Turn near-white matte in an outer band fully transparent (mutates *source_rgba* RGBA)."""
+    w, h = source_rgba.size
+    if w < 2 or h < 2:
+        return
+    band = max(1, min(int(band_px), min(w, h) // 2))
+    px = source_rgba.load()
+    for y in range(h):
+        for x in range(w):
+            d = min(x, y, w - 1 - x, h - 1 - y)
+            if d > band:
+                continue
+            r, g, b, a = px[x, y]
+            if a < 40:
+                continue
+            if r >= white_thresh and g >= white_thresh and b >= white_thresh:
+                px[x, y] = (r, g, b, 0)
+
+
+def _paint_blue_perimeter(source_rgba, blue_rgb: tuple[int, int, int]) -> None:
+    """Set the outermost pixel row/column to opaque *blue_rgb* (mutates RGBA)."""
+    w, h = source_rgba.size
+    if w < 2 or h < 2:
+        return
+    r0, g0, b0 = blue_rgb
+    px = source_rgba.load()
+    for x in range(w):
+        px[x, 0] = (r0, g0, b0, 255)
+        px[x, h - 1] = (r0, g0, b0, 255)
+    for y in range(h):
+        px[0, y] = (r0, g0, b0, 255)
+        px[w - 1, y] = (r0, g0, b0, 255)
+
+
+def _postprocess_square_frame(frame_rgba, *, edge: int, blue_rgb: tuple[int, int, int]) -> None:
+    """Remove white/halation in the outer band, then draw a 1px blue rim (all ICO sizes)."""
+    band = max(1, min(edge // 6, 36))
+    _transparent_near_white_border_band(frame_rgba, band_px=band, white_thresh=242)
+    _paint_blue_perimeter(frame_rgba, blue_rgb)
+
+
+def _build_square_frame(master_rgba, edge: int, blue_rgb: tuple[int, int, int]):
+    """Square aspect-fit from *master_rgba*, then matte strip + blue perimeter."""
+    fr = _aspect_fit_square(master_rgba, edge)
+    _postprocess_square_frame(fr, edge=edge, blue_rgb=blue_rgb)
+    return fr
+
+
+def _resolve_brand_png(repo: Path) -> Path | None:
+    """Return the first existing branding PNG under *repo* (``BRAND_PNG_PRIORITY`` order)."""
+    for name in BRAND_PNG_PRIORITY:
+        candidate = repo / name
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def _find_lone_other_ico(repo: Path, target: Path) -> Path | None:
@@ -90,8 +182,9 @@ def _png_to_ico(png: Path, ico: Path) -> None:
     from PIL import Image
 
     master = Image.open(png).convert("RGBA")
+    blue_rgb = _sample_brand_blue_rgb(master)
     ico.parent.mkdir(parents=True, exist_ok=True)
-    frames = {s: _aspect_fit_square(master, s) for s in ICO_SIZES}
+    frames = {s: _build_square_frame(master, s, blue_rgb) for s in ICO_SIZES}
     for s, fr in frames.items():
         if fr.size != (s, s):
             raise ValueError(f"internal error: frame for {s} is {fr.size}, expected {(s, s)}")
@@ -128,16 +221,21 @@ def _verify_ico_matches_png(png: Path, ico: Path, *, max_mean_abs_rgb: float = 3
 
     _verify_ico_embeds_multi_square_sizes(ico)
 
-    ref = _aspect_fit_square(Image.open(png).convert("RGBA"), 64)
-    ref_rgb = ref.convert("RGB")
-    diversity = len(set(ref_rgb.getdata()))
+    master = Image.open(png).convert("RGBA")
+    blue_rgb = _sample_brand_blue_rgb(master)
+    ref_div = _aspect_fit_square(master, 64)
+    diversity = len(set(ref_div.convert("RGB").getdata()))
     if diversity < 64:
         # Solid / test patterns: ICO BMP/PNG round-trip differs a lot from RGBA thumbnails; skip pixels.
         return
 
+    ref = _build_square_frame(master, 256, blue_rgb)
+    ref_rgb = ref.convert("RGB")
     with Image.open(ico) as produced:
         produced.load()
-        cand = _aspect_fit_square(produced.convert("RGBA"), 64)
+        cand = produced.convert("RGBA")
+    if cand.size != (256, 256):
+        raise ValueError(f"ICO primary frame must be 256×256 for verify; got {cand.size}")
     total = 0
     count = 0
     for a, b in zip(ref_rgb.getdata(), cand.convert("RGB").getdata()):
@@ -167,27 +265,27 @@ def _write_branded_ico_from_canonical(target: Path, canonical: Path, *, no_verif
             pass
         print(f"error: could not write or verify {target}: {exc}", file=sys.stderr)
         return 1
-    print(f"OK: wrote {target.name} from {canonical.name} (canonical brand; square frames + check)")
+    print(f"OK: wrote {target.name} from {canonical.name} (branding PNG; square frames + check)")
     return 0
 
 
 def _ensure_branded_icon(repo: Path, target: Path, args: argparse.Namespace) -> int | None:
-    """If ``DSS-Tools Icon.png`` exists, enforce ICO from that file only. Returns None if not branded."""
-    canonical = repo / CANONICAL_BRAND_PNG
-    if not canonical.is_file():
+    """If a priority branding PNG exists, enforce ICO from that file only. Returns None if not branded."""
+    brand_png = _resolve_brand_png(repo)
+    if brand_png is None:
         return None
 
     need_write = args.force or not target.is_file()
     if not need_write and not args.no_verify:
         try:
-            _verify_ico_matches_png(canonical, target)
+            _verify_ico_matches_png(brand_png, target)
         except (ValueError, OSError, ImportError, FileNotFoundError):
             need_write = True
 
     if need_write:
-        return _write_branded_ico_from_canonical(target, canonical, no_verify=args.no_verify)
+        return _write_branded_ico_from_canonical(target, brand_png, no_verify=args.no_verify)
 
-    print(f"OK: {target.name} already matches {CANONICAL_BRAND_PNG}.")
+    print(f"OK: {target.name} already matches {brand_png.name}.")
     return 0
 
 
@@ -257,7 +355,7 @@ def main(argv: list[str] | None = None) -> int:
             shutil.copy2(fallback, target)
             print(
                 "WARN: using built-in placeholder for dss_tools.ico. "
-                "Add DSS-Tools Icon.png at the repo root for release branding.",
+                f"Add one of {', '.join(BRAND_PNG_PRIORITY)} at the repo root for release branding.",
                 file=sys.stderr,
             )
             return 0

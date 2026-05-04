@@ -740,7 +740,7 @@ class DssToolsTests(DssToolsFixtures):
                 check=False,
             )
             self.assertEqual(proc.returncode, 0, msg=proc.stderr + proc.stdout)
-            self.assertIn("canonical brand", proc.stdout.lower())
+            self.assertIn("branding png", proc.stdout.lower())
             with Image.open(root / "dss_tools.ico") as im:
                 im.load()
                 self.assertEqual(im.size, (256, 256))

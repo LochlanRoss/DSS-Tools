@@ -77,15 +77,21 @@ jobs:
           printf '%s' '${{ steps.meta.outputs.version }}' > dss_app_version.txt
           cat dss_app_version.txt
 
-      - name: Require canonical branding PNG (DSS-Tools Icon.png)
+      - name: Require branding PNG at repo root
         shell: bash
         run: |
-          if [ ! -f "DSS-Tools Icon.png" ]; then
-            echo "Release builds require DSS-Tools Icon.png at repo root (single source for dss_tools.ico)."
+          found=""
+          for f in "DSS-Tools Icon.png" "DSS Tools Icon.png" "DSS-Tools-Icon.png" "app-icon.png" "DSSTools Icon.png" "dss_tools.png"; do
+            if [ -f "$f" ]; then found="$f"; break; fi
+          done
+          if [ -z "$found" ]; then
+            echo "Release builds require one branding PNG at repo root (first match wins for dss_tools.ico):"
+            echo "  DSS-Tools Icon.png | DSS Tools Icon.png | DSS-Tools-Icon.png | app-icon.png | DSSTools Icon.png | dss_tools.png"
             exit 1
           fi
+          echo "Using branding PNG: $found"
 
-      - name: Ensure dss_tools.ico (must match DSS-Tools Icon.png)
+      - name: Ensure dss_tools.ico (from priority branding PNG)
         run: python tools/ensure_dss_tools_ico.py --force --strict
 
       - name: Assert dss_tools.ico present for PyInstaller

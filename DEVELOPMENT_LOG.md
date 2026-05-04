@@ -5,6 +5,14 @@ Small fixes and very short edits are intentionally omitted unless they materiall
 
 ## 2026-05-04
 
+### Branding PNG path (DSS-Tools vs DSS Viewer)
+
+- **Note:** ``DSS Tools Icon.png`` was authored under the sibling folder ``GitHub\DSS-Tools``; this app’s repo is ``GitHub\DSS Viewer``. The file was copied to the **DSS Viewer** root so ``ensure_dss_tools_ico.py`` could regenerate ``dss_tools.ico``. Keep the canonical PNG in **DSS Viewer** for CI and PyInstaller.
+
+### Icon PNG: multiple tracked root names
+
+- **Change:** ``tools/ensure_dss_tools_ico.py`` picks the first existing file from ``BRAND_PNG_PRIORITY`` (``DSS-Tools Icon.png``, ``DSS Tools Icon.png`` with spaces, ``DSS-Tools-Icon.png``, ``app-icon.png``, etc.). **``.gitignore``** and **release CI** accept the same set so a replacement artwork filename still ships and drives ``dss_tools.ico``.
+
 ### Windows taskbar / desktop icon vs Explorer (Tk + Shell)
 
 - **Cause:** The taskbar often ignored Tk ``iconbitmap`` and showed the generic Tcl/Python glyph; pinned shortcuts could group separately from the running process without a consistent **App User Model ID**.

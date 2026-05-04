@@ -20,7 +20,7 @@ Desktop GUI for opening one or more DSS `.xlsx` workbooks, extracting labour hou
 **What to do:** track **one** of these at the repository root (they are un-ignored in `.gitignore`):
 
 - **`dss_tools.ico`** (best for Windows—include 16–256 px sizes), or  
-- **`DSS-Tools Icon.png`**, **`dss_tools.png`**, or **`DSSTools Icon.png`** (CI converts PNG → multi-size `dss_tools.ico` with Pillow), or  
+- **`DSS-Tools Icon.png`** (preferred), **`DSS Tools Icon.png`** (spaces), **`DSS-Tools-Icon.png`**, **`app-icon.png`**, **`dss_tools.png`**, or **`DSSTools Icon.png`** (CI uses the first existing file in that order and converts PNG → multi-size `dss_tools.ico` with Pillow), or  
 - **exactly one** other `*.ico` file in the root (it is copied to `dss_tools.ico`).
 
 If none of those are present, CI copies a small **placeholder** from `tools/default_dss_tools.ico` so the installer still gets a real icon—replace it with your artwork using one of the options above.

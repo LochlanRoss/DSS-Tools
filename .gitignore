@@ -25,7 +25,11 @@ Thumbs.db
 *.png
 !dss_tools.png
 !DSS-Tools Icon.png
+!DSS Tools Icon.png
+!DSS-Tools-Icon.png
+!app-icon.png
 !DSSTools Icon.png
+!DSS Tools Icon.png
 *.jpg
 *.mp4
 *.xlsx
