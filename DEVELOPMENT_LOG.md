@@ -5,6 +5,11 @@ Small fixes and very short edits are intentionally omitted unless they materiall
 
 ## 2026-05-04
 
+### Inno shortcuts: desktop vs taskbar icon mismatch
+
+- **Cause:** Shortcuts used **``{app}\dss_tools.ico``** while the taskbar / pinned app icon usually comes from the **first icon resource embedded in ``DSSTools.exe``** (PyInstaller ``--icon``). After fixing the repo ICO, the loose file could look fine while an older **PE-embedded** multi-size set still looked like a solid smear.
+- **Fix:** Start-menu and desktop **``IconFilename``** now point at **``{app}\DSSTools.exe``** (same as **``UninstallDisplayIcon``**). The wizard still uses **``SetupIconFile``** = ``dss_tools.ico``. **``dss_tools.ico``** is still installed beside the exe for in-app / ``_MEIPASS`` copy paths.
+
 ### ICO script: installer / shell showed solid blue smear
 
 - **Cause:** Pillow’s ICO ``_save`` skips any requested ``sizes`` larger than the **first** image’s width/height. The script passed a **16×16** frame first, so only 16×16 was written; Windows/Inno scaled that up to a flat color. A non-square PNG could also yield a **256×255** frame. ``append_images`` alone did not fix ordering.

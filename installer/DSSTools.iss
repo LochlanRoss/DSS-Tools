@@ -39,7 +39,9 @@ WizardStyle=modern
 DisableProgramGroupPage=no
 #ifdef HasAppIco
 SetupIconFile=..\dss_tools.ico
-UninstallDisplayIcon={app}\dss_tools.ico
+; Use the installed EXE for uninstall + shortcuts so shell/taskbar/desktop all read the same
+; embedded icon PyInstaller burned in at build time (avoids mismatch with a separately updated .ico).
+UninstallDisplayIcon={app}\{#MyAppExeName}
 #else
 UninstallDisplayIcon={app}\{#MyAppExeName}
 #endif
@@ -59,9 +61,9 @@ Source: "..\dss_tools.ico"; DestDir: "{app}"; DestName: "dss_tools.ico"; Flags: 
 
 [Icons]
 #ifdef HasAppIco
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\dss_tools.ico"
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppExeName}"
 Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon; IconFilename: "{app}\dss_tools.ico"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon; IconFilename: "{app}\{#MyAppExeName}"
 #else
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
