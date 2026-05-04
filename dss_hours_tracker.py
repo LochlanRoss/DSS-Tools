@@ -798,6 +798,43 @@ def apply_tk_window_icon(root: tk.Misc) -> None:
             pass
 
 
+def _shell_execute_runas_windows(executable: str, parameters: str, working_dir: str, *, show_cmd: int = 1) -> None:
+    """Launch *executable* through the UAC consent prompt (``ShellExecuteW`` ``runas`` verb).
+
+    PyInstaller builds ``DSSToolsUpdater.exe`` with ``uac_admin``; ``CreateProcess`` / ``subprocess`` from a
+    non-elevated parent then fails with WinError 740 (ERROR_ELEVATION_REQUIRED).
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    if os.name != "nt":
+        raise OSError("_shell_execute_runas_windows is Windows-only")
+
+    shell32 = ctypes.windll.shell32
+    shell32.ShellExecuteW.argtypes = [
+        wintypes.HWND,
+        wintypes.LPCWSTR,
+        wintypes.LPCWSTR,
+        wintypes.LPCWSTR,
+        wintypes.LPCWSTR,
+        ctypes.c_int,
+    ]
+    shell32.ShellExecuteW.restype = wintypes.HINSTANCE
+
+    result = int(
+        shell32.ShellExecuteW(
+            None,
+            "runas",
+            executable,
+            parameters or "",
+            working_dir or "",
+            int(show_cmd),
+        )
+    )
+    if result <= 32:
+        raise OSError(result, f"Windows could not start the elevated process (ShellExecute returned {result}).", None)
+
+
 def parse_sheet_date(sheet_name: str) -> date | None:
     match = DATE_PATTERN.search(sheet_name)
     if not match:
@@ -6129,20 +6166,36 @@ class DssToolsApp(tk.Tk):
                     messagebox.showerror("Install Update", f"Could not stage the update helper.\n\n{exc}")
                     return
                 argv = [str(staged_u), *argv[1:]]
-            creationflags = 0
-            if os.name == "nt":
-                creationflags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-                creationflags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
             try:
-                subprocess.Popen(
-                    argv,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    close_fds=False,
-                    cwd=str(inst.parent),
-                    creationflags=creationflags,
-                )
+                if (
+                    os.name == "nt"
+                    and Path(argv[0]).suffix.lower() == ".exe"
+                    and Path(argv[0]).name.casefold() == UPDATER_EXE_NAME.casefold()
+                ):
+                    # Updater is built with uac_admin; subprocess.Popen fails with WinError 740 without elevation.
+                    _shell_execute_runas_windows(
+                        argv[0],
+                        subprocess.list2cmdline(argv[1:]),
+                        str(inst.parent),
+                        show_cmd=1,
+                    )
+                else:
+                    creationflags = 0
+                    if os.name == "nt":
+                        creationflags = (
+                            getattr(subprocess, "DETACHED_PROCESS", 0)
+                            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                        )
+                        creationflags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                    subprocess.Popen(
+                        argv,
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        close_fds=False,
+                        cwd=str(inst.parent),
+                        creationflags=creationflags,
+                    )
             except OSError as exc:
                 messagebox.showerror("Install Update", f"Could not start the update helper.\n\n{exc}")
                 return

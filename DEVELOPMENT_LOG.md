@@ -5,6 +5,11 @@ Small fixes and very short edits are intentionally omitted unless they materiall
 
 ## 2026-05-04
 
+### Update helper: UAC elevation (WinError 740)
+
+- **Cause:** ``DSSToolsUpdater.exe`` is built with PyInstaller **``uac_admin``** (administrator manifest). Starting it with **``subprocess.Popen``** from a normal session fails with **WinError 740** (``ERROR_ELEVATION_REQUIRED``) because no UAC handoff occurs.
+- **Fix:** On Windows, launch the frozen updater via **``ShellExecuteW``** with the **``runas``** verb so the standard elevation consent prompt appears. Dev handoff (**``python``** + **``dss_tools_updater.py``**) still uses **``subprocess``** (no admin manifest).
+
 ### App icon committed (no CI placeholder)
 
 - **Cause:** Root `*.png` was gitignored until recently; clean clones had no **`DSS-Tools Icon.png`**, so **`tools/ensure_dss_tools_ico.py`** fell through to **`tools/default_dss_tools.ico`** (generic blue tile) for **`dss_tools.ico`**, PyInstaller, Inno, and the Tk title bar.
