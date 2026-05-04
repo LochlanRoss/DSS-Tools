@@ -21,6 +21,7 @@ from dss_hours_tracker import (
     DEFAULT_UI_THEME,
     OUTLOOK_NAME_RULE_LABEL,
     _bug_report_attachment_strings_to_try,
+    _is_updater_executable_path,
     binding_sequence_from_keypress_event,
     az2_revision_matches_sheet_name,
     build_bug_report_html,
@@ -84,6 +85,11 @@ from test_dss_tools_fixtures import DssToolsFixtures
 
 
 class DssToolsTests(DssToolsFixtures):
+    def test_is_updater_executable_path_staged_temp_name(self) -> None:
+        self.assertTrue(_is_updater_executable_path(Path(r"C:\Temp\dss_tools_updater_ab12cd.exe")))
+        self.assertTrue(_is_updater_executable_path(Path(r"C:\Program Files\DSS Tools\DSSToolsUpdater.exe")))
+        self.assertFalse(_is_updater_executable_path(Path(r"C:\Windows\notepad.exe")))
+
     def test_daily_rollup_sort_key_keeps_sections_grouped(self) -> None:
         rows = [
             ("PF26024-2 Electrical", "2026-04-07", "Whole Crew", "255.5", "30", "60", "345.5", "420.5", "Crew Total"),

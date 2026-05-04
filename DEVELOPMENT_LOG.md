@@ -20,6 +20,7 @@ Small fixes and very short edits are intentionally omitted unless they materiall
 
 - **Cause:** ``DSSToolsUpdater.exe`` is built with PyInstaller **``uac_admin``** (administrator manifest). Starting it with **``subprocess.Popen``** from a normal session fails with **WinError 740** (``ERROR_ELEVATION_REQUIRED``) because no UAC handoff occurs.
 - **Fix:** On Windows, launch the frozen updater via **``ShellExecuteW``** with the **``runas``** verb so the standard elevation consent prompt appears. Dev handoff (**``python``** + **``dss_tools_updater.py``**) still uses **``subprocess``** (no admin manifest).
+- **Follow-up (0.1.10 still saw 740):** The main app **stages** the updater to ``%%TEMP%%`` as **``dss_tools_updater_*.exe``**. The elevation branch only matched **``DSSToolsUpdater.exe``**, so the staged path fell through to **``Popen``** and still hit 740. **``_is_updater_executable_path``** now treats the temp prefix like the shipped name.
 
 ### App icon committed (no CI placeholder)
 

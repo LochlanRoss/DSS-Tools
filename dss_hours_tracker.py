@@ -82,6 +82,16 @@ OUTLOOK_NAME_RULE_LABEL = "Name does not match email address book"
 OUTLOOK_DISPLAY_NAME_TYPO_MIN_SIMILARITY = 0.84
 UPDATE_DIRNAME = "updates"
 UPDATER_EXE_NAME = "DSSToolsUpdater.exe"
+
+
+def _is_updater_executable_path(path: Path) -> bool:
+    """True for the shipped updater or the temp copy created for silent uninstall (``dss_tools_updater_*.exe``).
+
+    After staging to ``%%TEMP%%``, the filename is no longer ``DSSToolsUpdater.exe``; we must still
+    use ``ShellExecute`` ``runas`` or ``CreateProcess`` fails with WinError 740 (``uac_admin`` manifest).
+    """
+    name_cf = path.name.casefold()
+    return name_cf == UPDATER_EXE_NAME.casefold() or name_cf.startswith("dss_tools_updater_")
 INSTALLER_EXTENSIONS = (".exe", ".msi", ".msix", ".msixbundle")
 CHECKSUM_ASSET_NAMES = ("checksums.txt", "sha256sums.txt", "sha256sums", "sha256sum.txt")
 GITHUB_REPO_SLUG = "LochlanRoss/DSS-Tools"
@@ -6180,7 +6190,7 @@ class DssToolsApp(tk.Tk):
                 os.name == "nt"
                 and len(argv) >= 1
                 and Path(argv[0]).suffix.lower() == ".exe"
-                and Path(argv[0]).name.casefold() == UPDATER_EXE_NAME.casefold()
+                and _is_updater_executable_path(Path(argv[0]))
             ):
                 try:
                     staged_u = self._stage_updater_exe_to_temp(Path(argv[0]).resolve())
@@ -6189,11 +6199,7 @@ class DssToolsApp(tk.Tk):
                     return
                 argv = [str(staged_u), *argv[1:]]
             try:
-                if (
-                    os.name == "nt"
-                    and Path(argv[0]).suffix.lower() == ".exe"
-                    and Path(argv[0]).name.casefold() == UPDATER_EXE_NAME.casefold()
-                ):
+                if os.name == "nt" and Path(argv[0]).suffix.lower() == ".exe" and _is_updater_executable_path(Path(argv[0])):
                     # Updater is built with uac_admin; subprocess.Popen fails with WinError 740 without elevation.
                     _shell_execute_runas_windows(
                         argv[0],
