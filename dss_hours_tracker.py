@@ -5866,13 +5866,57 @@ class DssToolsApp(tk.Tk):
                 return [sys.executable, str(dev_script), str(inst), str(os.getpid())]
         return None
 
+    def _stage_installer_for_updater(self, installer_path: Path) -> Path:
+        """Copy the setup into %TEMP% when it lives under app data so the updater can delete ``updates\\``."""
+        inst = installer_path.expanduser().resolve()
+        try:
+            inst.relative_to(self.app_root.resolve())
+        except ValueError:
+            return inst
+        fd, staged = tempfile.mkstemp(prefix="dss_tools_setup_", suffix=".exe", dir=str(tempfile.gettempdir()))
+        os.close(fd)
+        staged_path = Path(staged)
+        try:
+            shutil.copy2(inst, staged_path)
+        except OSError:
+            try:
+                staged_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+        return staged_path
+
+    def _stage_updater_exe_to_temp(self, updater_src: Path) -> Path:
+        """Run the helper from %TEMP% so a silent uninstall can remove the old ``Program Files`` install."""
+        fd, staged = tempfile.mkstemp(prefix="dss_tools_updater_", suffix=".exe", dir=str(tempfile.gettempdir()))
+        os.close(fd)
+        dest = Path(staged)
+        shutil.copy2(updater_src, dest)
+        return dest
+
     def _launch_update_installer(self, installer_path: Path) -> None:
         if not installer_path.exists():
             messagebox.showerror("Install Update", f"The downloaded installer could not be found.\n\n{installer_path}")
             return
-        inst = installer_path.resolve()
+        try:
+            inst = self._stage_installer_for_updater(Path(installer_path)).resolve()
+        except OSError as exc:
+            messagebox.showerror("Install Update", f"Could not stage the installer for the update helper.\n\n{exc}")
+            return
         argv = self._resolve_updater_handoff_argv(inst)
         if argv is not None:
+            if (
+                os.name == "nt"
+                and len(argv) >= 1
+                and Path(argv[0]).suffix.lower() == ".exe"
+                and Path(argv[0]).name.casefold() == UPDATER_EXE_NAME.casefold()
+            ):
+                try:
+                    staged_u = self._stage_updater_exe_to_temp(Path(argv[0]).resolve())
+                except OSError as exc:
+                    messagebox.showerror("Install Update", f"Could not stage the update helper.\n\n{exc}")
+                    return
+                argv = [str(staged_u), *argv[1:]]
             creationflags = 0
             if os.name == "nt":
                 creationflags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)

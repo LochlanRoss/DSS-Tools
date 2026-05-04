@@ -5,6 +5,13 @@ Small fixes and very short edits are intentionally omitted unless they materiall
 
 ## 2026-05-04
 
+### In-app update mini-app (silent uninstall / clean / reinstall)
+
+- **`dss_tools_updater.py`** is now a compact **Tk** window after **Install now**: waits for the main PID, runs **Inno silent uninstall** (registry `UninstallString` for the fixed `AppId`), clears **`%LOCALAPPDATA%\DSSTools`** transients (**`cache/`**, **`updates/`**, `*.log`, `diagnostic_snapshot_*.json`) while keeping **`dss_hours_tracker_config.json`**, then runs **`DSSToolsSetup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS`**. A **determinate** progress bar shows **0–50%** during uninstall and **50–100%** during install (time-smoothed while each subprocess runs; Inno does not expose byte-level progress). On silent failure, offers the **full wizard**. Launches **`DSSTools.exe`** from `InstallLocation` when done.
+- **Main app** stages the **installer** into `%TEMP%` when it was under app data (so **`updates/`** can be removed) and stages **`DSSToolsUpdater.exe`** into `%TEMP%` so uninstall can remove the old **`Program Files`** tree while the helper is still running.
+- **Inno** `[Setup]`: **`CloseApplications=yes`**, **`UsePreviousAppDir=yes`**, **`RestartApplications=no`** for smoother silent upgrades.
+- **Build:** **`DSSToolsUpdater`** frozen with **`--uac-admin`** and **`--collect-all tkinter`** (spec mirrors). **`--headless`** keeps the old wait+`startfile` behaviour for tests.
+
 ### Windows installer / taskbar / desktop icon missing on GitHub builds
 
 - **Cause:** Root **`*.png`** was gitignored, so **`DSS-Tools Icon.png`** never appeared in CI; **`dss_tools.ico`** was absent, so PyInstaller had no **`--icon`** and Inno skipped **`HasAppIco`** (shortcuts and uninstall used the generic executable look).

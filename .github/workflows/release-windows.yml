@@ -88,7 +88,10 @@ jobs:
         run: |
           $root = $env:GITHUB_WORKSPACE
           $ico = Join-Path $root "dss_tools.ico"
-          $upArgs = @("--noconsole", "--onefile", "--name", "DSSToolsUpdater")
+          $upArgs = @(
+            "--noconsole", "--onefile", "--name", "DSSToolsUpdater",
+            "--uac-admin", "--collect-all", "tkinter"
+          )
           pyinstaller @upArgs (Join-Path $root "dss_tools_updater.py")
           $upExe = Join-Path $root "dist\DSSToolsUpdater.exe"
           if (-not (Test-Path -LiteralPath $upExe)) { throw "DSSToolsUpdater.exe was not produced." }
