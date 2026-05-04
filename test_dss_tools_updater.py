@@ -64,6 +64,50 @@ class TestDssToolsUpdater(unittest.TestCase):
         self.assertIsNotNone(img)
         self.assertTrue(len(img) > 3)
 
+    def test_row_matches_dss_tools_fuzzy_inno(self) -> None:
+        from dss_tools_updater import _row_matches_dss_tools_fuzzy_inno
+
+        self.assertTrue(
+            _row_matches_dss_tools_fuzzy_inno(
+                "DSS Tools",
+                "Other",
+                "",
+                r'"C:\Program Files\DSS Tools\unins000.exe" /SILENT',
+            )
+        )
+        self.assertTrue(
+            _row_matches_dss_tools_fuzzy_inno(
+                "",
+                "DSS Tools",
+                "",
+                r'"C:\Program Files\DSS Tools\unins000.exe"',
+            )
+        )
+        self.assertTrue(
+            _row_matches_dss_tools_fuzzy_inno(
+                "",
+                "",
+                r"C:\Program Files\DSS Tools",
+                r'"C:\Program Files\DSS Tools\unins000.exe"',
+            )
+        )
+        self.assertFalse(
+            _row_matches_dss_tools_fuzzy_inno(
+                "Other App",
+                "Other",
+                r"C:\Other",
+                r'"C:\Other\unins000.exe"',
+            )
+        )
+        self.assertFalse(
+            _row_matches_dss_tools_fuzzy_inno(
+                "DSS Tools",
+                "DSS Tools",
+                "",
+                r'"C:\Python313\python.exe" -m pip',
+            )
+        )
+
     def test_clean_transient_app_data_preserves_config(self) -> None:
         from dss_tools_updater import CallableLog, clean_transient_app_data
 
