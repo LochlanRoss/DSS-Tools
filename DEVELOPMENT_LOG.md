@@ -5,6 +5,11 @@ Small fixes and very short edits are intentionally omitted unless they materiall
 
 ## 2026-05-04
 
+### ICO script: installer / shell showed solid blue smear
+
+- **Cause:** Pillow’s ICO ``_save`` skips any requested ``sizes`` larger than the **first** image’s width/height. The script passed a **16×16** frame first, so only 16×16 was written; Windows/Inno scaled that up to a flat color. A non-square PNG could also yield a **256×255** frame. ``append_images`` alone did not fix ordering.
+- **Fix:** ``tools/ensure_dss_tools_ico.py`` now letterboxes to a square, builds all sizes, and saves with the **256×256** image as the primary plus ``append_images`` for the rest. After write, a **mean RGB error** check compares a 64×64 fit of the PNG to the decoded ICO (tunable ``--no-verify`` to skip).
+
 ### Update helper: stop stalling on "waiting for main app to close"
 
 - **Cause:** The GUI polled ``parent_process_exists_windows``, which treated ``OpenProcess`` **ERROR_ACCESS_DENIED (5)** as "parent still running." After the main window closed, **PID reuse** or **elevated updater vs. medium-IL target** could keep returning 5 so the loop never finished.

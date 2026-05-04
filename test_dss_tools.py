@@ -660,6 +660,12 @@ class DssToolsTests(DssToolsFixtures):
             ico = root / "dss_tools.ico"
             self.assertTrue(ico.is_file())
             self.assertGreater(ico.stat().st_size, 100)
+            with Image.open(ico) as im:
+                im.load()
+                sizes = im.info.get("sizes", set())
+                self.assertGreaterEqual(len(sizes), 6, msg=str(sizes))
+                self.assertTrue(all(w == h for w, h in sizes), msg=str(sizes))
+                self.assertEqual(im.size, (256, 256), msg="Pillow ICO primary must be largest or Windows shows a smeared icon")
 
     def test_ensure_dss_tools_ico_force_overwrites_existing_ico(self) -> None:
         try:

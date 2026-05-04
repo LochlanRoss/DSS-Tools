@@ -295,7 +295,7 @@ git push origin 0.2.0
 
 ### Local build (PyInstaller + Inno wizard)
 
-0. **Icon:** The repo ships **`DSS-Tools Icon.png`** and generated **`dss_tools.ico`** at the root (PyInstaller and Inno use them; no separate download). To refresh the `.ico` after editing the PNG: `pip install pillow` then `python tools/ensure_dss_tools_ico.py --force`. Without sources, the script falls back to **`tools/default_dss_tools.ico`** (generic blue tile).
+0. **Icon:** The repo ships **`DSS-Tools Icon.png`** and generated **`dss_tools.ico`** at the root (PyInstaller and Inno use them; no separate download). To refresh the `.ico` after editing the PNG: `pip install pillow` then `python tools/ensure_dss_tools_ico.py --force` (the script writes **all** standard sizes with the **256×256** frame first so Windows does not scale a tiny-only ICO into a solid smear, and it checks PNG vs ICO pixels unless you pass **`--no-verify`**). Without sources, the script falls back to **`tools/default_dss_tools.ico`** (generic blue tile).
 
 1. **One-file app** (same flags as CI; version from tag in CI is simulated here with `dss_app_version.txt`):
 
