@@ -6102,17 +6102,32 @@ class DssToolsApp(tk.Tk):
         return None
 
     def _resolve_updater_handoff_argv(self, installer_path: Path) -> list[str] | None:
-        """Return argv to run the sidecar updater, or None if unavailable (legacy handoff)."""
+        """Return argv to run the sidecar updater, or None if unavailable (legacy handoff).
+
+        Passes the **running** main-process image path (same source as ``QueryFullProcessImageName``)
+        so the updater can match the parent PID before ``taskkill``. ``sys.executable`` alone can
+        differ (e.g. Windows Store ``python.exe`` shim vs ``python3.13.exe``).
+        """
         inst = installer_path.resolve()
         if os.name != "nt":
             return None
+        parent_exe = str(Path(sys.executable).resolve())
+        if os.name == "nt":
+            try:
+                from dss_tools_updater import get_process_image_path_windows
+
+                live = get_process_image_path_windows(os.getpid())
+                if live:
+                    parent_exe = live
+            except Exception:
+                pass
         updater_exe = self._updater_exe_for_handoff()
         if updater_exe is not None:
-            return [str(updater_exe.resolve()), str(inst), str(os.getpid())]
+            return [str(updater_exe.resolve()), str(inst), str(os.getpid()), parent_exe]
         if not getattr(sys, "frozen", False):
             dev_script = Path(__file__).resolve().parent / "dss_tools_updater.py"
             if dev_script.is_file():
-                return [sys.executable, str(dev_script), str(inst), str(os.getpid())]
+                return [sys.executable, str(dev_script), str(inst), str(os.getpid()), parent_exe]
         return None
 
     def _stage_installer_for_updater(self, installer_path: Path) -> Path:
@@ -6144,6 +6159,13 @@ class DssToolsApp(tk.Tk):
         return dest
 
     def _launch_update_installer(self, installer_path: Path) -> None:
+        """Start the update sidecar, then exit this UI with Tk ``destroy()`` only.
+
+        The main process is not terminated from here via ``taskkill``. The sidecar may run
+        ``taskkill`` only if the parent PID still matches the **running image path** passed on the
+        command line (see ``dss_tools_updater``), so a clean exit plus PID reuse does not kill an
+        unrelated process.
+        """
         if not installer_path.exists():
             messagebox.showerror("Install Update", f"The downloaded installer could not be found.\n\n{installer_path}")
             return

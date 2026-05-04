@@ -5,6 +5,12 @@ Small fixes and very short edits are intentionally omitted unless they materiall
 
 ## 2026-05-04
 
+### Update helper: stop stalling on "waiting for main app to close"
+
+- **Cause:** The GUI polled ``parent_process_exists_windows``, which treated ``OpenProcess`` **ERROR_ACCESS_DENIED (5)** as "parent still running." After the main window closed, **PID reuse** or **elevated updater vs. medium-IL target** could keep returning 5 so the loop never finished.
+- **Fix:** Replace the wait loop with ``taskkill /PID … /T /F`` (process tree), a short sleep, then uninstall/install. Same for ``--headless`` legacy handoff.
+- **Follow-up:** ``taskkill`` runs only after ``QueryFullProcessImageName`` confirms the PID still maps to the **same executable path** recorded at handoff (or ``DSSTools.exe`` when no path is passed). If the main app already exited, ``taskkill`` is skipped so a recycled PID is never killed. The main app still exits only via Tk ``destroy()`` after starting the sidecar; there is no ``taskkill`` in ``dss_hours_tracker``. The handoff passes the **live** process image path (not only ``sys.executable``) so Store Python shims match the real interpreter.
+
 ### Update helper: UAC elevation (WinError 740)
 
 - **Cause:** ``DSSToolsUpdater.exe`` is built with PyInstaller **``uac_admin``** (administrator manifest). Starting it with **``subprocess.Popen``** from a normal session fails with **WinError 740** (``ERROR_ELEVATION_REQUIRED``) because no UAC handoff occurs.

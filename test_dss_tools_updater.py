@@ -29,6 +29,41 @@ class TestDssToolsUpdater(unittest.TestCase):
         # Avoid huge integers: ``c_uint32`` truncates and could match a live PID.
         self.assertFalse(parent_process_exists_windows(999_999_999))
 
+    @unittest.skipUnless(sys.platform == "win32", "Windows-only")
+    def test_terminate_process_tree_nonexistent_pid_skips_taskkill(self) -> None:
+        from dss_tools_updater import terminate_process_tree_windows
+
+        code, detail = terminate_process_tree_windows(999_999_999, str(Path(sys.executable).resolve()))
+        self.assertEqual(code, 0)
+        self.assertIn("Skipped", detail)
+        self.assertIn("already exited", detail)
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows-only")
+    def test_should_taskkill_parent_matches_own_image_path(self) -> None:
+        from dss_tools_updater import get_process_image_path_windows, should_taskkill_parent_process
+
+        img = get_process_image_path_windows(os.getpid())
+        self.assertIsNotNone(img)
+        ok, msg = should_taskkill_parent_process(os.getpid(), img)
+        self.assertTrue(ok)
+        self.assertEqual(msg, "")
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows-only")
+    def test_should_taskkill_rejects_wrong_parent_path(self) -> None:
+        from dss_tools_updater import should_taskkill_parent_process
+
+        ok, msg = should_taskkill_parent_process(os.getpid(), r"C:\Windows\System32\notepad.exe")
+        self.assertFalse(ok)
+        self.assertIn("not the updater parent", msg)
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows-only")
+    def test_get_process_image_path_self(self) -> None:
+        from dss_tools_updater import get_process_image_path_windows
+
+        img = get_process_image_path_windows(os.getpid())
+        self.assertIsNotNone(img)
+        self.assertTrue(len(img) > 3)
+
     def test_clean_transient_app_data_preserves_config(self) -> None:
         from dss_tools_updater import CallableLog, clean_transient_app_data
 
