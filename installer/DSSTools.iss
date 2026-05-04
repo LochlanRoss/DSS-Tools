@@ -1,6 +1,7 @@
 ; Inno Setup 6 — click-through installer for DSS Tools
 ;
-; Prerequisites: PyInstaller must have built ..\dist\DSSTools.exe
+; Prerequisites: PyInstaller must have built ..\dist\DSSTools.exe and ..\dist\DSSToolsUpdater.exe
+; Optional: ..\dss_tools.ico at repo root (wizard + shortcuts + uninstall entry icon)
 ; Compile locally (from repo root), after PyInstaller:
 ;   "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyAppVersion=0.1.0 installer\DSSTools.iss
 ;
@@ -10,6 +11,10 @@
 #define MyAppName "DSS Tools"
 #define MyAppExeName "DSSTools.exe"
 #define MyAppPublisher "DSS Tools"
+
+#if FileExists(SourcePath + "..\dss_tools.ico")
+#define HasAppIco
+#endif
 
 [Setup]
 AppId={{E7B8F9A0-1D2C-4E5F-8A9B-0C1D2E3F4A5B}}
@@ -28,7 +33,12 @@ Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 DisableProgramGroupPage=no
+#ifdef HasAppIco
+SetupIconFile=..\dss_tools.ico
+UninstallDisplayIcon={app}\dss_tools.ico
+#else
 UninstallDisplayIcon={app}\{#MyAppExeName}
+#endif
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -38,11 +48,21 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 Source: "..\dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\DSSToolsUpdater.exe"; DestDir: "{app}"; Flags: ignoreversion
+#ifdef HasAppIco
+Source: "..\dss_tools.ico"; DestDir: "{app}"; DestName: "dss_tools.ico"; Flags: ignoreversion
+#endif
 
 [Icons]
+#ifdef HasAppIco
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\dss_tools.ico"
+Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon; IconFilename: "{app}\dss_tools.ico"
+#else
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+#endif
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent

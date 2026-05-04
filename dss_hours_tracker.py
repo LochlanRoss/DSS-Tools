@@ -78,10 +78,18 @@ DEFAULT_HASH_POLL_MINUTES = 5
 BUG_REPORT_EMAIL = "lross@jatechpowersystems.com"
 MAX_PARALLEL_PARSE_WORKERS = 2
 UPDATE_DIRNAME = "updates"
+UPDATER_EXE_NAME = "DSSToolsUpdater.exe"
 INSTALLER_EXTENSIONS = (".exe", ".msi", ".msix", ".msixbundle")
 CHECKSUM_ASSET_NAMES = ("checksums.txt", "sha256sums.txt", "sha256sums", "sha256sum.txt")
 GITHUB_REPO_SLUG = "LochlanRoss/DSS-Tools"
 GITHUB_LATEST_RELEASE_URL = f"https://api.github.com/repos/{GITHUB_REPO_SLUG}/releases/latest"
+APP_ICON_CANDIDATE_NAMES = (
+    "dss_tools.ico",
+    "DSSTools.ico",
+    "app_icon.ico",
+    "icon.ico",
+    "app.ico",
+)
 
 
 class OperationCancelled(RuntimeError):
@@ -736,6 +744,48 @@ def ensure_app_directories() -> tuple[Path, Path]:
     app_root.mkdir(parents=True, exist_ok=True)
     cache_dir.mkdir(parents=True, exist_ok=True)
     return app_root, cache_dir
+
+
+def resolve_app_icon_path() -> Path | None:
+    """Bundled onefile: MEIPASS first; dev: next to this module. Optional single *.ico in repo root."""
+    roots: list[Path] = []
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        roots.append(Path(sys._MEIPASS))
+    source_root = Path(__file__).resolve().parent
+    roots.append(source_root)
+    for base in roots:
+        for name in APP_ICON_CANDIDATE_NAMES:
+            cand = base / name
+            if cand.is_file():
+                return cand
+    if not getattr(sys, "frozen", False):
+        try:
+            loose = sorted(source_root.glob("*.ico"))
+            if len(loose) == 1:
+                return loose[0]
+        except OSError:
+            pass
+    return None
+
+
+def apply_tk_window_icon(root: tk.Misc) -> None:
+    path = resolve_app_icon_path()
+    if path is None:
+        return
+    resolved = path.resolve()
+    try:
+        if os.name == "nt" and resolved.suffix.lower() == ".ico":
+            root.iconbitmap(default=str(resolved))
+            return
+    except tk.TclError:
+        return
+    if resolved.suffix.lower() in {".png", ".gif", ".ppm", ".pgm"}:
+        try:
+            photo = tk.PhotoImage(master=root, file=str(resolved))
+            root.iconphoto(True, photo)
+            setattr(root, "_dss_app_icon_photo", photo)
+        except tk.TclError:
+            pass
 
 
 def parse_sheet_date(sheet_name: str) -> date | None:
@@ -4485,6 +4535,7 @@ class DssToolsApp(tk.Tk):
     def __init__(self, initial_source: Path | Iterable[Path] | None = None):
         super().__init__()
         self.title(DISPLAY_APP_NAME)
+        apply_tk_window_icon(self)
         self.geometry("1200x760")
         self.minsize(760, 520)
         self.app_root, self.cache_dir = ensure_app_directories()
@@ -5594,16 +5645,36 @@ class DssToolsApp(tk.Tk):
             network_text = describe_network_profile(network_profile or {}) if network_profile is not None else "network state unavailable"
             self.update_status_var.set(f"Update available: {latest_tag or latest_version} (installed: {APP_VERSION}; {network_text})")
             if manual:
-                messagebox.showinfo(
-                    "Check for Updates",
-                    "A newer version is available\n\n"
-                    f"Installed: {APP_VERSION}\n"
-                    f"Latest: {latest_tag or latest_version}\n"
-                    f"Published: {published_at or 'Unknown'}\n"
-                    f"Assets: {assets_text}\n"
-                    f"Network: {network_text}\n\n"
-                    f"Release page:\n{html_url}",
-                )
+                if installer_asset is not None:
+                    if messagebox.askyesno(
+                        "Update Available",
+                        "A newer version is available\n\n"
+                        f"Installed: {APP_VERSION}\n"
+                        f"Latest: {latest_tag or latest_version}\n"
+                        f"Published: {published_at or 'Unknown'}\n"
+                        f"Assets: {assets_text}\n"
+                        f"Network: {network_text}\n\n"
+                        "Automatic download is only offered on unmetered Wi‑Fi.\n\n"
+                        "Download the installer to this PC now?",
+                    ):
+                        self._start_update_download(release_info, manual=manual)
+                    else:
+                        messagebox.showinfo(
+                            "Check for Updates",
+                            "You can install later from the release page:\n\n" + html_url,
+                        )
+                else:
+                    messagebox.showinfo(
+                        "Check for Updates",
+                        "A newer version is available\n\n"
+                        f"Installed: {APP_VERSION}\n"
+                        f"Latest: {latest_tag or latest_version}\n"
+                        f"Published: {published_at or 'Unknown'}\n"
+                        f"Assets: {assets_text}\n"
+                        f"Network: {network_text}\n\n"
+                        "No downloadable installer asset was found on the release.\n\n"
+                        f"Release page:\n{html_url}",
+                    )
             return
         self.update_status_var.set(f"Installed version: {APP_VERSION} (up to date)")
         if manual:
@@ -5673,16 +5744,65 @@ class DssToolsApp(tk.Tk):
         elif manual:
             messagebox.showinfo("Update Download", f"The installer is ready at:\n{destination}")
 
+    def _resolve_updater_handoff_argv(self, installer_path: Path) -> list[str] | None:
+        """Return argv to run the sidecar updater, or None if unavailable (legacy handoff)."""
+        inst = installer_path.resolve()
+        if os.name != "nt":
+            return None
+        if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+            sibling = Path(sys.executable).resolve().parent / UPDATER_EXE_NAME
+            if sibling.is_file():
+                return [str(sibling), str(inst), str(os.getpid())]
+        dev_script = Path(__file__).resolve().parent / "dss_tools_updater.py"
+        if dev_script.is_file():
+            return [sys.executable, str(dev_script), str(inst), str(os.getpid())]
+        return None
+
     def _launch_update_installer(self, installer_path: Path) -> None:
         if not installer_path.exists():
             messagebox.showerror("Install Update", f"The downloaded installer could not be found.\n\n{installer_path}")
             return
+        inst = installer_path.resolve()
+        argv = self._resolve_updater_handoff_argv(inst)
+        if argv is not None:
+            creationflags = 0
+            if os.name == "nt":
+                creationflags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                creationflags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            try:
+                subprocess.Popen(
+                    argv,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    close_fds=False,
+                    cwd=str(inst.parent),
+                    creationflags=creationflags,
+                )
+            except OSError as exc:
+                messagebox.showerror("Install Update", f"Could not start the update helper.\n\n{exc}")
+                return
+            self.destroy()
+            return
         pid = os.getpid()
-        escaped_path = str(installer_path).replace("'", "''")
+        escaped_path = str(inst).replace("'", "''")
         command = f"while (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ Start-Sleep -Milliseconds 500 }}; Start-Process -FilePath '{escaped_path}'"
+        log_path = self.app_root / "update_handoff.log"
         try:
-            subprocess.Popen(["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", command], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            log_handle = log_path.open("a", encoding="utf-8")
+        except OSError:
+            log_handle = subprocess.DEVNULL
+        try:
+            subprocess.Popen(
+                ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", command],
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                close_fds=False,
+            )
         except OSError as exc:
+            if hasattr(log_handle, "close"):
+                log_handle.close()
             messagebox.showerror("Install Update", f"Could not launch the installer.\n\n{exc}")
             return
         self.destroy()

@@ -3,6 +3,16 @@
 This log tracks moderate and larger changes, along with active feature requests, notable bug work, and handoff-ready context.
 Small fixes and very short edits are intentionally omitted unless they materially changed behavior.
 
+## 2026-05-04
+
+### Reliable in-place updates (sidecar updater)
+
+- **Cause:** Post-download **Install now** spawned a hidden PowerShell wait loop, then closed the app; failures were silent (stdout/stderr discarded), so users often saw the window close with no installer.
+- **Fix:** Added **`dss_tools_updater.py`** / frozen **`DSSToolsUpdater.exe`**: waits on the parent PID via **`OpenProcess`** (locale-independent), then launches the downloaded setup with **`os.startfile`**. The main app prefers this sidecar when present beside **`DSSTools.exe`** (or runs the script via **`sys.executable`** in dev); otherwise falls back to the old PowerShell handoff with **`%LOCALAPPDATA%\DSSTools\update_handoff.log`** for command output.
+- **Packaging:** **`DSSTools.spec`**, **`installer/DSSTools.iss`**, and **`.github/workflows/release-windows.yml`** now build and ship **`DSSToolsUpdater.exe`** into the install directory.
+- **UX:** Manual **Check for Updates** when not on unmetered Wi‚ÄëFi now offers **Download the installer now?** instead of only linking the release page.
+- **Tests:** **`test_dss_tools_updater.py`** (Windows-only PID checks; skipped elsewhere).
+
 ## Logging Rule
 - Record moderate or large feature work, behavioral changes, UI workflow changes, architecture changes, persistence changes, diagnostics, packaging, caching, and integration work.
 - Do not record tiny cosmetic edits or very small bug fixes unless they changed user behavior in an important way.
@@ -18,6 +28,7 @@ Small fixes and very short edits are intentionally omitted unless they materiall
 - **Updates:** **`GITHUB_REPO_SLUG`** is **`LochlanRoss/DSS-Tools`** (rename the GitHub repository to match, or adjust the constant if releases stay on another slug).
 - Removed obsolete root Inno script (superseded by **`installer/DSSTools.iss`**). PyInstaller spec renamed to **`DSSTools.spec`** with **`name='DSSTools'`**.
 - **Test modules:** **`test_dss_tools.py`** (fast), **`test_dss_tools_integration.py`** (slow, gated), **`test_dss_tools_fixtures.py`** (shared helpers); fast CI command is **`python -m unittest test_dss_tools -q`**.
+- **Windows app icon:** repo-root **`dss_tools.ico`** (or a single **`*.ico`** picked up in dev) drives **`apply_tk_window_icon`** on the main **`tk.Tk`**, **PyInstaller** `--icon` / `--add-data`, **`DSSTools.spec`** bundling, and **`installer/DSSTools.iss`** wizard + shortcut icons via Inno preprocessor **`#if FileExists`** when that file is present; release workflow normalizes a lone **`*.ico`** to **`dss_tools.ico`** before the frozen build.
 
 ### Scrollable Settings / Email Drafts pages
 
@@ -29,7 +40,7 @@ Small fixes and very short edits are intentionally omitted unless they materiall
 - **Clear Cached DSSs** now also clears in-memory reuse flags (`file_hashes`, `reused_paths`, cache status to Miss) for the loaded set so stats and the next **Update View** do not report stale memory hits after disk cache deletion (`tracker_data_invalidated_for_cache_clear`).
 - **Open DSS** removed; a single **Add DSS Workbook(s)** control always merges paths; **Remove DSS(s)** clears sources as before.
 - **Reports alerts:** dropped the pink outline frame; Error Report / Sheet Parse Warnings / parent **Reports** tabs show a left **swatch** in the alert-row background colour (PhotoImage stripe) while keeping the `(!)` labels.
-- **Toolbar row:** hint sits left of the progress bar; **Cancel** aligns on the same row as the bar; standard ttk toolbar and progress row (no dark strip) (`UiThemeColors` **table_background**, **content_chrome_background**); Configuration Appearance lists those fields with **Pickù** beside each hex entry; **Application version** line on Configuration.
+- **Toolbar row:** hint sits left of the progress bar; **Cancel** aligns on the same row as the bar; standard ttk toolbar and progress row (no dark strip) (`UiThemeColors` **table_background**, **content_chrome_background**); Configuration Appearance lists those fields with **PickÔøΩ** beside each hex entry; **Application version** line on Configuration.
 - Shared **`DssTable.Treeview`** style for table backgrounds; word-wrap styles copy table colours.
 
 ### Test layout: fast default vs slow integration
@@ -44,7 +55,7 @@ Small fixes and very short edits are intentionally omitted unless they materiall
 ### GitHub Actions: Windows release workflow
 
 - Added **`.github/workflows/release-windows.yml`**: on **semver-style tag push** (`[0-9]*.[0-9]*.[0-9]*` or `v[0-9]*.[0-9]*.[0-9]*`) or manual dispatch for an existing tag, checks out the ref, writes **`dss_app_version.txt`**, runs fast unit tests, runs **PyInstaller** `--onefile` with **`--collect-all pywin32`**, compiles **`installer/DSSTools.iss`** via **Inno Setup** (`choco install innosetup`) to **`dist/DSSToolsSetup.exe`**, emits **`checksums.txt`** for that setup program, and publishes **setup + checksums** (not the loose PyInstaller exe) via **`softprops/action-gh-release`** (`contents: write`).
-- **`discover_app_version()`** now honours **`DSS_APP_VERSION`** env, then **`dss_app_version.txt`** in **`sys._MEIPASS`** when **`sys.frozen`**, then package metadata / **`pyproject.toml`** ù so frozen CI builds report the correct version for update comparison.
+- **`discover_app_version()`** now honours **`DSS_APP_VERSION`** env, then **`dss_app_version.txt`** in **`sys._MEIPASS`** when **`sys.frozen`**, then package metadata / **`pyproject.toml`** ÔøΩ so frozen CI builds report the correct version for update comparison.
 
 ### UI theme colours (Configuration)
 

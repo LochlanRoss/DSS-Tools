@@ -77,11 +77,37 @@ jobs:
           printf '%s' '${{ steps.meta.outputs.version }}' > dss_app_version.txt
           cat dss_app_version.txt
 
+      - name: Normalize dss_tools.ico (optional)
+        shell: pwsh
+        run: |
+          $root = $env:GITHUB_WORKSPACE
+          $dst = Join-Path $root "dss_tools.ico"
+          if (Test-Path -LiteralPath $dst) { exit 0 }
+          $icos = @(Get-ChildItem -Path $root -Filter *.ico -File -ErrorAction SilentlyContinue)
+          if ($icos.Count -eq 1) {
+            Copy-Item -LiteralPath $icos[0].FullName -Destination $dst
+            Write-Host "Using $($icos[0].Name) as dss_tools.ico for PyInstaller and Inno Setup."
+          }
+
       - name: Run fast unit tests
-        run: python -m unittest test_dss_tools -q
+        run: python -m unittest test_dss_tools test_dss_tools_updater -q
 
       - name: PyInstaller (one file)
-        run: pyinstaller --noconsole --onefile --name DSSTools --collect-all pywin32 --add-data "dss_app_version.txt;." dss_hours_tracker.py
+        shell: pwsh
+        run: |
+          $root = $env:GITHUB_WORKSPACE
+          $ico = Join-Path $root "dss_tools.ico"
+          $args = @(
+            "--noconsole", "--onefile", "--name", "DSSTools",
+            "--collect-all", "pywin32",
+            "--add-data", "dss_app_version.txt;."
+          )
+          if (Test-Path -LiteralPath $ico) {
+            $args += @("--icon", "dss_tools.ico", "--add-data", "dss_tools.ico;.")
+          }
+          pyinstaller @args (Join-Path $root "dss_hours_tracker.py")
+          $upArgs = @("--noconsole", "--onefile", "--name", "DSSToolsUpdater")
+          pyinstaller @upArgs (Join-Path $root "dss_tools_updater.py")
 
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress

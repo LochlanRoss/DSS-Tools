@@ -13,6 +13,12 @@ Desktop GUI for opening one or more DSS `.xlsx` workbooks, extracting labour hou
 - Supports multi-DSS rollups across matching employee names
 - Keeps all results usable without Excel formulas linked back to the source workbook
 
+## Application icon (Windows)
+
+Put a **`.ico`** file in the repository root. The app looks for, in order: **`dss_tools.ico`**, `DSSTools.ico`, `app_icon.ico`, `icon.ico`, `app.ico`. If none of those exist but there is **exactly one** `*.ico` in the root, that file is used when you run **`python dss_hours_tracker.py`** (window / taskbar icon).
+
+**PyInstaller** and **Inno Setup** use **`dss_tools.ico`** in the repo root: either save your artwork under that name, or copy any single root `*.ico` to `dss_tools.ico` before building. The release workflow copies a lone `*.ico` to `dss_tools.ico` automatically when `dss_tools.ico` is not already present.
+
 ## Run
 
 Launch the GUI:
@@ -91,7 +97,7 @@ The app uses grouped navigation with two tab rows:
 - Multi-file loads prefer **newer files first** (by filesystem modified time); the parser can emit an early partial preview while older workbooks are still loading
 - Same-file updates are skipped when the **DSS semantic hash** (dated sheets and `K25:AZ36` only) is unchanged; per-sheet digests allow **partial refresh** when only some dated sheets change
 - Parsed DSS data is cached on disk for up to 7 days
-- Optional **GitHub release** update check; automatic download on unmetered Wi‑Fi; install prompt after download
+- Optional **GitHub release** update check; automatic download on unmetered Wi‑Fi; **Check for Updates** can download on other networks when you confirm; after download, **Install now** hands off to a small **`DSSToolsUpdater.exe`** next to the main app (waits for DSS Tools to exit, then starts the installer). Legacy installs without the updater still use a PowerShell handoff and append diagnostics to **`update_handoff.log`** under `%LOCALAPPDATA%\DSSTools` when that path is used.
 - Loaded DSS files are checked periodically in the background for changes
 - Revision sheets such as `R1` / `rev 2` override the non-revised sheet for the same date
 - Conditional highlighting uses saved job-specific formatting profiles
@@ -283,7 +289,9 @@ git push origin 0.2.0
 
 ```powershell
 Set-Content -NoNewline dss_app_version.txt "0.1.0"
-pyinstaller --noconsole --onefile --name DSSTools --collect-all pywin32 --add-data "dss_app_version.txt;." dss_hours_tracker.py
+$args = @("--noconsole", "--onefile", "--name", "DSSTools", "--collect-all", "pywin32", "--add-data", "dss_app_version.txt;.")
+if (Test-Path -LiteralPath "dss_tools.ico") { $args += @("--icon", "dss_tools.ico", "--add-data", "dss_tools.ico;.") }
+pyinstaller @args dss_hours_tracker.py
 ```
 
 2. **Installer** (requires [Inno Setup 6](https://jrsoftware.org/isdl.php) installed):
