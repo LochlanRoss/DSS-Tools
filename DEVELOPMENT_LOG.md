@@ -28,6 +28,16 @@ Small fixes and very short edits are intentionally omitted unless they materiall
 - **Cause:** Pillow’s ICO ``_save`` skips any requested ``sizes`` larger than the **first** image’s width/height. The script passed a **16×16** frame first, so only 16×16 was written; Windows/Inno scaled that up to a flat color. A non-square PNG could also yield a **256×255** frame. ``append_images`` alone did not fix ordering.
 - **Fix:** ``tools/ensure_dss_tools_ico.py`` now letterboxes to a square, builds all sizes, and saves with the **256×256** image as the primary plus ``append_images`` for the rest. After write, a **mean RGB error** check compares a 64×64 fit of the PNG to the decoded ICO (tunable ``--no-verify`` to skip).
 
+### Updater: hide flashing console windows
+
+- **Cause:** ``CREATE_NO_WINDOW`` alone was not always enough when a GUI process spawned ``taskkill``, ``cmd /c …``, or Inno from ``subprocess``; a brief console host could appear.
+- **Fix:** Shared ``_windows_hidden_subprocess_kwargs()`` adds ``STARTUPINFO`` (``STARTF_USESHOWWINDOW`` + ``SW_HIDE``), null stdio for ``Popen``, and keeps ``DETACHED_PROCESS`` on the delayed temp-file delete helper.
+
+### Updater: Inno uninstall registry miss
+
+- **Cause:** The helper only opened the fixed subkey ``{AppId}_is1``. Older or alternate builds can register a different subkey name; a **portable** ``DSSTools.exe`` tree has **no** Uninstall entry at all. The log line *“No existing Inno uninstall entry”* was easy to read as “Inno is broken” when it really meant “expected key not found.”
+- **Fix:** :func:`discover_inno_dss_tools_uninstall_info` tries the canonical AppId subkey first, then **enumerates** ``HKLM``/``HKCU`` ``…\\Uninstall`` for Inno-style ``unins*.exe`` strings plus DSS Tools ``DisplayName`` / ``Publisher`` / ``InstallLocation`` / path heuristics. :func:`read_inno_install_location` reuses the same discovery. Clearer log text when nothing matches.
+
 ### Update helper: stop stalling on "waiting for main app to close"
 
 - **Cause:** The GUI polled ``parent_process_exists_windows``, which treated ``OpenProcess`` **ERROR_ACCESS_DENIED (5)** as "parent still running." After the main window closed, **PID reuse** or **elevated updater vs. medium-IL target** could keep returning 5 so the loop never finished.
