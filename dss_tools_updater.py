@@ -4,8 +4,8 @@ After the main app exits, this helper (frozen as ``DSSToolsUpdater.exe``) can:
 
 1. Show a small status window (default).
 2. Silently uninstall the previous Inno-installed build (same ``AppId``).
-3. Remove transient data under ``%LOCALAPPDATA%\\DSSTools`` (cache, downloads, logs)
-   while keeping ``dss_hours_tracker_config.json``.
+3. Remove transient data under ``%LOCALAPPDATA%\\DSSTools`` (everything except
+   ``dss_hours_tracker_config.json``, including cache, updates, copied updater exe, logs).
 4. Run the new ``DSSToolsSetup.exe`` with Inno silent flags so the previous install
    directory and Start-menu layout are reused where possible.
 
@@ -34,6 +34,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import tkinter as tk
@@ -285,7 +286,7 @@ def _run_command_with_smoothed_progress(
 
 
 def clean_transient_app_data(app_root: Path, log: CallableLog) -> None:
-    """Delete cache, updates, logs, diagnostics; keep ``dss_hours_tracker_config.json``."""
+    """Remove everything under *app_root* except ``dss_hours_tracker_config.json`` (user settings)."""
     this_exe = Path(sys.executable).resolve()
     if not app_root.is_dir():
         return
@@ -299,18 +300,54 @@ def clean_transient_app_data(app_root: Path, log: CallableLog) -> None:
             continue
         try:
             if child.is_dir():
-                if name_cf in ("cache", "updates"):
-                    shutil.rmtree(child, ignore_errors=False)
-                    log(f"Removed directory: {child.name}\\")
-                continue
-            if child.suffix.lower() == ".log":
-                child.unlink(missing_ok=True)
-                log(f"Removed file: {child.name}")
-            elif child.name.startswith("diagnostic_snapshot_") and child.suffix.lower() == ".json":
+                shutil.rmtree(child, ignore_errors=False)
+                log(f"Removed directory: {child.name}\\")
+            else:
                 child.unlink(missing_ok=True)
                 log(f"Removed file: {child.name}")
         except OSError as exc:
             log(f"Could not remove {child}: {exc}")
+
+
+def schedule_delete_path_windows(path: Path) -> None:
+    """Best-effort delete after this process can exit (needed for staged *.exe under %%TEMP%%)."""
+    if sys.platform != "win32":
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return
+    if not path.is_file():
+        return
+    ps = str(path)
+    if '"' in ps or "\r" in ps or "\n" in ps:
+        return
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
+    subprocess.Popen(
+        ["cmd", "/c", f'ping 127.0.0.1 -n 2 >nul & del /f /q "{ps}"'],
+        creationflags=creationflags,
+        close_fds=True,
+    )
+
+
+def cleanup_staged_temp_artifacts(installer_path: Path) -> None:
+    """Remove staged copies under %%TEMP%% (installer / updater) left from elevation handoff."""
+    temp_root = Path(tempfile.gettempdir()).resolve()
+    inst = installer_path.resolve()
+    try:
+        inst.relative_to(temp_root)
+    except ValueError:
+        pass
+    else:
+        if inst.is_file() and inst.name.lower().startswith("dss_tools_setup_"):
+            schedule_delete_path_windows(inst)
+    exe = Path(sys.argv[0]).resolve()
+    try:
+        exe.relative_to(temp_root)
+    except ValueError:
+        return
+    if exe.is_file() and "dss_tools_updater_" in exe.name.lower():
+        schedule_delete_path_windows(exe)
 
 
 def run_uninstall_silent(log: CallableLog, on_progress: Callable[[float], None] | None = None) -> int:
@@ -542,6 +579,7 @@ def run_gui(installer: Path, parent_pid: int, parent_executable: str = "") -> in
         return 1
     app = UpdateMiniApp(inst, parent_pid, parent_executable)
     app.mainloop()
+    cleanup_staged_temp_artifacts(Path(app._installer))
     return 1 if getattr(app, "_failed", False) else 0
 
 

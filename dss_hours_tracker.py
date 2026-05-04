@@ -7827,8 +7827,19 @@ class DssToolsApp(tk.Tk):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="DSS Tools — desktop DSS labour-hour summaries and workflows.")
+    parser.add_argument(
+        "--installer-postinstall-cleanup",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("source", nargs="*", help="Optional DSS workbook(s) to open on launch.")
     args = parser.parse_args()
+
+    if args.installer_postinstall_cleanup:
+        from dss_tools_updater import CallableLog, clean_transient_app_data
+
+        clean_transient_app_data(get_app_root(), CallableLog())
+        return 0
 
     initial_source = [Path(path).expanduser().resolve() for path in args.source] if args.source else None
     app = DssToolsApp(initial_source=initial_source)

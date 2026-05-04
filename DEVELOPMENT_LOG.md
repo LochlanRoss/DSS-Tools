@@ -5,6 +5,14 @@ Small fixes and very short edits are intentionally omitted unless they materiall
 
 ## 2026-05-04
 
+### Installer: clean upgrades + personal Desktop + AppData scrub
+
+- **Desktop shortcut:** Inno now uses **`{userdesktop}`** (installing user’s profile Desktop) instead of **`{autodesktop}`**, which under **`PrivilegesRequired=admin`** targeted **Public Desktop** only—File Explorer’s personal Desktop folder showed no shortcut. **`[InstallDelete]`** removes a legacy **`{commondesktop}\DSS Tools.lnk`** on upgrade.
+- **Program Files:** **`[InstallDelete]`** deletes **`{app}`** before copying files so orphaned artifacts from older builds cannot remain beside the new exe set.
+- **%LOCALAPPDATA%\\DSSTools:** **`clean_transient_app_data`** now removes **everything** except **`dss_hours_tracker_config.json`** (cache, updates, logs, staged updater copy, stray files/dirs). The updater already calls this before silent reinstall; the wizard installer runs **`DSSTools.exe --installer-postinstall-cleanup`** (hidden, wait) after install so interactive upgrades match.
+- **Temp:** After the GUI updater finishes, **`cleanup_staged_temp_artifacts`** schedules deletion of **`dss_tools_setup_*`** / **`dss_tools_updater_*`** copies under **`%TEMP%`** via a short **`cmd`** delay (cannot delete a running exe immediately).
+- **Build:** PyInstaller for **`DSSTools`** includes **`--hidden-import dss_tools_updater`** (and **`DSSTools.spec`** lists it) so the cleanup flag works in the frozen exe.
+
 ### Inno shortcuts: desktop vs taskbar icon mismatch
 
 - **Cause:** Shortcuts used **``{app}\dss_tools.ico``** while the taskbar / pinned app icon usually comes from the **first icon resource embedded in ``DSSTools.exe``** (PyInstaller ``--icon``). After fixing the repo ICO, the loose file could look fine while an older **PE-embedded** multi-size set still looked like a solid smear.

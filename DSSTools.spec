@@ -10,7 +10,7 @@ datas = [('dss_app_version.txt', '.')]
 if _icon.is_file():
     datas.append((str(_icon), '.'))
 binaries = []
-hiddenimports = []
+hiddenimports = ["dss_tools_updater"]
 tmp_ret = collect_all('pywin32')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 

@@ -85,6 +85,25 @@ from test_dss_tools_fixtures import DssToolsFixtures
 
 
 class DssToolsTests(DssToolsFixtures):
+    def test_main_installer_postinstall_cleanup(self) -> None:
+        from dss_hours_tracker import main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "DSSTools"
+            root.mkdir()
+            (root / "dss_hours_tracker_config.json").write_text("{}", encoding="utf-8")
+            (root / "leftover.bin").write_bytes(b"x")
+            extra = root / "extra_dir"
+            extra.mkdir()
+            (extra / "a.txt").write_text("a", encoding="utf-8")
+            with mock.patch("dss_hours_tracker.get_app_root", return_value=root):
+                with mock.patch.object(sys, "argv", ["dss_hours_tracker.py", "--installer-postinstall-cleanup"]):
+                    rc = main()
+            self.assertEqual(rc, 0)
+            self.assertTrue((root / "dss_hours_tracker_config.json").is_file())
+            self.assertFalse((root / "leftover.bin").exists())
+            self.assertFalse(extra.exists())
+
     def test_is_updater_executable_path_staged_temp_name(self) -> None:
         self.assertTrue(_is_updater_executable_path(Path(r"C:\Temp\dss_tools_updater_ab12cd.exe")))
         self.assertTrue(_is_updater_executable_path(Path(r"C:\Program Files\DSS Tools\DSSToolsUpdater.exe")))

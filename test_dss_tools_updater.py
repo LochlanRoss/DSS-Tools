@@ -77,11 +77,17 @@ class TestDssToolsUpdater(unittest.TestCase):
             (root / "updates").mkdir()
             (root / "updates" / "old.exe").write_bytes(b"")
             (root / "update_handoff.log").write_text("x", encoding="utf-8")
+            (root / "DSSToolsUpdater.exe").write_bytes(b"fake")
+            stray = root / "odd_folder"
+            stray.mkdir()
+            (stray / "x.txt").write_text("y", encoding="utf-8")
             clean_transient_app_data(root, CallableLog(lines.append))
             self.assertTrue((root / "dss_hours_tracker_config.json").is_file())
             self.assertFalse(cache.exists())
             self.assertFalse((root / "updates").exists())
             self.assertFalse((root / "update_handoff.log").exists())
+            self.assertFalse((root / "DSSToolsUpdater.exe").exists())
+            self.assertFalse(stray.exists())
 
 
 if __name__ == "__main__":

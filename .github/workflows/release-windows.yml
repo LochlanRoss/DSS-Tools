@@ -111,6 +111,7 @@ jobs:
           $args = @(
             "--noconsole", "--onefile", "--name", "DSSTools",
             "--collect-all", "pywin32",
+            "--hidden-import", "dss_tools_updater",
             "--add-data", "dss_app_version.txt;.",
             "--add-binary", "dist\DSSToolsUpdater.exe;."
           )

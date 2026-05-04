@@ -46,6 +46,12 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayIcon={app}\{#MyAppExeName}
 #endif
 
+; After upgrade, wipe Program Files\{app} so no orphaned DLLs/resources remain from older builds.
+[InstallDelete]
+Type: filesandordirs; Name: "{app}"
+; Admin installs used to place shortcuts on the common desktop only; remove stale link when upgrading.
+Type: files; Name: "{commondesktop}\{#MyAppName}.lnk"
+
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
@@ -63,12 +69,13 @@ Source: "..\dss_tools.ico"; DestDir: "{app}"; DestName: "dss_tools.ico"; Flags: 
 #ifdef HasAppIco
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppExeName}"
 Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon; IconFilename: "{app}\{#MyAppExeName}"
+Name: "{userdesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon; IconFilename: "{app}\{#MyAppExeName}"
 #else
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+Name: "{userdesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 #endif
 
 [Run]
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--installer-postinstall-cleanup"; StatusMsg: "Cleaning data from previous installs..."; Flags: runhidden waituntilterminated
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
