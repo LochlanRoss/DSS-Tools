@@ -5,6 +5,11 @@ Small fixes and very short edits are intentionally omitted unless they materiall
 
 ## 2026-05-04
 
+### Windows taskbar / desktop icon vs Explorer (Tk + Shell)
+
+- **Cause:** The taskbar often ignored Tk ``iconbitmap`` and showed the generic Tcl/Python glyph; pinned shortcuts could group separately from the running process without a consistent **App User Model ID**.
+- **Fix:** Frozen builds call ``SetCurrentProcessExplicitAppUserModelID`` with **`WIN_APP_USER_MODEL_ID`** before creating the root window; after map, **WM_SETICON** loads icon resource **id 1** from the frozen exe (matches PyInstaller ``--icon``). Inno **[Icons]** sets the same string via **`AppUserModelID`** on Start-menu and desktop shortcuts so Shell and runtime agree.
+
 ### Installer: clean upgrades + personal Desktop + AppData scrub
 
 - **Desktop shortcut:** Inno now uses **`{userdesktop}`** (installing user’s profile Desktop) instead of **`{autodesktop}`**, which under **`PrivilegesRequired=admin`** targeted **Public Desktop** only—File Explorer’s personal Desktop folder showed no shortcut. **`[InstallDelete]`** removes a legacy **`{commondesktop}\DSS Tools.lnk`** on upgrade.

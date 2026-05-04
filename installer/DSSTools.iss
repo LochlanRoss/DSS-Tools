@@ -12,6 +12,8 @@
 #define MyAppName "DSS Tools"
 #define MyAppExeName "DSSTools.exe"
 #define MyAppPublisher "DSS Tools"
+; Match WIN_APP_USER_MODEL_ID in dss_hours_tracker.py (taskbar / shortcut identity).
+#define WinAppUserModelId "LochlanRoss.DSSTools.Application"
 
 #if FileExists(SourcePath + "..\dss_tools.ico")
 #define HasAppIco
@@ -67,13 +69,13 @@ Source: "..\dss_tools.ico"; DestDir: "{app}"; DestName: "dss_tools.ico"; Flags: 
 
 [Icons]
 #ifdef HasAppIco
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppExeName}"
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppExeName}"; AppUserModelID: "{#WinAppUserModelId}"
 Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
-Name: "{userdesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon; IconFilename: "{app}\{#MyAppExeName}"
+Name: "{userdesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon; IconFilename: "{app}\{#MyAppExeName}"; AppUserModelID: "{#WinAppUserModelId}"
 #else
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; AppUserModelID: "{#WinAppUserModelId}"
 Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
-Name: "{userdesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+Name: "{userdesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon; AppUserModelID: "{#WinAppUserModelId}"
 #endif
 
 [Run]

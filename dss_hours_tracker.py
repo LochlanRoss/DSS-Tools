@@ -103,6 +103,8 @@ APP_ICON_CANDIDATE_NAMES = (
     "icon.ico",
     "app.ico",
 )
+# Must match installer/DSSTools.iss {#WinAppUserModelId} on main shortcuts (taskbar / pinning).
+WIN_APP_USER_MODEL_ID = "LochlanRoss.DSSTools.Application"
 
 
 class OperationCancelled(RuntimeError):
@@ -806,6 +808,73 @@ def apply_tk_window_icon(root: tk.Misc) -> None:
             setattr(root, "_dss_app_icon_photo", photo)
         except tk.TclError:
             pass
+
+
+def _windows_set_explicit_app_user_model_id() -> None:
+    """Align this process with Shell shortcuts so pinning / taskbar reuse the branded identity."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(WIN_APP_USER_MODEL_ID)
+    except Exception:
+        pass
+
+
+def _windows_apply_pe_icon_to_hwnd(hwnd: int) -> None:
+    """Set WM_SETICON from the embedded exe icon (PyInstaller resource id 1).
+
+    Tk ``iconbitmap`` alone often leaves the Windows taskbar on the generic Tcl/Python glyph for frozen apps.
+    """
+    if os.name != "nt" or hwnd <= 0 or not getattr(sys, "frozen", False):
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    IMAGE_ICON = 1
+    LR_DEFAULTCOLOR = 0
+    WM_SETICON = 0x0080
+    ICON_SMALL = 0
+    ICON_BIG = 1
+
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    user32.SendMessageW.restype = ctypes.c_void_p
+
+    hinst = kernel32.GetModuleHandleW(None)
+    if not hinst:
+        return
+
+    def load(cx: int, cy: int) -> int:
+        h = user32.LoadImageW(hinst, ctypes.c_void_p(1), IMAGE_ICON, cx, cy, LR_DEFAULTCOLOR)
+        return int(h) if h else 0
+
+    hi_big = load(32, 32) or load(0, 0)
+    hi_small = load(16, 16)
+    if hi_big:
+        user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, hi_big)
+    if hi_small:
+        user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, hi_small)
+    elif hi_big:
+        user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, hi_big)
+
+
+def schedule_windows_taskbar_icon_from_exe(root: tk.Misc) -> None:
+    """After the Tk window exists, push PE icons to the taskbar (see :func:`_windows_apply_pe_icon_to_hwnd`)."""
+    if os.name != "nt" or not getattr(sys, "frozen", False):
+        return
+
+    def apply(_event=None) -> None:
+        try:
+            hwnd = int(root.winfo_id())
+        except (tk.TclError, ValueError, TypeError):
+            return
+        _windows_apply_pe_icon_to_hwnd(hwnd)
+
+    root.bind("<Map>", apply, add="+")
+    root.after(300, apply)
 
 
 def _shell_execute_runas_windows(executable: str, parameters: str, working_dir: str, *, show_cmd: int = 1) -> None:
@@ -4875,6 +4944,7 @@ class DssToolsApp(tk.Tk):
         super().__init__()
         self.title(DISPLAY_APP_NAME)
         apply_tk_window_icon(self)
+        schedule_windows_taskbar_icon_from_exe(self)
         self.geometry("1200x760")
         self.minsize(760, 520)
         self.app_root, self.cache_dir = ensure_app_directories()
@@ -7842,6 +7912,8 @@ def main() -> int:
         return 0
 
     initial_source = [Path(path).expanduser().resolve() for path in args.source] if args.source else None
+    if os.name == "nt" and getattr(sys, "frozen", False):
+        _windows_set_explicit_app_user_model_id()
     app = DssToolsApp(initial_source=initial_source)
     app.mainloop()
     return 0
