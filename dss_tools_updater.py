@@ -253,8 +253,17 @@ def discover_inno_dss_tools_uninstall_info() -> InnoDssToolsUninstallInfo | None
     def read_exact(root: object) -> InnoDssToolsUninstallInfo | None:
         try:
             with winreg.OpenKey(root, INNO_UNINSTALL_SUBKEY) as sub:
-                uninst = regstr(sub, "UninstallString").strip()
-                if not uninst:
+                chosen = ""
+                for key in ("UninstallString", "QuietUninstallString"):
+                    line = regstr(sub, key).strip()
+                    if not line:
+                        continue
+                    exe = parse_uninstall_executable(line)
+                    if exe is None or "unins" not in exe.name.casefold():
+                        continue
+                    chosen = line
+                    break
+                if not chosen:
                     return None
                 il_raw = regstr(sub, "InstallLocation").strip()
                 loc: Path | None = None
@@ -265,7 +274,7 @@ def discover_inno_dss_tools_uninstall_info() -> InnoDssToolsUninstallInfo | None
                             loc = cand
                     except OSError:
                         pass
-                return InnoDssToolsUninstallInfo(uninst, loc, INNO_UNINSTALL_SUBKEY)
+                return InnoDssToolsUninstallInfo(chosen, loc, INNO_UNINSTALL_SUBKEY)
         except OSError:
             return None
 
@@ -274,26 +283,29 @@ def discover_inno_dss_tools_uninstall_info() -> InnoDssToolsUninstallInfo | None
             return None
         try:
             with winreg.OpenKey(root, subkey_name) as sub:
-                uninst = regstr(sub, "UninstallString").strip()
-                if not uninst:
-                    return None
-                if not _row_matches_dss_tools_fuzzy_inno(
-                    regstr(sub, "DisplayName"),
-                    regstr(sub, "Publisher"),
-                    regstr(sub, "InstallLocation"),
-                    uninst,
-                ):
-                    return None
-                il_raw = regstr(sub, "InstallLocation").strip()
-                loc: Path | None = None
-                if il_raw:
-                    try:
-                        cand = Path(il_raw)
-                        if cand.is_dir():
-                            loc = cand
-                    except OSError:
-                        pass
-                return InnoDssToolsUninstallInfo(uninst, loc, subkey_name)
+                dname = regstr(sub, "DisplayName")
+                pub = regstr(sub, "Publisher")
+                il_raw = regstr(sub, "InstallLocation")
+                for key in ("UninstallString", "QuietUninstallString"):
+                    line = regstr(sub, key).strip()
+                    if not line:
+                        continue
+                    if not _row_matches_dss_tools_fuzzy_inno(dname, pub, il_raw, line):
+                        continue
+                    exe = parse_uninstall_executable(line)
+                    if exe is None or "unins" not in exe.name.casefold():
+                        continue
+                    il_clean = il_raw.strip()
+                    loc: Path | None = None
+                    if il_clean:
+                        try:
+                            cand = Path(il_clean)
+                            if cand.is_dir():
+                                loc = cand
+                        except OSError:
+                            pass
+                    return InnoDssToolsUninstallInfo(line, loc, subkey_name)
+                return None
         except OSError:
             return None
 
@@ -344,14 +356,48 @@ def _read_inno_uninstall_string() -> str | None:
 
 
 def parse_uninstall_executable(uninstall_string: str) -> Path | None:
+    """Resolve the first ``*.exe`` path in *uninstall_string* that exists on disk (Inno / registry quirks)."""
+    raw = os.path.expandvars((uninstall_string or "").strip())
+    if not raw:
+        return None
+
+    def try_exe_token(tok: str) -> Path | None:
+        t = tok.strip().strip('"').strip("'")
+        if not t.lower().endswith(".exe"):
+            return None
+        try:
+            p = Path(t).expanduser()
+            if p.is_file():
+                return p
+            r = p.resolve(strict=False)
+            if r.is_file():
+                return r
+        except OSError:
+            return None
+        return None
+
+    candidates: list[str] = []
     try:
-        parts = shlex.split(uninstall_string, posix=False)
+        candidates.extend(shlex.split(raw, posix=False))
     except ValueError:
-        return None
-    if not parts:
-        return None
-    candidate = Path(parts[0]).expanduser()
-    return candidate if candidate.is_file() else None
+        pass
+    # Quoted path when shlex fails or splits oddly
+    if raw.startswith('"'):
+        end = raw.find('"', 1)
+        if end > 1:
+            candidates.append(raw[1:end])
+    if not candidates and raw.split():
+        candidates.append(raw.split()[0])
+    seen: set[str] = set()
+    for tok in candidates:
+        k = tok.casefold()
+        if k in seen:
+            continue
+        seen.add(k)
+        hit = try_exe_token(tok)
+        if hit is not None:
+            return hit
+    return None
 
 
 def read_inno_install_location() -> Path | None:
@@ -487,7 +533,8 @@ def cleanup_staged_temp_artifacts(installer_path: Path) -> None:
         schedule_delete_path_windows(exe)
 
 
-def run_uninstall_silent(log: CallableLog, on_progress: Callable[[float], None] | None = None) -> int:
+def run_uninstall_silent(log: CallableLog, on_progress: Callable[[float], None] | None = None) -> tuple[int, str]:
+    """Return ``(exit_code, empty_string)`` or ``(2, user_message)`` when the uninstall path cannot be used."""
     info = discover_inno_dss_tools_uninstall_info()
     if info is None:
         log(
@@ -496,7 +543,7 @@ def run_uninstall_silent(log: CallableLog, on_progress: Callable[[float], None] 
         )
         if on_progress is not None:
             on_progress(50.0)
-        return 0
+        return 0, ""
     if info.registry_subkey_name != INNO_UNINSTALL_SUBKEY:
         log(
             f"Matched Inno uninstall via registry enumeration ({info.registry_subkey_name!r}); "
@@ -505,19 +552,25 @@ def run_uninstall_silent(log: CallableLog, on_progress: Callable[[float], None] 
     raw = info.uninstall_string
     uninst = parse_uninstall_executable(raw)
     if uninst is None:
-        log(f"Could not parse uninstall executable from: {raw!r}")
-        return 2
+        log(f"Could not parse uninstall executable from registry line: {raw!r}")
+        frag = raw if len(raw) <= 280 else raw[:280] + "…"
+        hint = (
+            "Windows listed an uninstall entry for DSS Tools, but the uninstall command is not a "
+            "usable path to an Inno unins*.exe file (or the file is missing).\n\n"
+            f"Registry fragment:\n{frag}"
+        )
+        return 2, hint
     cmd = [str(uninst), *INNO_UNINSTALL_SILENT_FLAGS]
     log(f"Running uninstall: {uninst.name} {' '.join(INNO_UNINSTALL_SILENT_FLAGS)}")
     try:
         rc = _run_command_with_smoothed_progress(cmd, 600.0, 0.0, 50.0, on_progress)
     except subprocess.TimeoutExpired:
         log("Uninstall timed out.")
-        return 1
+        return 1, ""
     log(f"Uninstall finished (exit {rc}).")
     if rc != 0:
         log("Uninstall reported a non-zero exit code; continuing with install anyway.")
-    return 0
+    return 0, ""
 
 
 def run_installer_silent(installer: Path, log: CallableLog, on_progress: Callable[[float], None] | None = None) -> int:
@@ -662,9 +715,14 @@ class UpdateMiniApp(tk.Tk):
 
         try:
             self.after(0, lambda: self._status.set("Uninstalling previous version (0–50%)…"))
-            code = run_uninstall_silent(log, report_progress)
+            code, uninstall_hint = run_uninstall_silent(log, report_progress)
             if code == 2:
-                self.after(0, lambda: self._finish_install_error("Could not parse the uninstall program from the registry.", 2))
+                self.after(
+                    0,
+                    lambda h=uninstall_hint: self._finish_install_error(
+                        h or "Could not parse the uninstall program from the registry.", 2
+                    ),
+                )
                 return
             app_root = localappdata_dss_tools_root()
             if app_root is not None:

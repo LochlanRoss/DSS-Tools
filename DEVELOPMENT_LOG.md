@@ -41,6 +41,11 @@ Small fixes and very short edits are intentionally omitted unless they materiall
 - **Cause:** ``CREATE_NO_WINDOW`` alone was not always enough when a GUI process spawned ``taskkill``, ``cmd /c …``, or Inno from ``subprocess``; a brief console host could appear.
 - **Fix:** Shared ``_windows_hidden_subprocess_kwargs()`` adds ``STARTUPINFO`` (``STARTF_USESHOWWINDOW`` + ``SW_HIDE``), null stdio for ``Popen``, and keeps ``DETACHED_PROCESS`` on the delayed temp-file delete helper.
 
+### Updater: Inno uninstall parse (code 2)
+
+- **Cause:** Fuzzy registry hits could return an ``UninstallString`` that did not resolve to a real ``unins*.exe`` on disk (or only ``QuietUninstallString`` held the path). ``shlex.split`` alone failed on some layouts.
+- **Fix:** ``parse_uninstall_executable`` expands ``%…%`` env vars, tries ``shlex`` tokens, a quoted-prefix fallback, and the first ``*.exe`` token; ``read_exact`` / ``read_fuzzy`` try **QuietUninstallString** too and only accept lines that parse to an existing ``unins*.exe``. ``run_uninstall_silent`` returns ``(code, hint)`` so the GUI shows a useful fragment instead of a generic parse error.
+
 ### Updater: Inno uninstall registry miss
 
 - **Cause:** The helper only opened the fixed subkey ``{AppId}_is1``. Older or alternate builds can register a different subkey name; a **portable** ``DSSTools.exe`` tree has **no** Uninstall entry at all. The log line *“No existing Inno uninstall entry”* was easy to read as “Inno is broken” when it really meant “expected key not found.”

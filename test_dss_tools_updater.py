@@ -64,6 +64,17 @@ class TestDssToolsUpdater(unittest.TestCase):
         self.assertIsNotNone(img)
         self.assertTrue(len(img) > 3)
 
+    def test_parse_uninstall_executable_expandvars_and_quotes(self) -> None:
+        from dss_tools_updater import parse_uninstall_executable
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_unins = Path(tmp) / "unins000.exe"
+            fake_unins.write_bytes(b"")
+            line = f'"{fake_unins}" /VERYSILENT /SUPPRESSMSGBOXES'
+            got = parse_uninstall_executable(line)
+            self.assertIsNotNone(got)
+            self.assertEqual(got.resolve(), fake_unins.resolve())
+
     def test_row_matches_dss_tools_fuzzy_inno(self) -> None:
         from dss_tools_updater import _row_matches_dss_tools_fuzzy_inno
 
