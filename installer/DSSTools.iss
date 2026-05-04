@@ -1,7 +1,8 @@
 ; Inno Setup 6 — click-through installer for DSS Tools
 ;
-; Prerequisites: PyInstaller must have built ..\dist\DSSTools.exe and ..\dist\DSSToolsUpdater.exe
-; Optional: ..\dss_tools.ico at repo root (wizard + shortcuts + uninstall entry icon)
+; Prerequisites: PyInstaller must have built ..\dist\DSSToolsUpdater.exe first, then ..\dist\DSSTools.exe
+; (main onefile embeds the updater; the installer also places DSSToolsUpdater.exe beside DSSTools.exe).
+; Requires ..\dss_tools.ico at repo root for wizard + shortcut icons (CI runs tools\ensure_dss_tools_ico.py first).
 ; Compile locally (from repo root), after PyInstaller:
 ;   "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyAppVersion=0.1.0 installer\DSSTools.iss
 ;

@@ -4,6 +4,7 @@ from pathlib import Path
 from PyInstaller.utils.hooks import collect_all
 
 _repo = Path(__file__).resolve().parent
+# Run: python tools/ensure_dss_tools_ico.py  (uses DSS-Tools Icon.png, a lone .ico, or tools/default_dss_tools.ico)
 _icon = _repo / "dss_tools.ico"
 datas = [('dss_app_version.txt', '.')]
 if _icon.is_file():
@@ -13,6 +14,10 @@ hiddenimports = []
 tmp_ret = collect_all('pywin32')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
+# Optional: build dist/DSSToolsUpdater.exe first so the main app can extract/copy it at update time.
+_bundled_updater = _repo / 'dist' / 'DSSToolsUpdater.exe'
+if _bundled_updater.is_file():
+    binaries = binaries + [(str(_bundled_updater), '.')]
 
 a = Analysis(
     ['dss_hours_tracker.py'],

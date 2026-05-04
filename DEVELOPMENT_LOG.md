@@ -5,13 +5,27 @@ Small fixes and very short edits are intentionally omitted unless they materiall
 
 ## 2026-05-04
 
+### Windows installer / taskbar / desktop icon missing on GitHub builds
+
+- **Cause:** Root **`*.png`** was gitignored, so **`DSS-Tools Icon.png`** never appeared in CI; **`dss_tools.ico`** was absent, so PyInstaller had no **`--icon`** and Inno skipped **`HasAppIco`** (shortcuts and uninstall used the generic executable look).
+- **Fix:** **`tools/ensure_dss_tools_ico.py`** builds **`dss_tools.ico`** from a lone root **`.ico`**, named PNGs (**`DSS-Tools Icon.png`**, etc.), or a single *icon* PNG; otherwise copies **`tools/default_dss_tools.ico`**. Release workflow runs this before PyInstaller. **`.gitignore`** now allows those PNG filenames to be tracked.
+- **Maintainer:** commit **`DSS-Tools Icon.png`** or **`dss_tools.ico`** at the repo root so releases use your branding instead of the placeholder.
+
 ### Reliable in-place updates (sidecar updater)
 
 - **Cause:** Post-download **Install now** spawned a hidden PowerShell wait loop, then closed the app; failures were silent (stdout/stderr discarded), so users often saw the window close with no installer.
 - **Fix:** Added **`dss_tools_updater.py`** / frozen **`DSSToolsUpdater.exe`**: waits on the parent PID via **`OpenProcess`** (locale-independent), then launches the downloaded setup with **`os.startfile`**. The main app prefers this sidecar when present beside **`DSSTools.exe`** (or runs the script via **`sys.executable`** in dev); otherwise falls back to the old PowerShell handoff with **`%LOCALAPPDATA%\DSSTools\update_handoff.log`** for command output.
 - **Packaging:** **`DSSTools.spec`**, **`installer/DSSTools.iss`**, and **`.github/workflows/release-windows.yml`** now build and ship **`DSSToolsUpdater.exe`** into the install directory.
+- **Follow-up:** Legacy PowerShell handoff showed an empty console and often failed silently; it now uses **`CREATE_NO_WINDOW`**, **`STARTUPINFO` / `SW_HIDE`**, and **`stdout/stderr` to `DEVNULL`**. The frozen **`DSSTools.exe`** build **embeds** **`DSSToolsUpdater.exe`** (`--add-binary` / spec `binaries`); at install time the app **copies** it from **`_MEIPASS`** to **`%LOCALAPPDATA%\DSSTools\`** before exit so the helper still runs after PyInstaller deletes its temp folder (portable single-file use without Inno’s second file).
 - **UX:** Manual **Check for Updates** when not on unmetered Wi‑Fi now offers **Download the installer now?** instead of only linking the release page.
 - **Tests:** **`test_dss_tools_updater.py`** (Windows-only PID checks; skipped elsewhere).
+
+### Bug report Outlook attachment & diagnostics shortcuts
+
+- **Bug:** Submit Bug Report failed with Outlook **“Cannot find this file”** (`0x80070002`) when attaching the JSON snapshot; COM is strict about path shape and some `%LOCALAPPDATA%` paths.
+- **Fix:** **`Attachments.Add(Source=…, Type=olByValue)`**, try **`GetShortPathName`** on Windows when available, then a **short-named copy under `%TEMP%`** before giving up; **`Save()`** still runs and the UI reports a **warning** with on-disk snapshot path if Outlook refuses the attachment.
+- **Settings:** Diagnostics frame adds **Sync Outlook Emails** and **Check Name Typos** (same actions as elsewhere); manual sync now explains **load DSS first** or **operation in progress** instead of doing nothing silently.
+- **Tests:** **`test_bug_report_attachment_strings_to_try`** in **`test_dss_tools.py`**.
 
 ## Logging Rule
 - Record moderate or large feature work, behavioral changes, UI workflow changes, architecture changes, persistence changes, diagnostics, packaging, caching, and integration work.

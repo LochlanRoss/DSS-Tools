@@ -15,9 +15,17 @@ Desktop GUI for opening one or more DSS `.xlsx` workbooks, extracting labour hou
 
 ## Application icon (Windows)
 
-Put a **`.ico`** file in the repository root. The app looks for, in order: **`dss_tools.ico`**, `DSSTools.ico`, `app_icon.ico`, `icon.ico`, `app.ico`. If none of those exist but there is **exactly one** `*.ico` in the root, that file is used when you run **`python dss_hours_tracker.py`** (window / taskbar icon).
+**Why shortcuts / taskbar showed a generic icon:** the GitHub release build only picks up an icon if **`dss_tools.ico`** exists at the repo root when CI runs. A root **`DSS-Tools Icon.png`** was ignored by `.gitignore` (`*.png`), so it never reached Actions—PyInstaller had no `--icon` and Inno had no `SetupIconFile`.
 
-**PyInstaller** and **Inno Setup** use **`dss_tools.ico`** in the repo root: either save your artwork under that name, or copy any single root `*.ico` to `dss_tools.ico` before building. The release workflow copies a lone `*.ico` to `dss_tools.ico` automatically when `dss_tools.ico` is not already present.
+**What to do:** track **one** of these at the repository root (they are un-ignored in `.gitignore`):
+
+- **`dss_tools.ico`** (best for Windows—include 16–256 px sizes), or  
+- **`DSS-Tools Icon.png`**, **`dss_tools.png`**, or **`DSSTools Icon.png`** (CI converts PNG → multi-size `dss_tools.ico` with Pillow), or  
+- **exactly one** other `*.ico` file in the root (it is copied to `dss_tools.ico`).
+
+If none of those are present, CI copies a small **placeholder** from `tools/default_dss_tools.ico` so the installer still gets a real icon—replace it with your artwork using one of the options above.
+
+When you run **`python dss_hours_tracker.py`**, the window looks for, in order: **`dss_tools.ico`**, `DSSTools.ico`, `app_icon.ico`, `icon.ico`, `app.ico`, then a **single** root `*.ico`. Before packaging you can run **`python tools/ensure_dss_tools_ico.py`** to refresh `dss_tools.ico` from a tracked PNG.
 
 ## Run
 
@@ -97,7 +105,7 @@ The app uses grouped navigation with two tab rows:
 - Multi-file loads prefer **newer files first** (by filesystem modified time); the parser can emit an early partial preview while older workbooks are still loading
 - Same-file updates are skipped when the **DSS semantic hash** (dated sheets and `K25:AZ36` only) is unchanged; per-sheet digests allow **partial refresh** when only some dated sheets change
 - Parsed DSS data is cached on disk for up to 7 days
-- Optional **GitHub release** update check; automatic download on unmetered Wi‑Fi; **Check for Updates** can download on other networks when you confirm; after download, **Install now** hands off to a small **`DSSToolsUpdater.exe`** next to the main app (waits for DSS Tools to exit, then starts the installer). Legacy installs without the updater still use a PowerShell handoff and append diagnostics to **`update_handoff.log`** under `%LOCALAPPDATA%\DSSTools` when that path is used.
+- Optional **GitHub release** update check; automatic download on unmetered Wi‑Fi; **Check for Updates** can download on other networks when you confirm; after download, **Install now** runs **`DSSToolsUpdater.exe`** (waits for DSS Tools to exit, then starts the installer). Current frozen builds **embed** that helper and copy it under **`%LOCALAPPDATA%\DSSTools\`** on first use so a single **`DSSTools.exe`** still updates reliably; Inno installs also ship the updater next to the main exe. Only very old builds fall back to a hidden PowerShell wait plus a short line in **`update_handoff.log`**.
 - Loaded DSS files are checked periodically in the background for changes
 - Revision sheets such as `R1` / `rev 2` override the non-revised sheet for the same date
 - Conditional highlighting uses saved job-specific formatting profiles
@@ -284,6 +292,8 @@ git push origin 0.2.0
 ```
 
 ### Local build (PyInstaller + Inno wizard)
+
+0. **Icon (recommended):** `pip install pillow` then `python tools/ensure_dss_tools_ico.py` so **`dss_tools.ico`** exists at the repo root (from **`DSS-Tools Icon.png`**, a lone **`.ico`**, or the built-in placeholder).
 
 1. **One-file app** (same flags as CI; version from tag in CI is simulated here with `dss_app_version.txt`):
 

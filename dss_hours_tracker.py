@@ -10,6 +10,7 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -2120,16 +2121,70 @@ def build_bug_report_html(
     )
 
 
+# OlAttachmentType.olByValue — file is embedded; Outlook is picky about Source paths (Unicode, length).
+_OUTLOOK_ATTACHMENT_BY_VALUE = 1
+
+
+def _bug_report_attachment_strings_to_try(snapshot_path: Path) -> tuple[list[str], list[Path]]:
+    """Return path strings to try with ``Attachments.Add``, plus temp copies to delete after ``Save()``."""
+    cleanup: list[Path] = []
+    resolved = snapshot_path.expanduser().resolve()
+    if not resolved.is_file():
+        raise OSError(f"Bug report snapshot is not readable: {resolved}")
+    ordered: list[str] = []
+    seen_norm: set[str] = set()
+
+    def push(path_str: str) -> None:
+        key = os.path.normcase(path_str)
+        if key in seen_norm:
+            return
+        seen_norm.add(key)
+        ordered.append(path_str)
+
+    primary = os.path.normpath(str(resolved))
+    if os.name == "nt":
+        try:
+            import win32api
+
+            primary = win32api.GetShortPathName(primary)
+        except Exception:
+            pass
+    push(primary)
+
+    temp_path = Path(tempfile.gettempdir()) / f"dssbug_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}.json"
+    shutil.copy2(resolved, temp_path)
+    cleanup.append(temp_path)
+    alt = os.path.normpath(str(temp_path))
+    if os.name == "nt":
+        try:
+            import win32api
+
+            alt = win32api.GetShortPathName(alt)
+        except Exception:
+            pass
+    push(alt)
+
+    if os.name == "nt":
+        for candidate in list(ordered):
+            if "\\" in candidate:
+                push(candidate.replace("\\", "/"))
+
+    return ordered, cleanup
+
+
 def create_bug_report_draft(
     recipient_email: str,
     subject: str,
     html_body: str,
     attachment_path: Path | None = None,
-) -> None:
+) -> str | None:
+    """Create a saved Outlook draft. Returns a warning string if the snapshot could not be attached."""
     if pythoncom is None or win32com is None:
         raise RuntimeError("Bug report draft creation requires desktop Outlook with pywin32 available.")
 
     pythoncom.CoInitialize()
+    cleanup_paths: list[Path] = []
+    attachment_warning: str | None = None
     try:
         try:
             outlook = win32com.client.Dispatch("Outlook.Application")
@@ -2139,12 +2194,40 @@ def create_bug_report_draft(
         mail_item = outlook.CreateItem(0)
         mail_item.To = recipient_email
         mail_item.Subject = subject
+
+        if attachment_path is not None and Path(attachment_path).exists():
+            path_strings: list[str] = []
+            try:
+                path_strings, cleanup_paths = _bug_report_attachment_strings_to_try(Path(attachment_path))
+            except OSError as exc:
+                attachment_warning = f"Could not prepare the diagnostic file for Outlook: {exc}"
+            last_error: str | None = None
+            attached = False
+            for candidate in path_strings:
+                try:
+                    mail_item.Attachments.Add(candidate, _OUTLOOK_ATTACHMENT_BY_VALUE)
+                    attached = True
+                    break
+                except Exception as exc:
+                    last_error = str(exc)
+            if path_strings and not attached:
+                attachment_warning = (
+                    "Outlook could not attach the diagnostic snapshot (path or permission issue). "
+                    "The draft was saved without an attachment; use Export Diagnostic Snapshot and attach that file manually.\n\n"
+                    f"Technical detail: {last_error or 'Unknown COM error'}"
+                )
+
         mail_item.HTMLBody = html_body
-        if attachment_path is not None and attachment_path.exists():
-            mail_item.Attachments.Add(str(attachment_path))
         mail_item.Save()
     finally:
+        for temp in cleanup_paths:
+            try:
+                temp.unlink(missing_ok=True)
+            except OSError:
+                pass
         pythoncom.CoUninitialize()
+
+    return attachment_warning
 
 
 def create_outlook_drafts(
@@ -5121,8 +5204,14 @@ class DssToolsApp(tk.Tk):
         ttk.Button(diagnostics, text="Check for Updates", command=self._check_for_updates).grid(
             row=2, column=1, sticky="w", padx=(12, 0), pady=(8, 0)
         )
+        ttk.Button(diagnostics, text="Sync Outlook Emails", command=lambda: self.sync_outlook_emails(manual=True)).grid(
+            row=3, column=0, sticky="w", pady=(8, 0)
+        )
+        ttk.Button(diagnostics, text="Check Name Typos", command=self._check_name_typos_manually).grid(
+            row=3, column=1, sticky="w", padx=(12, 0), pady=(8, 0)
+        )
         ttk.Label(diagnostics, textvariable=self.update_status_var, wraplength=700, justify="left").grid(
-            row=3, column=0, columnspan=2, sticky="w", pady=(8, 0)
+            row=4, column=0, columnspan=2, sticky="w", pady=(8, 0)
         )
 
         note = (
@@ -5744,18 +5833,37 @@ class DssToolsApp(tk.Tk):
         elif manual:
             messagebox.showinfo("Update Download", f"The installer is ready at:\n{destination}")
 
+    def _updater_exe_for_handoff(self) -> Path | None:
+        """Resolve ``DSSToolsUpdater.exe``: install dir, materialized from the frozen bundle, or None."""
+        if os.name != "nt":
+            return None
+        sibling = Path(sys.executable).resolve().parent / UPDATER_EXE_NAME
+        if sibling.is_file():
+            return sibling
+        if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+            bundled = Path(sys._MEIPASS) / UPDATER_EXE_NAME
+            if bundled.is_file():
+                dest = self.app_root / UPDATER_EXE_NAME
+                try:
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(bundled, dest)
+                except OSError:
+                    return None
+                return dest if dest.is_file() else None
+        return None
+
     def _resolve_updater_handoff_argv(self, installer_path: Path) -> list[str] | None:
         """Return argv to run the sidecar updater, or None if unavailable (legacy handoff)."""
         inst = installer_path.resolve()
         if os.name != "nt":
             return None
-        if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-            sibling = Path(sys.executable).resolve().parent / UPDATER_EXE_NAME
-            if sibling.is_file():
-                return [str(sibling), str(inst), str(os.getpid())]
-        dev_script = Path(__file__).resolve().parent / "dss_tools_updater.py"
-        if dev_script.is_file():
-            return [sys.executable, str(dev_script), str(inst), str(os.getpid())]
+        updater_exe = self._updater_exe_for_handoff()
+        if updater_exe is not None:
+            return [str(updater_exe.resolve()), str(inst), str(os.getpid())]
+        if not getattr(sys, "frozen", False):
+            dev_script = Path(__file__).resolve().parent / "dss_tools_updater.py"
+            if dev_script.is_file():
+                return [sys.executable, str(dev_script), str(inst), str(os.getpid())]
         return None
 
     def _launch_update_installer(self, installer_path: Path) -> None:
@@ -5789,20 +5897,35 @@ class DssToolsApp(tk.Tk):
         command = f"while (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ Start-Sleep -Milliseconds 500 }}; Start-Process -FilePath '{escaped_path}'"
         log_path = self.app_root / "update_handoff.log"
         try:
-            log_handle = log_path.open("a", encoding="utf-8")
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a", encoding="utf-8") as log_handle:
+                log_handle.write(
+                    f"\n---\n{datetime.now().isoformat(timespec='seconds')} legacy PowerShell handoff pid={pid}\n"
+                )
         except OSError:
-            log_handle = subprocess.DEVNULL
+            pass
+        creationflags = 0
+        startupinfo = None
+        if os.name == "nt":
+            creationflags = (
+                getattr(subprocess, "DETACHED_PROCESS", 0)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            )
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
         try:
             subprocess.Popen(
                 ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", command],
-                stdout=log_handle,
-                stderr=subprocess.STDOUT,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 stdin=subprocess.DEVNULL,
                 close_fds=False,
+                creationflags=creationflags,
+                startupinfo=startupinfo,
             )
         except OSError as exc:
-            if hasattr(log_handle, "close"):
-                log_handle.close()
             messagebox.showerror("Install Update", f"Could not launch the installer.\n\n{exc}")
             return
         self.destroy()
@@ -5820,7 +5943,7 @@ class DssToolsApp(tk.Tk):
                 loaded_sources,
                 cache_status_by_path,
             )
-            create_bug_report_draft(
+            attach_warn = create_bug_report_draft(
                 BUG_REPORT_EMAIL,
                 subject,
                 html_body,
@@ -5830,11 +5953,19 @@ class DssToolsApp(tk.Tk):
             messagebox.showerror("Submit Bug Report", f"Could not create the bug report draft.\n\n{exc}")
             return
 
-        messagebox.showinfo(
-            "Submit Bug Report",
-            "Created an Outlook draft bug report addressed to "
-            f"{BUG_REPORT_EMAIL} and attached a diagnostic snapshot.",
-        )
+        if attach_warn:
+            messagebox.showwarning(
+                "Submit Bug Report",
+                "Created an Outlook draft bug report addressed to "
+                f"{BUG_REPORT_EMAIL}.\n\n{attach_warn}\n\n"
+                f"Snapshot on disk:\n{snapshot_path}",
+            )
+        else:
+            messagebox.showinfo(
+                "Submit Bug Report",
+                "Created an Outlook draft bug report addressed to "
+                f"{BUG_REPORT_EMAIL} and attached a diagnostic snapshot.",
+            )
 
     def _refresh_data_tabs(self) -> None:
         current_tabs = set(self.data_notebook.tabs())
@@ -6348,7 +6479,16 @@ class DssToolsApp(tk.Tk):
             self.sync_outlook_emails(manual=False)
 
     def sync_outlook_emails(self, manual: bool = True) -> None:
-        if self.current_data is None or self._outlook_sync_in_progress or self._cancel_event is not None:
+        if self.current_data is None:
+            if manual:
+                messagebox.showinfo("Outlook Email Sync", "Load DSS data first.")
+            return
+        if self._outlook_sync_in_progress or self._cancel_event is not None:
+            if manual:
+                messagebox.showinfo(
+                    "Outlook Email Sync",
+                    "Another operation is in progress (for example Outlook sync or DSS loading). Try again when it finishes.",
+                )
             return
 
         missing_names = [

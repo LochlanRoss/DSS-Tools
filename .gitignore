@@ -23,6 +23,9 @@ Thumbs.db
 *.exe
 *.dll
 *.png
+!dss_tools.png
+!DSS-Tools Icon.png
+!DSSTools Icon.png
 *.jpg
 *.mp4
 *.xlsx

@@ -8,6 +8,8 @@ Workbook / load_tracker_data / cache integration tests live in
 """
 
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from datetime import date
@@ -17,6 +19,7 @@ from unittest import mock
 from dss_hours_tracker import (
     AppSettings,
     DEFAULT_UI_THEME,
+    _bug_report_attachment_strings_to_try,
     binding_sequence_from_keypress_event,
     az2_revision_matches_sheet_name,
     build_bug_report_html,
@@ -532,6 +535,57 @@ class DssToolsTests(DssToolsFixtures):
         self.assertIn("Alpha.xlsx", html)
         self.assertIn("Disk Hit", html)
         self.assertIn("DSS Tools", html)
+
+    def test_bug_report_attachment_strings_to_try(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            snap = Path(tmp) / "diagnostic_snapshot.json"
+            snap.write_text('{"ok": true}', encoding="utf-8")
+            strings, cleanup = _bug_report_attachment_strings_to_try(snap)
+            self.assertGreaterEqual(len(strings), 1)
+            self.assertEqual(len(cleanup), 1)
+            self.assertTrue(cleanup[0].is_file())
+            self.assertEqual(cleanup[0].read_text(encoding="utf-8"), '{"ok": true}')
+            for path in cleanup:
+                path.unlink(missing_ok=True)
+
+    def test_ensure_dss_tools_ico_script_uses_fallback_in_empty_repo(self) -> None:
+        script = Path(__file__).resolve().parent / "tools" / "ensure_dss_tools_ico.py"
+        fallback = Path(__file__).resolve().parent / "tools" / "default_dss_tools.ico"
+        if not script.is_file() or not fallback.is_file():
+            self.skipTest("packaged icon tooling not present")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proc = subprocess.run(
+                [sys.executable, str(script), "--repo", str(root)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, msg=proc.stderr + proc.stdout)
+            self.assertTrue((root / "dss_tools.ico").is_file())
+
+    def test_ensure_dss_tools_ico_script_prefers_png_when_present(self) -> None:
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest("pillow not installed")
+        script = Path(__file__).resolve().parent / "tools" / "ensure_dss_tools_ico.py"
+        if not script.is_file():
+            self.skipTest("ensure_dss_tools_ico.py not present")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            png = root / "dss_tools.png"
+            Image.new("RGBA", (64, 48), (200, 40, 40, 255)).save(png, format="PNG")
+            proc = subprocess.run(
+                [sys.executable, str(script), "--repo", str(root)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, msg=proc.stderr + proc.stdout)
+            ico = root / "dss_tools.ico"
+            self.assertTrue(ico.is_file())
+            self.assertGreater(ico.stat().st_size, 100)
 
     def test_get_app_root_uses_localappdata_when_available(self) -> None:
         with mock.patch.dict(os.environ, {"LOCALAPPDATA": r"C:\Temp\AppData"}, clear=False):
