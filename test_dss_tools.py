@@ -21,10 +21,12 @@ from dss_hours_tracker import (
     DEFAULT_UI_THEME,
     OUTLOOK_NAME_RULE_LABEL,
     _bug_report_attachment_strings_to_try,
+    build_employee_email_list_label,
     _is_updater_executable_path,
     binding_sequence_from_keypress_event,
     az2_revision_matches_sheet_name,
     build_bug_report_html,
+    create_bug_report_draft,
     checksum_for_asset_name,
     choose_release_checksum_asset,
     choose_release_installer_asset,
@@ -34,6 +36,7 @@ from dss_hours_tracker import (
     parse_checksum_manifest,
     parse_latest_release_payload,
     compute_bytes_hash,
+    format_email_address_display,
     combine_sheet_hashes,
     load_ignored_name_typos,
     pf_numbers_for_records,
@@ -646,6 +649,65 @@ class DssToolsTests(DssToolsFixtures):
             self.assertEqual(cleanup[0].read_text(encoding="utf-8"), '{"ok": true}')
             for path in cleanup:
                 path.unlink(missing_ok=True)
+
+    def test_format_email_address_display_marks_missing(self) -> None:
+        self.assertEqual(format_email_address_display("person@example.com"), ("person@example.com", False))
+        self.assertEqual(format_email_address_display("   "), ("(missing) ?", True))
+
+    def test_build_employee_email_list_label_marks_missing(self) -> None:
+        self.assertEqual(
+            build_employee_email_list_label("Alice Smith", ""),
+            ("Alice Smith | (missing) ?", True),
+        )
+
+    def test_create_bug_report_draft_retries_without_attachment_when_save_fails(self) -> None:
+        class FakeAttachments:
+            def __init__(self) -> None:
+                self.paths: list[str] = []
+
+            def Add(self, path: str, _mode: int) -> None:
+                self.paths.append(path)
+
+        class FakeMailItem:
+            def __init__(self) -> None:
+                self.To = ""
+                self.Subject = ""
+                self.HTMLBody = ""
+                self.Attachments = FakeAttachments()
+                self.saved = False
+
+            def Save(self) -> None:
+                if self.Attachments.paths:
+                    raise RuntimeError("Path does not exist")
+                self.saved = True
+
+        class FakeOutlook:
+            def __init__(self) -> None:
+                self.items: list[FakeMailItem] = []
+
+            def CreateItem(self, _kind: int) -> FakeMailItem:
+                item = FakeMailItem()
+                self.items.append(item)
+                return item
+
+        fake_outlook = FakeOutlook()
+        fake_dispatch = mock.Mock(return_value=fake_outlook)
+        fake_pythoncom = mock.Mock()
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot = Path(tmp) / "diagnostic_snapshot.json"
+            snapshot.write_text('{"ok": true}', encoding="utf-8")
+            with mock.patch("dss_hours_tracker.pythoncom", fake_pythoncom), mock.patch("dss_hours_tracker.win32com") as fake_win32com:
+                fake_win32com.client.Dispatch = fake_dispatch
+                warning = create_bug_report_draft(
+                    "lross@jatechpowersystems.com",
+                    "Bug",
+                    "<p>Body</p>",
+                    attachment_path=snapshot,
+                )
+        self.assertIsNotNone(warning)
+        self.assertEqual(len(fake_outlook.items), 2)
+        self.assertTrue(fake_outlook.items[-1].saved)
+        self.assertIn("saved without the attachment", warning or "")
 
     def test_ensure_dss_tools_ico_script_uses_fallback_in_empty_repo(self) -> None:
         script = Path(__file__).resolve().parent / "tools" / "ensure_dss_tools_ico.py"

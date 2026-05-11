@@ -6,3 +6,878 @@ There is a bug with the revision counting. Some sheets are not showing as revs w
 
 
 The create bug report button does not work and is bugged. "Could not create the bug repott draft. (-2147352567, 'Exception occurred,•, (4096, 'Microsoft Outlook', 'Path does not exist. Verify the path is correct.•, None, O, -2147024893), None)"
+
+The following is the console output of problems in the DSS hours tracker.py:
+
+[{
+	"resource": "/c:/Users/LochlanRoss/Documents/GitHub/DSS Viewer/dss_hours_tracker.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportAttributeAccessIssue",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportAttributeAccessIssue.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 8,
+	"message": "\"_MEIPASS\" is not a known attribute of module \"sys\"",
+	"source": "Pylance",
+	"startLineNumber": 775,
+	"startColumn": 31,
+	"endLineNumber": 775,
+	"endColumn": 39,
+	"modelVersionId": 1,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Users/LochlanRoss/Documents/GitHub/DSS Viewer/dss_hours_tracker.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportAttributeAccessIssue",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportAttributeAccessIssue.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 8,
+	"message": "Cannot access attribute \"iconbitmap\" for class \"Misc\"\n  Attribute \"iconbitmap\" is unknown",
+	"source": "Pylance",
+	"startLineNumber": 800,
+	"startColumn": 18,
+	"endLineNumber": 800,
+	"endColumn": 28,
+	"modelVersionId": 1,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Users/LochlanRoss/Documents/GitHub/DSS Viewer/dss_hours_tracker.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportAttributeAccessIssue",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportAttributeAccessIssue.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 8,
+	"message": "Cannot access attribute \"iconphoto\" for class \"Misc\"\n  Attribute \"iconphoto\" is unknown",
+	"source": "Pylance",
+	"startLineNumber": 807,
+	"startColumn": 18,
+	"endLineNumber": 807,
+	"endColumn": 27,
+	"modelVersionId": 1,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Users/LochlanRoss/Documents/GitHub/DSS Viewer/dss_hours_tracker.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportArgumentType",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportArgumentType.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 8,
+	"message": "Argument of type \"object\" cannot be assigned to parameter \"x\" of type \"ConvertibleToFloat\" in function \"__new__\"\n  Type \"object\" is not assignable to type \"ConvertibleToFloat\"\n    \"object\" is not assignable to \"str\"\n    \"object\" is incompatible with protocol \"Buffer\"\n      \"__buffer__\" is not present\n    \"object\" is incompatible with protocol \"SupportsFloat\"\n      \"__float__\" is not present\n    \"object\" is incompatible with protocol \"SupportsIndex\"\n      \"__index__\" is not present",
+	"source": "Pylance",
+	"startLineNumber": 1823,
+	"startColumn": 34,
+	"endLineNumber": 1823,
+	"endColumn": 46,
+	"modelVersionId": 1,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Users/LochlanRoss/Documents/GitHub/DSS Viewer/dss_hours_tracker.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportArgumentType",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportArgumentType.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 8,
+	"message": "Argument of type \"object\" cannot be assigned to parameter \"x\" of type \"ConvertibleToFloat\" in function \"__new__\"\n  Type \"object\" is not assignable to type \"ConvertibleToFloat\"\n    \"object\" is not assignable to \"str\"\n    \"object\" is incompatible with protocol \"Buffer\"\n      \"__buffer__\" is not present\n    \"object\" is incompatible with protocol \"SupportsFloat\"\n      \"__float__\" is not present\n    \"object\" is incompatible with protocol \"SupportsIndex\"\n      \"__index__\" is not present",
+	"source": "Pylance",
+	"startLineNumber": 1824,
+	"startColumn": 34,
+	"endLineNumber": 1824,
+	"endColumn": 46,
+	"modelVersionId": 1,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Users/LochlanRoss/Documents/GitHub/DSS Viewer/dss_hours_tracker.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportArgumentType",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportArgumentType.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 8,
+	"message": "Argument of type \"object\" cannot be assigned to parameter \"x\" of type \"ConvertibleToFloat\" in function \"__new__\"\n  Type \"object\" is not assignable to type \"ConvertibleToFloat\"\n    \"object\" is not assignable to \"str\"\n    \"object\" is incompatible with protocol \"Buffer\"\n      \"__buffer__\" is not present\n    \"object\" is incompatible with protocol \"SupportsFloat\"\n      \"__float__\" is not present\n    \"object\" is incompatible with protocol \"SupportsIndex\"\n      \"__index__\" is not present",
+	"source": "Pylance",
+	"startLineNumber": 1825,
+	"startColumn": 34,
+	"endLineNumber": 1825,
+	"endColumn": 46,
+	"modelVersionId": 1,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Users/LochlanRoss/Documents/GitHub/DSS Viewer/dss_hours_tracker.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportArgumentType",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportArgumentType.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 8,
+	"message": "Argument of type \"object\" cannot be assigned to parameter \"x\" of type \"ConvertibleToFloat\" in function \"__new__\"\n  Type \"object\" is not assignable to type \"ConvertibleToFloat\"\n    \"object\" is not assignable to \"str\"\n    \"object\" is incompatible with protocol \"Buffer\"\n      \"__buffer__\" is not present\n    \"object\" is incompatible with protocol \"SupportsFloat\"\n      \"__float__\" is not present\n    \"object\" is incompatible with protocol \"SupportsIndex\"\n      \"__index__\" is not present",
+	"source": "Pylance",
+	"startLineNumber": 1832,
+	"startColumn": 37,
+	"endLineNumber": 1832,
+	"endColumn": 46,
+	"modelVersionId": 1,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Users/LochlanRoss/Documents/GitHub/DSS Viewer/dss_hours_tracker.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportArgumentType",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportArgumentType.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 8,
+	"message": "Argument of type \"object\" cannot be assigned to parameter \"x\" of type \"ConvertibleToFloat\" in function \"__new__\"\n  Type \"object\" is not assignable to type \"ConvertibleToFloat\"\n    \"object\" is not assignable to \"str\"\n    \"object\" is incompatible with protocol \"Buffer\"\n      \"__buffer__\" is not present\n    \"object\" is incompatible with protocol \"SupportsFloat\"\n      \"__float__\" is not present\n    \"object\" is incompatible with protocol \"SupportsIndex\"\n      \"__index__\" is not present",
+	"source": "Pylance",
+	"startLineNumber": 1833,
+	"startColumn": 37,
+	"endLineNumber": 1833,
+	"endColumn": 46,
+	"modelVersionId": 1,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Users/LochlanRoss/Documents/GitHub/DSS Viewer/dss_hours_tracker.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportAttributeAccessIssue",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportAttributeAccessIssue.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 8,
+	"message": "Cannot access attribute \"isoformat\" for class \"object\"\n  Attribute \"isoformat\" is unknown",
+	"source": "Pylance",
+	"startLineNumber": 1837,
+	"startColumn": 32,
+	"endLineNumber": 1837,
+	"endColumn": 41,
+	"modelVersionId": 1,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Users/LochlanRoss/Documents/GitHub/DSS Viewer/dss_hours_tracker.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportArgumentType",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportArgumentType.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 8,
+	"message": "Argument of type \"object\" cannot be assigned to parameter \"x\" of type \"ConvertibleToFloat\" in function \"__new__\"\n  Type \"object\" is not assignable to type \"ConvertibleToFloat\"\n    \"object\" is not assignable to \"str\"\n    \"object\" is incompatible with protocol \"Buffer\"\n      \"__buffer__\" is not present\n    \"object\" is incompatible with protocol \"SupportsFloat\"\n      \"__float__\" is not present\n    \"object\" is incompatible with protocol \"SupportsIndex\"\n      \"__index__\" is not present",
+	"source": "Pylance",
+	"startLineNumber": 1838,
+	"startColumn": 39,
+	"endLineNumber": 1838,
+	"endColumn": 48,
+	"modelVersionId": 1,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Users/LochlanRoss/Documents/GitHub/DSS Viewer/dss_hours_tracker.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportArgumentType",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportArgumentType.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 8,
+	"message": "Argument of type \"object\" cannot be assigned to parameter \"x\" of type \"ConvertibleToFloat\" in function \"__new__\"\n  Type \"object\" is not assignable to type \"ConvertibleToFloat\"\n    \"object\" is not assignable to \"str\"\n    \"object\" is incompatible with protocol \"Buffer\"\n      \"__buffer__\" is not present\n    \"object\" is incompatible with protocol \"SupportsFloat\"\n      \"__float__\" is not present\n    \"object\" is incompatible with protocol \"SupportsIndex\"\n      \"__index__\" is not present",
+	"source": "Pylance",
+	"startLineNumber": 1839,
+	"startColumn": 39,
+	"endLineNumber": 1839,
+	"endColumn": 48,
+	"modelVersionId": 1,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Users/LochlanRoss/Documents/GitHub/DSS Viewer/dss_hours_tracker.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportArgumentType",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportArgumentType.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 8,
+	"message": "Argument of type \"object\" cannot be assigned to parameter \"x\" of type \"ConvertibleToFloat\" in function \"__new__\"\n  Type \"object\" is not assignable to type \"ConvertibleToFloat\"\n    \"object\" is not assignable to \"str\"\n    \"object\" is incompatible with protocol \"Buffer\"\n      \"__buffer__\" is not present\n    \"object\" is incompatible with protocol \"SupportsFloat\"\n      \"__float__\" is not present\n    \"object\" is incompatible with protocol \"SupportsIndex\"\n      \"__index__\" is not present",
+	"source": "Pylance",
+	"startLineNumber": 1840,
+	"startColumn": 39,
+	"endLineNumber": 1840,
+	"endColumn": 48,
+	"modelVersionId": 1,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Users/LochlanRoss/Documents/GitHub/DSS Viewer/dss_hours_tracker.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportArgumentType",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportArgumentType.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 8,
+	"message": "Argument of type \"object\" cannot be assigned to parameter \"x\" of type \"ConvertibleToFloat\" in function \"__new__\"\n  Type \"object\" is not assignable to type \"ConvertibleToFloat\"\n    \"object\" is not assignable to \"str\"\n    \"object\" is incompatible with protocol \"Buffer\"\n      \"__buffer__\" is not present\n    \"object\" is incompatible with protocol \"SupportsFloat\"\n      \"__float__\" is not present\n    \"object\" is incompatible with protocol \"SupportsIndex\"\n      \"__index__\" is not present",
+	"source": "Pylance",
+	"startLineNumber": 1854,
+	"startColumn": 37,
+	"endLineNumber": 1854,
+	"endColumn": 59,
+	"modelVersionId": 1,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Users/LochlanRoss/Documents/GitHub/DSS Viewer/dss_hours_tracker.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportArgumentType",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportArgumentType.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 8,
+	"message": "Argument of type \"object\" cannot be assigned to parameter \"x\" of type \"ConvertibleToFloat\" in function \"__new__\"\n  Type \"object\" is not assignable to type \"ConvertibleToFloat\"\n    \"object\" is not assignable to \"str\"\n    \"object\" is incompatible with protocol \"Buffer\"\n      \"__buffer__\" is not present\n    \"object\" is incompatible with protocol \"SupportsFloat\"\n      \"__float__\" is not present\n    \"object\" is incompatible with protocol \"SupportsIndex\"\n      \"__index__\" is not present",
+	"source": "Pylance",
+	"startLineNumber": 1873,
+	"startColumn": 48,
+	"endLineNumber": 1873,
+	"endColumn": 65,
+	"modelVersionId": 1,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Users/LochlanRoss/Documents/GitHub/DSS Viewer/dss_hours_tracker.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportArgumentType",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportArgumentType.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 8,
+	"message": "Argument of type \"object\" cannot be assigned to parameter \"x\" of type \"ConvertibleToFloat\" in function \"__new__\"\n  Type \"object\" is not assignable to type \"ConvertibleToFloat\"\n    \"object\" is not assignable to \"str\"\n    \"object\" is incompatible with protocol \"Buffer\"\n      \"__buffer__\" is not present\n    \"object\" is incompatible with protocol \"SupportsFloat\"\n      \"__float__\" is not present\n    \"object\" is incompatible with protocol \"SupportsIndex\"\n      \"__index__\" is not present",
+	"source": "Pylance",
+	"startLineNumber": 1874,
+	"startColumn": 48,
+	"endLineNumber": 1874,
+	"endColumn": 65,
+	"modelVersionId": 1,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Users/LochlanRoss/Documents/GitHub/DSS Viewer/dss_hours_tracker.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportArgumentType",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportArgumentType.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 8,
+	"message": "Argument of type \"object\" cannot be assigned to parameter \"x\" of type \"ConvertibleToFloat\" in function \"__new__\"\n  Type \"object\" is not assignable to type \"ConvertibleToFloat\"\n    \"object\" is not assignable to \"str\"\n    \"object\" is incompatible with protocol \"Buffer\"\n      \"__buffer__\" is not present\n    \"object\" is incompatible with protocol \"SupportsFloat\"\n      \"__float__\" is not present\n    \"object\" is incompatible with protocol \"SupportsIndex\"\n      \"__index__\" is not present",
+	"source": "Pylance",
+	"startLineNumber": 1875,
+	"startColumn": 48,
+	"endLineNumber": 1875,
+	"endColumn": 65,
+	"modelVersionId": 1,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Users/LochlanRoss/Documents/GitHub/DSS Viewer/dss_hours_tracker.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportArgumentType",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportArgumentType.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 8,
+	"message": "Argument of type \"object\" cannot be assigned to parameter \"x\" of type \"ConvertibleToFloat\" in function \"__new__\"\n  Type \"object\" is not assignable to type \"ConvertibleToFloat\"\n    \"object\" is not assignable to \"str\"\n    \"object\" is incompatible with protocol \"Buffer\"\n      \"__buffer__\" is not present\n    \"object\" is incompatible with protocol \"SupportsFloat\"\n      \"__float__\" is not present\n    \"object\" is incompatible with protocol \"SupportsIndex\"\n      \"__index__\" is not present",
+	"source": "Pylance",
+	"startLineNumber": 1883,
+	"startColumn": 34,
+	"endLineNumber": 1883,
+	"endColumn": 43,
+	"modelVersionId": 1,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Users/LochlanRoss/Documents/GitHub/DSS Viewer/dss_hours_tracker.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportArgumentType",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportArgumentType.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 8,
+	"message": "Argument of type \"object\" cannot be assigned to parameter \"x\" of type \"ConvertibleToFloat\" in function \"__new__\"\n  Type \"object\" is not assignable to type \"ConvertibleToFloat\"\n    \"object\" is not assignable to \"str\"\n    \"object\" is incompatible with protocol \"Buffer\"\n      \"__buffer__\" is not present\n    \"object\" is incompatible with protocol \"SupportsFloat\"\n      \"__float__\" is not present\n    \"object\" is incompatible with protocol \"SupportsIndex\"\n      \"__index__\" is not present",
+	"source": "Pylance",
+	"startLineNumber": 1884,
+	"startColumn": 34,
+	"endLineNumber": 1884,
+	"endColumn": 43,
+	"modelVersionId": 1,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Users/LochlanRoss/Documents/GitHub/DSS Viewer/dss_hours_tracker.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportArgumentType",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportArgumentType.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 8,
+	"message": "Argument of type \"object\" cannot be assigned to parameter \"x\" of type \"ConvertibleToFloat\" in function \"__new__\"\n  Type \"object\" is not assignable to type \"ConvertibleToFloat\"\n    \"object\" is not assignable to \"str\"\n    \"object\" is incompatible with protocol \"Buffer\"\n      \"__buffer__\" is not present\n    \"object\" is incompatible with protocol \"SupportsFloat\"\n      \"__float__\" is not present\n    \"object\" is incompatible with protocol \"SupportsIndex\"\n      \"__index__\" is not present",
+	"source": "Pylance",
+	"startLineNumber": 1885,
+	"startColumn": 34,
+	"endLineNumber": 1885,
+	"endColumn": 43,
+	"modelVersionId": 1,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Users/LochlanRoss/Documents/GitHub/DSS Viewer/dss_hours_tracker.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportAttributeAccessIssue",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportAttributeAccessIssue.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 8,
+	"message": "Cannot access attribute \"isoformat\" for class \"object\"\n  Attribute \"isoformat\" is unknown",
+	"source": "Pylance",
+	"startLineNumber": 1890,
+	"startColumn": 33,
+	"endLineNumber": 1890,
+	"endColumn": 42,
+	"modelVersionId": 1,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Users/LochlanRoss/Documents/GitHub/DSS Viewer/dss_hours_tracker.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportArgumentType",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportArgumentType.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 8,
+	"message": "Argument of type \"object\" cannot be assigned to parameter \"trigger_date\" of type \"date\" in function \"__init__\"\n  \"object\" is not assignable to \"date\"",
+	"source": "Pylance",
+	"startLineNumber": 1905,
+	"startColumn": 38,
+	"endLineNumber": 1905,
+	"endColumn": 50,
+	"modelVersionId": 1,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Users/LochlanRoss/Documents/GitHub/DSS Viewer/dss_hours_tracker.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportArgumentType",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportArgumentType.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 8,
+	"message": "Argument of type \"object\" cannot be assigned to parameter \"trigger_date\" of type \"date\" in function \"__init__\"\n  \"object\" is not assignable to \"date\"",
+	"source": "Pylance",
+	"startLineNumber": 1929,
+	"startColumn": 38,
+	"endLineNumber": 1929,
+	"endColumn": 50,
+	"modelVersionId": 1,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Users/LochlanRoss/Documents/GitHub/DSS Viewer/dss_hours_tracker.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportArgumentType",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportArgumentType.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 8,
+	"message": "Argument of type \"tuple[str, ...]\" cannot be assigned to parameter \"element\" of type \"tuple[str, str]\" in function \"add\"\n  \"tuple[str, ...]\" is not assignable to \"tuple[str, str]\"\n    Tuple size mismatch; expected 2 but received indeterminate",
+	"source": "Pylance",
+	"startLineNumber": 2166,
+	"startColumn": 28,
+	"endLineNumber": 2166,
+	"endColumn": 36,
+	"modelVersionId": 1,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Users/LochlanRoss/Documents/GitHub/DSS Viewer/dss_hours_tracker.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportCallIssue",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportCallIssue.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 8,
+	"message": "No overloads for \"sort\" match the provided arguments",
+	"source": "Pylance",
+	"startLineNumber": 3714,
+	"startColumn": 13,
+	"endLineNumber": 3714,
+	"endColumn": 93,
+	"relatedInformation": [
+		{
+			"startLineNumber": 1143,
+			"startColumn": 9,
+			"endLineNumber": 1143,
+			"endColumn": 13,
+			"message": "Overload 2 is the closest match",
+			"resource": "/c:/Users/LochlanRoss/.vscode/extensions/ms-python.vscode-pylance-2026.2.1/dist/typeshed-fallback/stdlib/builtins.pyi"
+		}
+	],
+	"modelVersionId": 1,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Users/LochlanRoss/Documents/GitHub/DSS Viewer/dss_hours_tracker.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportArgumentType",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportArgumentType.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 8,
+	"message": "Argument of type \"(item: tuple[tuple[str, ...], tuple[str, ...]]) -> object\" cannot be assigned to parameter \"key\" of type \"(tuple[tuple[str, ...], tuple[str, ...]]) -> SupportsRichComparison\" in function \"sort\"\n  Type \"(item: tuple[tuple[str, ...], tuple[str, ...]]) -> object\" is not assignable to type \"(tuple[tuple[str, ...], tuple[str, ...]]) -> SupportsRichComparison\"\n    Function return type \"object\" is incompatible with type \"SupportsRichComparison\"\n      Type \"object\" is not assignable to type \"SupportsRichComparison\"\n        \"object\" is incompatible with protocol \"SupportsDunderLT[Any]\"\n          \"__lt__\" is not present\n        \"object\" is incompatible with protocol \"SupportsDunderGT[Any]\"\n          \"__gt__\" is not present",
+	"source": "Pylance",
+	"startLineNumber": 3714,
+	"startColumn": 33,
+	"endLineNumber": 3714,
+	"endColumn": 92,
+	"modelVersionId": 1,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Users/LochlanRoss/Documents/GitHub/DSS Viewer/dss_hours_tracker.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportOptionalCall",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportOptionalCall.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 8,
+	"message": "Object of type \"None\" cannot be called",
+	"source": "Pylance",
+	"startLineNumber": 3714,
+	"startColumn": 46,
+	"endLineNumber": 3714,
+	"endColumn": 92,
+	"modelVersionId": 1,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Users/LochlanRoss/Documents/GitHub/DSS Viewer/dss_hours_tracker.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportArgumentType",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportArgumentType.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 8,
+	"message": "Argument of type \"object\" cannot be assigned to parameter \"root\" of type \"Misc | None\" in function \"__init__\"\n  Type \"object\" is not assignable to type \"Misc | None\"\n    \"object\" is not assignable to \"Misc\"\n    \"object\" is not assignable to \"None\"",
+	"source": "Pylance",
+	"startLineNumber": 4117,
+	"startColumn": 34,
+	"endLineNumber": 4117,
+	"endColumn": 38,
+	"modelVersionId": 1,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Users/LochlanRoss/Documents/GitHub/DSS Viewer/dss_hours_tracker.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportArgumentType",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportArgumentType.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 8,
+	"message": "Argument of type \"object\" cannot be assigned to parameter \"font\" of type \"_FontDescription | None\" in function \"__init__\"\n  Type \"object\" is not assignable to type \"_FontDescription | None\"\n    \"object\" is not assignable to \"str\"\n    \"object\" is not assignable to \"Font\"\n    \"object\" is not assignable to \"list[Any]\"\n    \"object\" is not assignable to \"tuple[str]\"\n    \"object\" is not assignable to \"tuple[str, int, *tuple[str, ...]]\"\n    \"object\" is not assignable to \"tuple[str, int, list[str] | tuple[str, ...]]\"\n    \"object\" is not assignable to \"Tcl_Obj\"",
+	"source": "Pylance",
+	"startLineNumber": 4117,
+	"startColumn": 34,
+	"endLineNumber": 4117,
+	"endColumn": 38,
+	"modelVersionId": 1,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Users/LochlanRoss/Documents/GitHub/DSS Viewer/dss_hours_tracker.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportArgumentType",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportArgumentType.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 8,
+	"message": "Argument of type \"object\" cannot be assigned to parameter \"name\" of type \"str | None\" in function \"__init__\"\n  Type \"object\" is not assignable to type \"str | None\"\n    \"object\" is not assignable to \"str\"\n    \"object\" is not assignable to \"None\"",
+	"source": "Pylance",
+	"startLineNumber": 4117,
+	"startColumn": 34,
+	"endLineNumber": 4117,
+	"endColumn": 38,
+	"modelVersionId": 1,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Users/LochlanRoss/Documents/GitHub/DSS Viewer/dss_hours_tracker.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportArgumentType",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportArgumentType.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 8,
+	"message": "Argument of type \"object\" cannot be assigned to parameter \"exists\" of type \"bool\" in function \"__init__\"\n  \"object\" is not assignable to \"bool\"",
+	"source": "Pylance",
+	"startLineNumber": 4117,
+	"startColumn": 34,
+	"endLineNumber": 4117,
+	"endColumn": 38,
+	"modelVersionId": 1,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Users/LochlanRoss/Documents/GitHub/DSS Viewer/dss_hours_tracker.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportArgumentType",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportArgumentType.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 8,
+	"message": "Argument of type \"object\" cannot be assigned to parameter \"family\" of type \"str\" in function \"__init__\"\n  \"object\" is not assignable to \"str\"",
+	"source": "Pylance",
+	"startLineNumber": 4117,
+	"startColumn": 34,
+	"endLineNumber": 4117,
+	"endColumn": 38,
+	"modelVersionId": 1,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Users/LochlanRoss/Documents/GitHub/DSS Viewer/dss_hours_tracker.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportArgumentType",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportArgumentType.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 8,
+	"message": "Argument of type \"object\" cannot be assigned to parameter \"size\" of type \"int\" in function \"__init__\"\n  \"object\" is not assignable to \"int\"",
+	"source": "Pylance",
+	"startLineNumber": 4117,
+	"startColumn": 34,
+	"endLineNumber": 4117,
+	"endColumn": 38,
+	"modelVersionId": 1,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Users/LochlanRoss/Documents/GitHub/DSS Viewer/dss_hours_tracker.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportArgumentType",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportArgumentType.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 8,
+	"message": "Argument of type \"object\" cannot be assigned to parameter \"weight\" of type \"Literal['normal', 'bold']\" in function \"__init__\"\n  Type \"object\" is not assignable to type \"Literal['normal', 'bold']\"\n    \"object\" is not assignable to \"Literal['normal']\"\n    \"object\" is not assignable to \"Literal['bold']\"",
+	"source": "Pylance",
+	"startLineNumber": 4117,
+	"startColumn": 34,
+	"endLineNumber": 4117,
+	"endColumn": 38,
+	"modelVersionId": 1,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Users/LochlanRoss/Documents/GitHub/DSS Viewer/dss_hours_tracker.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportArgumentType",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportArgumentType.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 8,
+	"message": "Argument of type \"object\" cannot be assigned to parameter \"slant\" of type \"Literal['roman', 'italic']\" in function \"__init__\"\n  Type \"object\" is not assignable to type \"Literal['roman', 'italic']\"\n    \"object\" is not assignable to \"Literal['roman']\"\n    \"object\" is not assignable to \"Literal['italic']\"",
+	"source": "Pylance",
+	"startLineNumber": 4117,
+	"startColumn": 34,
+	"endLineNumber": 4117,
+	"endColumn": 38,
+	"modelVersionId": 1,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Users/LochlanRoss/Documents/GitHub/DSS Viewer/dss_hours_tracker.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportArgumentType",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportArgumentType.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 8,
+	"message": "Argument of type \"object\" cannot be assigned to parameter \"underline\" of type \"bool\" in function \"__init__\"\n  \"object\" is not assignable to \"bool\"",
+	"source": "Pylance",
+	"startLineNumber": 4117,
+	"startColumn": 34,
+	"endLineNumber": 4117,
+	"endColumn": 38,
+	"modelVersionId": 1,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Users/LochlanRoss/Documents/GitHub/DSS Viewer/dss_hours_tracker.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportArgumentType",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportArgumentType.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 8,
+	"message": "Argument of type \"object\" cannot be assigned to parameter \"overstrike\" of type \"bool\" in function \"__init__\"\n  \"object\" is not assignable to \"bool\"",
+	"source": "Pylance",
+	"startLineNumber": 4117,
+	"startColumn": 34,
+	"endLineNumber": 4117,
+	"endColumn": 38,
+	"modelVersionId": 1,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Users/LochlanRoss/Documents/GitHub/DSS Viewer/dss_hours_tracker.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportArgumentType",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportArgumentType.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 8,
+	"message": "Argument of type \"Widget | Toplevel\" cannot be assigned to parameter \"widget\" of type \"Widget\" in function \"bind_vertical_mousewheel\"\n  Type \"Widget | Toplevel\" is not assignable to type \"Widget\"\n    \"Toplevel\" is not assignable to \"Widget\"",
+	"source": "Pylance",
+	"startLineNumber": 4473,
+	"startColumn": 46,
+	"endLineNumber": 4473,
+	"endColumn": 51,
+	"modelVersionId": 1,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Users/LochlanRoss/Documents/GitHub/DSS Viewer/dss_hours_tracker.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportCallIssue",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportCallIssue.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 8,
+	"message": "Argument missing for parameter \"email_map\"",
+	"source": "Pylance",
+	"startLineNumber": 4819,
+	"startColumn": 9,
+	"endLineNumber": 4819,
+	"endColumn": 65,
+	"modelVersionId": 1,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Users/LochlanRoss/Documents/GitHub/DSS Viewer/dss_hours_tracker.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportCallIssue",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportCallIssue.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 8,
+	"message": "Argument missing for parameter \"email_map\"",
+	"source": "Pylance",
+	"startLineNumber": 4829,
+	"startColumn": 9,
+	"endLineNumber": 4829,
+	"endColumn": 65,
+	"modelVersionId": 1,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Users/LochlanRoss/Documents/GitHub/DSS Viewer/dss_hours_tracker.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportAttributeAccessIssue",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportAttributeAccessIssue.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 8,
+	"message": "\"_MEIPASS\" is not a known attribute of module \"sys\"",
+	"source": "Pylance",
+	"startLineNumber": 6173,
+	"startColumn": 32,
+	"endLineNumber": 6173,
+	"endColumn": 40,
+	"modelVersionId": 1,
+	"origin": "extHost1"
+},{
+	"resource": "/c:/Users/LochlanRoss/Documents/GitHub/DSS Viewer/dss_hours_tracker.py",
+	"owner": "Pylance",
+	"code": {
+		"value": "reportUndefinedVariable",
+		"target": {
+			"$mid": 1,
+			"path": "/microsoft/pylance-release/blob/main/docs/diagnostics/reportUndefinedVariable.md",
+			"scheme": "https",
+			"authority": "github.com"
+		}
+	},
+	"severity": 8,
+	"message": "\"Workbook\" is not defined",
+	"source": "Pylance",
+	"startLineNumber": 6481,
+	"startColumn": 28,
+	"endLineNumber": 6481,
+	"endColumn": 36,
+	"modelVersionId": 1,
+	"origin": "extHost1"
+}]

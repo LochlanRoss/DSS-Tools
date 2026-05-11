@@ -30,7 +30,7 @@ from typing import Callable, Iterable
 import tkinter as tk
 from tkinter import colorchooser, filedialog, font as tkfont, messagebox, simpledialog, ttk
 
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.utils import get_column_letter
 
 try:
@@ -78,6 +78,9 @@ AUTO_UPDATE_CHECK_DELAY_MS = 15000
 DEFAULT_HASH_POLL_MINUTES = 5
 BUG_REPORT_EMAIL = "lross@jatechpowersystems.com"
 MAX_PARALLEL_PARSE_WORKERS = 2
+MISSING_EMAIL_DISPLAY = "(missing) ?"
+MISSING_EMAIL_ROW_BACKGROUND = "#fff7d6"
+MISSING_EMAIL_ROW_FOREGROUND = "#7a5a00"
 OUTLOOK_NAME_RULE_LABEL = "Name does not match email address book"
 OUTLOOK_DISPLAY_NAME_TYPO_MIN_SIMILARITY = 0.84
 UPDATE_DIRNAME = "updates"
@@ -2307,6 +2310,18 @@ def pf_numbers_for_records(records: Iterable[DailyRecord]) -> str:
     return ", ".join(pf_numbers)
 
 
+def format_email_address_display(email: str) -> tuple[str, bool]:
+    normalized = email.strip()
+    if normalized:
+        return normalized, False
+    return MISSING_EMAIL_DISPLAY, True
+
+
+def build_employee_email_list_label(employee: str, email: str) -> tuple[str, bool]:
+    display_email, missing = format_email_address_display(email)
+    return f"{employee} | {display_email}", missing
+
+
 def build_email_draft_requests(
     records: Iterable[DailyRecord],
     employee_emails: dict[str, str],
@@ -2516,18 +2531,22 @@ def create_bug_report_draft(
         except Exception as exc:
             raise RuntimeError("Could not open Outlook to create the bug report draft.") from exc
 
-        mail_item = outlook.CreateItem(0)
-        mail_item.To = recipient_email
-        mail_item.Subject = subject
+        def build_mail_item():
+            item = outlook.CreateItem(0)
+            item.To = recipient_email
+            item.Subject = subject
+            item.HTMLBody = html_body
+            return item
 
+        mail_item = build_mail_item()
+        attached = False
+        last_error: str | None = None
         if attachment_path is not None and Path(attachment_path).exists():
             path_strings: list[str] = []
             try:
                 path_strings, cleanup_paths = _bug_report_attachment_strings_to_try(Path(attachment_path))
             except OSError as exc:
                 attachment_warning = f"Could not prepare the diagnostic file for Outlook: {exc}"
-            last_error: str | None = None
-            attached = False
             for candidate in path_strings:
                 try:
                     mail_item.Attachments.Add(candidate, _OUTLOOK_ATTACHMENT_BY_VALUE)
@@ -2542,8 +2561,24 @@ def create_bug_report_draft(
                     f"Technical detail: {last_error or 'Unknown COM error'}"
                 )
 
-        mail_item.HTMLBody = html_body
-        mail_item.Save()
+        try:
+            mail_item.Save()
+        except Exception as exc:
+            if attached:
+                mail_item = build_mail_item()
+                try:
+                    mail_item.Save()
+                except Exception:
+                    raise RuntimeError("Could not create the bug report draft.") from exc
+                extra = (
+                    "Outlook rejected the diagnostic snapshot while saving the draft, so the draft was saved without the attachment. "
+                    "Use Export Diagnostic Snapshot and attach that file manually."
+                )
+                if last_error:
+                    extra = f"{extra}\n\nTechnical detail: {last_error}"
+                attachment_warning = f"{attachment_warning}\n\n{extra}" if attachment_warning else extra
+            else:
+                raise RuntimeError("Could not create the bug report draft.") from exc
     finally:
         for temp in cleanup_paths:
             try:
@@ -2553,7 +2588,6 @@ def create_bug_report_draft(
         pythoncom.CoUninitialize()
 
     return attachment_warning
-
 
 def create_outlook_drafts(
     requests: list[EmailDraftRequest],
@@ -3808,6 +3842,7 @@ class DataTable(ttk.Frame):
         t = self._ui_theme
         self.tree.tag_configure("alert", background=t.alert_row_background, foreground=t.alert_row_foreground)
         self.tree.tag_configure("crew_total", background=t.crew_total_background, foreground=t.crew_total_foreground)
+        self.tree.tag_configure("missing_email", background=MISSING_EMAIL_ROW_BACKGROUND, foreground=MISSING_EMAIL_ROW_FOREGROUND)
 
     def _sync_wrap_style_colours(self) -> None:
         t = self._ui_theme
@@ -4787,9 +4822,14 @@ class EmployeeGroupsFrame(ttk.Frame):
 
         self.employee_listbox.delete(0, tk.END)
         for employee in self.employee_names:
-            email = self.email_map.get(employee, "").strip()
-            label = f"{employee} | {email}" if email else f"{employee} | (missing)"
+            label, missing = build_employee_email_list_label(employee, self.email_map.get(employee, ""))
             self.employee_listbox.insert(tk.END, label)
+            if missing:
+                row_index = self.employee_listbox.size() - 1
+                try:
+                    self.employee_listbox.itemconfig(row_index, bg=MISSING_EMAIL_ROW_BACKGROUND, fg=MISSING_EMAIL_ROW_FOREGROUND)
+                except tk.TclError:
+                    pass
 
         if current_group and current_group in self.employee_groups:
             group_names = sorted(self.employee_groups)
@@ -4816,7 +4856,7 @@ class EmployeeGroupsFrame(ttk.Frame):
             return
         self.employee_groups[name] = []
         self._notify_change()
-        self.set_data(self.employee_names, self.employee_groups)
+        self.set_data(self.employee_names, self.employee_groups, self.email_map)
 
     def delete_group(self) -> None:
         group_name = self.selected_group_name()
@@ -4826,7 +4866,7 @@ class EmployeeGroupsFrame(ttk.Frame):
             return
         del self.employee_groups[group_name]
         self._notify_change()
-        self.set_data(self.employee_names, self.employee_groups)
+        self.set_data(self.employee_names, self.employee_groups, self.email_map)
 
     def save_group_members(self) -> None:
         group_name = self.selected_group_name()
@@ -7766,14 +7806,16 @@ class DssToolsApp(tk.Tk):
 
         requests = build_email_draft_requests(filtered_daily_records, self.employee_emails, week_start)
         preview_rows: list[tuple[str, ...]] = []
+        preview_tags: list[tuple[str, ...]] = []
         for request in requests:
             st_total = round(sum(record.st for record in request.records), 2)
             ot_total = round(sum(record.ot for record in request.records), 2)
             dt_total = round(sum(record.dt for record in request.records), 2)
+            email_display, missing = format_email_address_display(request.email)
             preview_rows.append(
                 (
                     request.employee,
-                    request.email or "(missing)",
+                    email_display,
                     str(len(request.records)),
                     fmt_hours(st_total),
                     fmt_hours(ot_total),
@@ -7782,7 +7824,8 @@ class DssToolsApp(tk.Tk):
                     fmt_hours(expanded_hours(st_total, ot_total, dt_total)),
                 )
             )
-        self.email_drafts_frame.preview_table.set_rows(preview_rows)
+            preview_tags.append(("missing_email",) if missing else tuple())
+        self.email_drafts_frame.preview_table.set_rows(preview_rows, tags=preview_tags)
         missing = sum(1 for request in requests if not request.email)
         week_end = week_start + timedelta(days=6)
         self.email_drafts_frame.summary_label.configure(
