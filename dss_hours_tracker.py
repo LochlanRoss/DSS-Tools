@@ -7754,6 +7754,13 @@ class DssToolsApp(tk.Tk):
         self._pending_progress_payload = (request_id, progress_fraction, message)
         self._schedule_progress_ui_flush()
 
+    def _should_render_partial_preview(self) -> bool:
+        try:
+            selected = self.group_notebook.select()
+        except Exception:
+            return True
+        return selected != str(self.settings_group)
+
     def _clear_pending_load_ui_updates(self) -> None:
         self._pending_progress_payload = None
         self._pending_partial_payload = None
@@ -7804,15 +7811,17 @@ class DssToolsApp(tk.Tk):
             return
         self._has_partial_preview = True
         self.current_data = tracker_data
-        self._refresh_filter_options()
-        self._refresh_outlook_sync_button()
         if len(tracker_data.source_paths) == 1:
             source_text = str(tracker_data.source_paths[0])
         else:
             source_text = f"{len(tracker_data.source_paths)} DSS workbooks loading"
         self.source_label.configure(text=source_text)
-        self._render_data(tracker_data)
         self.stats_label.configure(text=message)
+        if not self._should_render_partial_preview():
+            return
+        self._refresh_filter_options()
+        self._refresh_outlook_sync_button()
+        self._render_data(tracker_data)
 
     def _handle_partial_load_update(self, request_id: int, tracker_data: TrackerData, message: str) -> None:
         if request_id != self._load_request_id:
