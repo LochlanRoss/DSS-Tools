@@ -76,6 +76,8 @@ HASH_CHECK_INTERVAL_MS = 300000
 AUTO_OUTLOOK_SYNC_DELAY_MS = 60000
 AUTO_UPDATE_CHECK_DELAY_MS = 15000
 DEFAULT_HASH_POLL_MINUTES = 5
+PROGRESS_UI_UPDATE_INTERVAL_MS = 75
+PARTIAL_RENDER_INTERVAL_MS = 200
 BUG_REPORT_EMAIL = "lross@jatechpowersystems.com"
 WORK_EMAIL_DOMAIN = "@jatechpowersystems.com"
 MAX_PARALLEL_PARSE_WORKERS = 2
@@ -5358,6 +5360,10 @@ class DssToolsApp(tk.Tk):
         self.hash_poll_interval_ms = self.app_settings.hash_poll_minutes * 60 * 1000
         self._cancel_event: threading.Event | None = None
         self._active_operation_name = ""
+        self._pending_progress_payload: tuple[int, float, str] | None = None
+        self._progress_ui_after_id: str | None = None
+        self._pending_partial_payload: tuple[int, TrackerData, str] | None = None
+        self._partial_render_after_id: str | None = None
 
         self._quickload_session = False
         self._quickload_cancel_sequence: str | None = None
@@ -7723,7 +7729,18 @@ class DssToolsApp(tk.Tk):
             return
         self.after(0, lambda: self._handle_load_success(request_id, tracker_data, show_success, cancel_event))
 
-    def _update_progress(self, request_id: int, progress_fraction: float, message: str) -> None:
+    def _schedule_progress_ui_flush(self) -> None:
+        if self._progress_ui_after_id is not None:
+            return
+        self._progress_ui_after_id = self.after(PROGRESS_UI_UPDATE_INTERVAL_MS, self._flush_pending_progress_ui)
+
+    def _flush_pending_progress_ui(self) -> None:
+        self._progress_ui_after_id = None
+        payload = self._pending_progress_payload
+        self._pending_progress_payload = None
+        if payload is None:
+            return
+        request_id, progress_fraction, message = payload
         if request_id != self._load_request_id:
             return
         percentage = round(min(max(progress_fraction, 0.0), 1.0) * 100, 1)
@@ -7731,9 +7748,32 @@ class DssToolsApp(tk.Tk):
         self.loading_label.configure(text=f"{percentage:.1f}%")
         self.stats_label.configure(text=message)
 
+    def _update_progress(self, request_id: int, progress_fraction: float, message: str) -> None:
+        if request_id != self._load_request_id:
+            return
+        self._pending_progress_payload = (request_id, progress_fraction, message)
+        self._schedule_progress_ui_flush()
+
+    def _clear_pending_load_ui_updates(self) -> None:
+        self._pending_progress_payload = None
+        self._pending_partial_payload = None
+        if self._progress_ui_after_id is not None:
+            try:
+                self.after_cancel(self._progress_ui_after_id)
+            except Exception:
+                pass
+            self._progress_ui_after_id = None
+        if self._partial_render_after_id is not None:
+            try:
+                self.after_cancel(self._partial_render_after_id)
+            except Exception:
+                pass
+            self._partial_render_after_id = None
+
     def _handle_load_cancelled(self, request_id: int, cancel_event: threading.Event | None = None) -> None:
         if request_id != self._load_request_id:
             return
+        self._clear_pending_load_ui_updates()
         self._set_loading_state(False)
         self._end_cancellable_action(cancel_event)
         if self._has_partial_preview and self.current_data is not None:
@@ -7748,7 +7788,18 @@ class DssToolsApp(tk.Tk):
         self._end_cancellable_action(cancel_event)
         messagebox.showerror(DISPLAY_APP_NAME, f"Failed to open workbook.\n\n{exc}")
 
-    def _handle_partial_load_update(self, request_id: int, tracker_data: TrackerData, message: str) -> None:
+    def _schedule_partial_render_flush(self) -> None:
+        if self._partial_render_after_id is not None:
+            return
+        self._partial_render_after_id = self.after(PARTIAL_RENDER_INTERVAL_MS, self._flush_pending_partial_render)
+
+    def _flush_pending_partial_render(self) -> None:
+        self._partial_render_after_id = None
+        payload = self._pending_partial_payload
+        self._pending_partial_payload = None
+        if payload is None:
+            return
+        request_id, tracker_data, message = payload
         if request_id != self._load_request_id:
             return
         self._has_partial_preview = True
@@ -7763,6 +7814,12 @@ class DssToolsApp(tk.Tk):
         self._render_data(tracker_data)
         self.stats_label.configure(text=message)
 
+    def _handle_partial_load_update(self, request_id: int, tracker_data: TrackerData, message: str) -> None:
+        if request_id != self._load_request_id:
+            return
+        self._pending_partial_payload = (request_id, tracker_data, message)
+        self._schedule_partial_render_flush()
+
     def _handle_load_success(
         self,
         request_id: int,
@@ -7773,6 +7830,7 @@ class DssToolsApp(tk.Tk):
         if request_id != self._load_request_id:
             return
 
+        self._clear_pending_load_ui_updates()
         self._has_partial_preview = False
         self.current_data = tracker_data
         self._hash_alerted_paths.clear()
