@@ -54,3 +54,9 @@ Working scratchpad: check items off when they are done.
 - [x] Please add the app version number to the configuration page.
 
 - [x] Please add colour configuration for the top bar section of the main window (the top buttons down to just above the summaries and raw tabs, progress bar included), by default make this a very dark grey that is near black, change the font to be a white readable on this black. Please make the colour of table background colours modifiable, same with the window colour around the tables. Make these by default a just off-white grey and white respectively by default.
+
+- [x] Prefer `@jatechpowersystems.com` when Outlook name resolution finds multiple matching addresses for the same exact display name.
+
+- [x] Add stricter fuzzy address-book typo detection for likely same-person spelling errors (for example `Dwayne Moffat` vs `Dwayne Moffatt`) without flagging different people who merely share a first name.
+
+- [x] Add an email-missing suppression feature so intentionally missing employee emails are not highlighted or re-queried during Outlook sync.

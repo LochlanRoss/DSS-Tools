@@ -22,12 +22,14 @@ from dss_hours_tracker import (
     OUTLOOK_NAME_RULE_LABEL,
     _bug_report_attachment_strings_to_try,
     build_employee_email_list_label,
+    load_employee_name_overrides,
     _is_updater_executable_path,
     binding_sequence_from_keypress_event,
     az2_revision_matches_sheet_name,
     build_bug_report_html,
     create_bug_report_draft,
     checksum_for_asset_name,
+    choose_preferred_outlook_resolution,
     choose_release_checksum_asset,
     choose_release_installer_asset,
     build_permission_denied_message,
@@ -48,6 +50,7 @@ from dss_hours_tracker import (
     FilterSelection,
     find_open_excel_workbook,
     find_outlook_display_name_typos,
+    find_address_book_name_typos,
     filter_employee_names,
     FormattingProfile,
     get_app_root,
@@ -56,6 +59,7 @@ from dss_hours_tracker import (
     is_path_like_table_column,
     is_unmetered_wifi_profile,
     load_email_templates,
+    load_missing_email_suppressions,
     load_formatting_profiles,
     load_app_settings,
     normalize_ui_hex_color,
@@ -78,6 +82,8 @@ from dss_hours_tracker import (
     remove_config_keys,
     save_employee_emails,
     save_employee_groups,
+    save_missing_email_suppressions,
+    save_employee_name_overrides,
     save_formatting_profiles,
     save_email_templates,
     save_app_settings,
@@ -412,12 +418,58 @@ class DssToolsTests(DssToolsFixtures):
         self.assertEqual(warnings[0].similar_employee, "Andrea Kolodinsky")
         self.assertIn("PF26024-1.xlsx", warnings[0].locations[0])
 
+    def test_choose_preferred_outlook_resolution_prefers_jatech_domain(self) -> None:
+        chosen = choose_preferred_outlook_resolution(
+            [
+                type("R", (), {"email": "name@gmail.com", "display_name": "Dwayne Moffatt"})(),
+                type("R", (), {"email": "dwayne.moffatt@jatechpowersystems.com", "display_name": "Dwayne Moffatt"})(),
+            ]
+        )
+        self.assertIsNotNone(chosen)
+        self.assertEqual(chosen.email, "dwayne.moffatt@jatechpowersystems.com")
+
+    def test_find_address_book_name_typos_catches_small_surname_typo_only(self) -> None:
+        records = [
+            DailyRecord(
+                source_path=Path("C:/data/PF1.xlsx"),
+                source_file="PF26024-1.xlsx",
+                work_date=date(2026, 4, 8),
+                source_sheet="Sheet1",
+                employee="Dwayne Moffat",
+                st=8.0,
+                ot=0.0,
+                dt=0.0,
+                source_ranges="",
+            ),
+        ]
+        warnings = find_address_book_name_typos(
+            ["Dwayne Moffat", "Chris Georget"],
+            ["Dwayne Moffatt", "Chris McClean"],
+            records,
+        )
+        self.assertEqual(len(warnings), 1)
+        self.assertEqual(warnings[0].employee, "Dwayne Moffat")
+        self.assertEqual(warnings[0].similar_employee, "Dwayne Moffatt")
+
     def test_employee_groups_round_trip(self) -> None:
         with self.workspace_json("groups") as path:
             save_employee_groups(path, {"Crew A": ["Alice Smith", "Bob Jones"], "Crew B": ["Charlie West"]})
             loaded = load_employee_groups(path)
             self.assertEqual(loaded["Crew A"], ["Alice Smith", "Bob Jones"])
             self.assertEqual(loaded["Crew B"], ["Charlie West"])
+
+    def test_employee_name_overrides_round_trip(self) -> None:
+        with self.workspace_json("employee_name_overrides") as path:
+            save_employee_name_overrides(path, {"Manual Add"}, {"Hidden Typo"})
+            added, hidden = load_employee_name_overrides(path)
+            self.assertEqual(added, {"Manual Add"})
+            self.assertEqual(hidden, {"Hidden Typo"})
+
+    def test_missing_email_suppressions_round_trip(self) -> None:
+        with self.workspace_json("missing_email_suppressions") as path:
+            save_missing_email_suppressions(path, {"Alice Smith", "Bob Jones"})
+            loaded = load_missing_email_suppressions(path)
+            self.assertEqual(loaded, {"Alice Smith", "Bob Jones"})
 
     def test_table_layout_round_trip(self) -> None:
         with self.workspace_json("table_layout") as path:
@@ -652,12 +704,12 @@ class DssToolsTests(DssToolsFixtures):
 
     def test_format_email_address_display_marks_missing(self) -> None:
         self.assertEqual(format_email_address_display("person@example.com"), ("person@example.com", False))
-        self.assertEqual(format_email_address_display("   "), ("(missing) ?", True))
+        self.assertEqual(format_email_address_display("   "), ("(missing) \u26A0", True))
 
     def test_build_employee_email_list_label_marks_missing(self) -> None:
         self.assertEqual(
             build_employee_email_list_label("Alice Smith", ""),
-            ("Alice Smith | (missing) ?", True),
+            ("Alice Smith | (missing) \u26A0", True),
         )
 
     def test_create_bug_report_draft_retries_without_attachment_when_save_fails(self) -> None:

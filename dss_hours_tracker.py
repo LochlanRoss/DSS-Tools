@@ -77,8 +77,9 @@ AUTO_OUTLOOK_SYNC_DELAY_MS = 60000
 AUTO_UPDATE_CHECK_DELAY_MS = 15000
 DEFAULT_HASH_POLL_MINUTES = 5
 BUG_REPORT_EMAIL = "lross@jatechpowersystems.com"
+WORK_EMAIL_DOMAIN = "@jatechpowersystems.com"
 MAX_PARALLEL_PARSE_WORKERS = 2
-MISSING_EMAIL_DISPLAY = "(missing) ?"
+MISSING_EMAIL_DISPLAY = "(missing) \u26A0"
 MISSING_EMAIL_ROW_BACKGROUND = "#fff7d6"
 MISSING_EMAIL_ROW_FOREGROUND = "#7a5a00"
 OUTLOOK_NAME_RULE_LABEL = "Name does not match email address book"
@@ -1308,6 +1309,36 @@ def save_employee_notes(config_path: Path, employee_notes: dict[str, str]) -> No
     config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+def load_missing_email_suppressions(config_path: Path) -> set[str]:
+    payload = read_config_payload(config_path)
+    raw_values = payload.get("missing_email_suppressions", [])
+    if not isinstance(raw_values, list):
+        return set()
+    return {str(value).strip() for value in raw_values if str(value).strip()}
+
+
+def save_missing_email_suppressions(config_path: Path, suppressed_names: set[str]) -> None:
+    payload = read_config_payload(config_path)
+    payload["missing_email_suppressions"] = sorted(name for name in suppressed_names if name.strip())
+    config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def load_employee_name_overrides(config_path: Path) -> tuple[set[str], set[str]]:
+    payload = read_config_payload(config_path)
+    raw_added = payload.get("employee_added_names", [])
+    raw_hidden = payload.get("employee_hidden_names", [])
+    added = {str(value).strip() for value in raw_added if str(value).strip()} if isinstance(raw_added, list) else set()
+    hidden = {str(value).strip() for value in raw_hidden if str(value).strip()} if isinstance(raw_hidden, list) else set()
+    return added, hidden
+
+
+def save_employee_name_overrides(config_path: Path, added_names: set[str], hidden_names: set[str]) -> None:
+    payload = read_config_payload(config_path)
+    payload["employee_added_names"] = sorted(name for name in added_names if name.strip())
+    payload["employee_hidden_names"] = sorted(name for name in hidden_names if name.strip())
+    config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
 def load_job_presets(config_path: Path) -> dict[str, str]:
     payload = read_config_payload(config_path)
     raw_map = payload.get("job_presets", {})
@@ -2073,6 +2104,33 @@ def normalize_person_name(name: str) -> str:
     return " ".join(name.split()).casefold()
 
 
+def split_normalized_person_name(name: str) -> tuple[str, str]:
+    parts = normalize_person_name(name).split()
+    if not parts:
+        return "", ""
+    first = parts[0]
+    remainder = " ".join(parts[1:])
+    return first, remainder
+
+
+def likely_same_person_typo(left_name: str, right_name: str, *, overall_threshold: float = 0.88, surname_threshold: float = 0.82) -> float | None:
+    left_first, left_remainder = split_normalized_person_name(left_name)
+    right_first, right_remainder = split_normalized_person_name(right_name)
+    if not left_first or left_first != right_first:
+        return None
+    if not left_remainder or not right_remainder:
+        return None
+    if left_remainder[:1] != right_remainder[:1]:
+        return None
+    surname_ratio = difflib.SequenceMatcher(None, left_remainder, right_remainder).ratio()
+    if surname_ratio < surname_threshold:
+        return None
+    overall_ratio = difflib.SequenceMatcher(None, normalize_person_name(left_name), normalize_person_name(right_name)).ratio()
+    if overall_ratio < overall_threshold:
+        return None
+    return overall_ratio
+
+
 def typo_warning_key(employee: str, similar_employee: str) -> str:
     return f"{normalize_person_name(employee)}|{normalize_person_name(similar_employee)}"
 
@@ -2094,7 +2152,10 @@ def find_potential_name_typos(
         for candidate in all_names:
             if candidate == unresolved:
                 continue
-            similarity = difflib.SequenceMatcher(None, unresolved_normalized, normalized_names[candidate]).ratio()
+            likely_ratio = likely_same_person_typo(unresolved, candidate, overall_threshold=similarity_threshold)
+            if likely_ratio is None:
+                continue
+            similarity = max(likely_ratio, difflib.SequenceMatcher(None, unresolved_normalized, normalized_names[candidate]).ratio())
             if similarity > best_similarity:
                 best_similarity = similarity
                 best_match = candidate
@@ -2148,6 +2209,43 @@ def find_outlook_display_name_typos(
     return warnings
 
 
+def find_address_book_name_typos(
+    unresolved_names: Iterable[str],
+    address_book_names: Iterable[str],
+    daily_records: Iterable[DailyRecord],
+    similarity_threshold: float = 0.88,
+) -> list[NameTypoWarning]:
+    all_names = sorted({name for name in address_book_names if name.strip()})
+    warnings: list[NameTypoWarning] = []
+
+    for unresolved in sorted({name for name in unresolved_names if name.strip()}):
+        best_match = ""
+        best_similarity = 0.0
+        for candidate in all_names:
+            ratio = likely_same_person_typo(unresolved, candidate, overall_threshold=similarity_threshold)
+            if ratio is None:
+                continue
+            if ratio > best_similarity:
+                best_similarity = ratio
+                best_match = candidate
+        if not best_match:
+            continue
+        locations = [
+            f"{record.work_date.isoformat()} | {record.source_sheet} | {record.source_file}"
+            for record in daily_records
+            if record.employee == unresolved
+        ]
+        warnings.append(
+            NameTypoWarning(
+                employee=unresolved,
+                similar_employee=best_match,
+                similarity=best_similarity,
+                locations=locations,
+            )
+        )
+    return warnings
+
+
 def find_similar_employee_name_pairs(
     all_employee_names: Iterable[str],
     daily_records: Iterable[DailyRecord],
@@ -2183,12 +2281,11 @@ def find_similar_employee_name_pairs(
     return warnings
 
 
-def extract_smtp_address(recipient) -> str:
-    try:
-        address_entry = recipient.AddressEntry
-    except Exception:
-        address_entry = None
+def is_preferred_work_email(email: str) -> bool:
+    return email.strip().casefold().endswith(WORK_EMAIL_DOMAIN)
 
+
+def extract_address_entry_smtp(address_entry) -> str:
     if address_entry is not None:
         try:
             exchange_user = address_entry.GetExchangeUser()
@@ -2202,9 +2299,97 @@ def extract_smtp_address(recipient) -> str:
                 return str(exchange_dist.PrimarySmtpAddress).strip()
         except Exception:
             pass
+        for attr in ("Address", "PrimarySmtpAddress"):
+            try:
+                value = getattr(address_entry, attr, "")
+                if str(value).strip():
+                    return str(value).strip()
+            except Exception:
+                pass
+    return ""
+
+
+def extract_smtp_address(recipient) -> str:
+    try:
+        address_entry = recipient.AddressEntry
+    except Exception:
+        address_entry = None
+
+    email = extract_address_entry_smtp(address_entry)
+    if email:
+        return email
 
     address = getattr(recipient, "Address", "")
     return str(address).strip()
+
+
+def extract_address_entry_display_name(address_entry) -> str:
+    if address_entry is not None:
+        for attr in ("Name", "DisplayName"):
+            try:
+                val = getattr(address_entry, attr, "")
+                if str(val).strip():
+                    return str(val).strip()
+            except Exception:
+                pass
+        try:
+            exchange_user = address_entry.GetExchangeUser()
+            if exchange_user is not None:
+                for attr in ("Name", "DisplayName"):
+                    try:
+                        val = getattr(exchange_user, attr, "")
+                        if str(val).strip():
+                            return str(val).strip()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+    return ""
+
+
+def choose_preferred_outlook_resolution(candidates: Iterable[OutlookResolution]) -> OutlookResolution | None:
+    deduped: dict[tuple[str, str], OutlookResolution] = {}
+    for candidate in candidates:
+        email = candidate.email.strip()
+        display = candidate.display_name.strip()
+        if not email:
+            continue
+        deduped[(email.casefold(), display.casefold())] = OutlookResolution(email=email, display_name=display)
+    if not deduped:
+        return None
+    return sorted(
+        deduped.values(),
+        key=lambda item: (
+            0 if is_preferred_work_email(item.email) else 1,
+            normalize_person_name(item.display_name),
+            item.email.casefold(),
+        ),
+    )[0]
+
+
+def build_outlook_address_book_index(namespace) -> tuple[dict[str, list[OutlookResolution]], list[str]]:
+    index: dict[str, list[OutlookResolution]] = {}
+    display_names: set[str] = set()
+    try:
+        address_lists = getattr(namespace, "AddressLists", [])
+    except Exception:
+        address_lists = []
+    for address_list in address_lists:
+        try:
+            entries = getattr(address_list, "AddressEntries", [])
+        except Exception:
+            entries = []
+        for entry in entries:
+            display_name = extract_address_entry_display_name(entry).strip()
+            if not display_name:
+                continue
+            display_names.add(display_name)
+            email = extract_address_entry_smtp(entry)
+            if not email:
+                continue
+            key = normalize_person_name(display_name)
+            index.setdefault(key, []).append(OutlookResolution(email=email, display_name=display_name))
+    return index, sorted(display_names, key=str.casefold)
 
 
 def extract_resolved_display_name(recipient) -> str:
@@ -2243,16 +2428,16 @@ def extract_resolved_display_name(recipient) -> str:
         return ""
 
 
-def lookup_outlook_emails(
+def query_outlook_emails(
     employee_names: Iterable[str],
     should_cancel: Callable[[], bool] | None = None,
-) -> dict[str, OutlookResolution]:
+) -> tuple[dict[str, OutlookResolution], list[str]]:
     if pythoncom is None or win32com is None:
         raise RuntimeError("Outlook lookup requires pywin32 and desktop Outlook.")
 
     names = [name for name in employee_names if name.strip()]
     if not names:
-        return {}
+        return {}, []
     check_cancel = should_cancel or (lambda: False)
 
     pythoncom.CoInitialize()
@@ -2263,25 +2448,36 @@ def lookup_outlook_emails(
         except Exception as exc:
             raise RuntimeError("Could not open Outlook to query email addresses.") from exc
 
+        address_book_index, address_book_names = build_outlook_address_book_index(namespace)
         results: dict[str, OutlookResolution] = {}
         for employee in names:
             if check_cancel():
                 raise OperationCancelled("Cancelled Outlook email sync.")
+            candidates = list(address_book_index.get(normalize_person_name(employee), []))
             try:
                 recipient = namespace.CreateRecipient(employee)
                 recipient.Resolve()
             except Exception:
-                continue
-            if not getattr(recipient, "Resolved", False):
-                continue
-            email = extract_smtp_address(recipient)
-            if not email:
-                continue
-            display_name = extract_resolved_display_name(recipient)
-            results[employee] = OutlookResolution(email=email, display_name=display_name)
-        return results
+                recipient = None
+            if recipient is not None and getattr(recipient, "Resolved", False):
+                email = extract_smtp_address(recipient)
+                if email:
+                    display_name = extract_resolved_display_name(recipient) or employee
+                    candidates.append(OutlookResolution(email=email, display_name=display_name))
+            preferred = choose_preferred_outlook_resolution(candidates)
+            if preferred is not None:
+                results[employee] = preferred
+        return results, address_book_names
     finally:
         pythoncom.CoUninitialize()
+
+
+def lookup_outlook_emails(
+    employee_names: Iterable[str],
+    should_cancel: Callable[[], bool] | None = None,
+) -> dict[str, OutlookResolution]:
+    results, _address_book_names = query_outlook_emails(employee_names, should_cancel=should_cancel)
+    return results
 
 
 def format_week_label(week_start: date, week_end: date) -> str:
@@ -2310,15 +2506,17 @@ def pf_numbers_for_records(records: Iterable[DailyRecord]) -> str:
     return ", ".join(pf_numbers)
 
 
-def format_email_address_display(email: str) -> tuple[str, bool]:
+def format_email_address_display(email: str, suppressed: bool = False) -> tuple[str, bool]:
     normalized = email.strip()
     if normalized:
         return normalized, False
+    if suppressed:
+        return "(missing, suppressed)", False
     return MISSING_EMAIL_DISPLAY, True
 
 
-def build_employee_email_list_label(employee: str, email: str) -> tuple[str, bool]:
-    display_email, missing = format_email_address_display(email)
+def build_employee_email_list_label(employee: str, email: str, suppressed: bool = False) -> tuple[str, bool]:
+    display_email, missing = format_email_address_display(email, suppressed=suppressed)
     return f"{employee} | {display_email}", missing
 
 
@@ -4754,67 +4952,117 @@ class EmployeeGroupsFrame(ttk.Frame):
         on_groups_changed: Callable[[dict[str, list[str]]], None],
         on_request_edit_email: Callable[[str], None],
         sync_emails_callback: Callable[[], None],
+        on_roster_changed: Callable[[list[str]], None],
+        on_notes_changed: Callable[[str, str], None],
+        on_missing_email_suppression_changed: Callable[[str, bool], None],
     ):
         super().__init__(master, padding=12)
         self.on_groups_changed = on_groups_changed
         self.on_request_edit_email = on_request_edit_email
         self.sync_emails_callback = sync_emails_callback
+        self.on_roster_changed = on_roster_changed
+        self.on_notes_changed = on_notes_changed
+        self.on_missing_email_suppression_changed = on_missing_email_suppression_changed
         self.employee_names: list[str] = []
         self.employee_groups: dict[str, list[str]] = {}
         self.email_map: dict[str, str] = {}
+        self.notes_map: dict[str, str] = {}
+        self.missing_email_suppressions: set[str] = set()
 
         self.columnconfigure(1, weight=1)
-        self.rowconfigure(1, weight=1)
+        self.rowconfigure(0, weight=1)
 
         left = ttk.Frame(self)
-        left.grid(row=0, column=0, rowspan=3, sticky="nsw", padx=(0, 12))
-        ttk.Label(left, text="Groups").pack(anchor="w")
+        left.grid(row=0, column=0, sticky="nsw", padx=(0, 12))
+        left.rowconfigure(1, weight=1)
+        left.columnconfigure(0, weight=1)
+        ttk.Label(left, text="Groups").grid(row=0, column=0, sticky="w")
         list_row = ttk.Frame(left)
-        list_row.pack(fill="both", expand=True, pady=(4, 8))
+        list_row.grid(row=1, column=0, sticky="nsew", pady=(4, 8))
+        list_row.rowconfigure(0, weight=1)
+        list_row.columnconfigure(0, weight=1)
         self.group_listbox = tk.Listbox(list_row, exportselection=False, height=12)
         group_list_scroll = ttk.Scrollbar(list_row, orient="vertical", command=self.group_listbox.yview)
         self.group_listbox.configure(yscrollcommand=group_list_scroll.set)
-        self.group_listbox.pack(side="left", fill="both", expand=True)
-        group_list_scroll.pack(side="right", fill="y")
+        self.group_listbox.grid(row=0, column=0, sticky="nsew")
+        group_list_scroll.grid(row=0, column=1, sticky="ns")
         self.group_listbox.bind("<<ListboxSelect>>", self._on_group_selected)
         bind_vertical_mousewheel(self.group_listbox, self.group_listbox, units_per_notch=4)
-        ttk.Button(left, text="New Group", command=self.create_group).pack(fill="x")
-        ttk.Button(left, text="Delete Group", command=self.delete_group).pack(fill="x", pady=(8, 0))
-        ttk.Button(left, text="Sync Outlook Emails", command=self.sync_emails_callback).pack(fill="x", pady=(8, 0))
+        ttk.Button(left, text="New Group", command=self.create_group).grid(row=2, column=0, sticky="ew")
+        ttk.Button(left, text="Delete Group", command=self.delete_group).grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        ttk.Button(left, text="Sync Outlook Emails", command=self.sync_emails_callback).grid(row=4, column=0, sticky="ew", pady=(8, 0))
 
         right = ttk.Frame(self)
         right.grid(row=0, column=1, sticky="nsew")
         right.columnconfigure(0, weight=1)
-        right.rowconfigure(1, weight=1)
+        right.rowconfigure(2, weight=1)
 
-        ttk.Label(right, text="Employees in selected group").grid(row=0, column=0, sticky="w")
+        roster_toolbar = ttk.Frame(right)
+        roster_toolbar.grid(row=0, column=0, columnspan=2, sticky="ew")
+        roster_toolbar.columnconfigure(0, weight=1)
+        self.name_entry = ttk.Entry(roster_toolbar)
+        self.name_entry.grid(row=0, column=0, sticky="ew")
+        ttk.Button(roster_toolbar, text="Add Name", command=self.add_name).grid(row=0, column=1, padx=(8, 0))
+        ttk.Button(roster_toolbar, text="Remove Selected", command=self.remove_selected).grid(row=0, column=2, padx=(8, 0))
+
+        ttk.Label(right, text="Employees in selected group").grid(row=1, column=0, sticky="w", pady=(8, 0))
         self.employee_listbox = tk.Listbox(right, selectmode="extended", exportselection=False)
-        self.employee_listbox.grid(row=1, column=0, sticky="nsew", pady=(4, 8))
+        self.employee_listbox.grid(row=2, column=0, sticky="nsew", pady=(4, 8))
+        self.employee_listbox.bind("<<ListboxSelect>>", self._on_employee_selection_changed)
         self.employee_listbox.bind("<Double-Button-1>", self._on_employee_double_click)
         bind_vertical_mousewheel(self.employee_listbox, self.employee_listbox, units_per_notch=4)
         employee_scroll = ttk.Scrollbar(right, orient="vertical", command=self.employee_listbox.yview)
         self.employee_listbox.configure(yscrollcommand=employee_scroll.set)
-        employee_scroll.grid(row=1, column=1, sticky="ns", pady=(4, 8))
+        employee_scroll.grid(row=2, column=1, sticky="ns", pady=(4, 8))
 
-        ttk.Button(right, text="Save Group Members", command=self.save_group_members).grid(row=2, column=0, sticky="w")
+        actions = ttk.Frame(right)
+        actions.grid(row=3, column=0, columnspan=2, sticky="ew")
+        ttk.Button(actions, text="Save Group Members", command=self.save_group_members).pack(side="left")
+
+        note_frame = ttk.LabelFrame(right, text="Employee Notes", padding=8)
+        note_frame.grid(row=4, column=0, columnspan=2, sticky="nsew", pady=(12, 0))
+        note_frame.columnconfigure(0, weight=1)
+        note_frame.rowconfigure(1, weight=1)
+        self.selected_employee_var = tk.StringVar(value="")
+        ttk.Label(note_frame, textvariable=self.selected_employee_var).grid(row=0, column=0, sticky="w", pady=(0, 8))
+        self.suppress_missing_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            note_frame,
+            text="Suppress missing email warnings for selected employee",
+            variable=self.suppress_missing_var,
+            command=self._toggle_missing_email_suppression,
+        ).grid(row=1, column=0, sticky="w", pady=(0, 8))
+        self.note_text = tk.Text(note_frame, wrap="word", height=6)
+        note_scroll = ttk.Scrollbar(note_frame, orient="vertical", command=self.note_text.yview)
+        self.note_text.configure(yscrollcommand=note_scroll.set)
+        self.note_text.grid(row=2, column=0, sticky="nsew")
+        note_scroll.grid(row=2, column=1, sticky="ns")
+        bind_vertical_mousewheel(self.note_text, self.note_text, units_per_notch=4)
+        ttk.Button(note_frame, text="Save Note", command=self.save_note).grid(row=3, column=0, sticky="w", pady=(8, 0))
+
         self.summary_label = ttk.Label(
             self,
-            text="Create groups to filter the tables by crews, trades, or project splits.",
+            text="Manage employees, emails, groups, and notes from one place.",
             wraplength=700,
             justify="left",
         )
-        self.summary_label.grid(row=3, column=0, columnspan=2, sticky="w", pady=(12, 0))
+        self.summary_label.grid(row=1, column=0, columnspan=2, sticky="w", pady=(12, 0))
 
     def set_data(
         self,
         employee_names: list[str],
         employee_groups: dict[str, list[str]],
         email_map: dict[str, str],
+        notes_map: dict[str, str],
+        missing_email_suppressions: set[str],
     ) -> None:
         current_group = self.selected_group_name()
+        current_employee = self.selected_primary_employee()
         self.employee_names = list(employee_names)
         self.employee_groups = {name: list(members) for name, members in employee_groups.items()}
         self.email_map = dict(email_map)
+        self.notes_map = dict(notes_map)
+        self.missing_email_suppressions = set(missing_email_suppressions)
 
         self.group_listbox.delete(0, tk.END)
         for group_name in sorted(self.employee_groups):
@@ -4822,7 +5070,11 @@ class EmployeeGroupsFrame(ttk.Frame):
 
         self.employee_listbox.delete(0, tk.END)
         for employee in self.employee_names:
-            label, missing = build_employee_email_list_label(employee, self.email_map.get(employee, ""))
+            label, missing = build_employee_email_list_label(
+                employee,
+                self.email_map.get(employee, ""),
+                employee in self.missing_email_suppressions,
+            )
             self.employee_listbox.insert(tk.END, label)
             if missing:
                 row_index = self.employee_listbox.size() - 1
@@ -4838,11 +5090,24 @@ class EmployeeGroupsFrame(ttk.Frame):
             self.group_listbox.selection_set(0)
         self._on_group_selected()
 
+        if current_employee and current_employee in self.employee_names:
+            idx = self.employee_names.index(current_employee)
+            self.employee_listbox.selection_clear(0, tk.END)
+            self.employee_listbox.selection_set(idx)
+            self.employee_listbox.see(idx)
+        self._refresh_note_editor()
+
     def selected_group_name(self) -> str | None:
         selection = self.group_listbox.curselection()
         if not selection:
             return None
         return self.group_listbox.get(selection[0])
+
+    def selected_primary_employee(self) -> str | None:
+        selected = self.employee_listbox.curselection()
+        if not selected:
+            return None
+        return self.employee_names[selected[0]]
 
     def create_group(self) -> None:
         name = simpledialog.askstring("New Employee Group", "Group name:", parent=self)
@@ -4856,7 +5121,7 @@ class EmployeeGroupsFrame(ttk.Frame):
             return
         self.employee_groups[name] = []
         self._notify_change()
-        self.set_data(self.employee_names, self.employee_groups, self.email_map)
+        self.set_data(self.employee_names, self.employee_groups, self.email_map, self.notes_map, self.missing_email_suppressions)
 
     def delete_group(self) -> None:
         group_name = self.selected_group_name()
@@ -4866,7 +5131,34 @@ class EmployeeGroupsFrame(ttk.Frame):
             return
         del self.employee_groups[group_name]
         self._notify_change()
-        self.set_data(self.employee_names, self.employee_groups, self.email_map)
+        self.set_data(self.employee_names, self.employee_groups, self.email_map, self.notes_map, self.missing_email_suppressions)
+
+    def add_name(self) -> None:
+        value = self.name_entry.get().strip()
+        if not value or value in self.employee_names:
+            return
+        self.employee_names.append(value)
+        self.employee_names.sort(key=str.lower)
+        self.name_entry.delete(0, tk.END)
+        self.on_roster_changed(list(self.employee_names))
+        self.set_data(self.employee_names, self.employee_groups, self.email_map, self.notes_map, self.missing_email_suppressions)
+        idx = self.employee_names.index(value)
+        self.employee_listbox.selection_clear(0, tk.END)
+        self.employee_listbox.selection_set(idx)
+        self.employee_listbox.see(idx)
+        self._refresh_note_editor()
+
+    def remove_selected(self) -> None:
+        selected_indices = self.employee_listbox.curselection()
+        if not selected_indices:
+            return
+        selected_names = {self.employee_names[index] for index in selected_indices}
+        self.employee_names = [employee for employee in self.employee_names if employee not in selected_names]
+        for members in self.employee_groups.values():
+            members[:] = [employee for employee in members if employee not in selected_names]
+        self._notify_change()
+        self.on_roster_changed(list(self.employee_names))
+        self.set_data(self.employee_names, self.employee_groups, self.email_map, self.notes_map, self.missing_email_suppressions)
 
     def save_group_members(self) -> None:
         group_name = self.selected_group_name()
@@ -4879,29 +5171,66 @@ class EmployeeGroupsFrame(ttk.Frame):
             text=f"Saved {len(self.employee_groups[group_name])} employee(s) in group '{group_name}'."
         )
 
+    def save_note(self) -> None:
+        employee = self.selected_primary_employee()
+        if not employee:
+            return
+        note = self.note_text.get("1.0", tk.END).strip()
+        self.notes_map[employee] = note
+        self.on_notes_changed(employee, note)
+        self.summary_label.configure(text=f"Saved note for {employee}.")
+
     def _on_group_selected(self, _event=None) -> None:
         for index in range(self.employee_listbox.size()):
             self.employee_listbox.selection_clear(index)
         group_name = self.selected_group_name()
         if not group_name:
+            self._refresh_note_editor()
             return
         members = set(self.employee_groups.get(group_name, []))
         for index, employee in enumerate(self.employee_names):
             if employee in members:
                 self.employee_listbox.selection_set(index)
-        self.summary_label.configure(
-            text=f"Group '{group_name}' contains {len(members)} employee(s)."
-        )
+        self.summary_label.configure(text=f"Group '{group_name}' contains {len(members)} employee(s).")
+        self._refresh_note_editor()
+
+    def _on_employee_selection_changed(self, _event=None) -> None:
+        self._refresh_note_editor()
+
+    def _refresh_note_editor(self) -> None:
+        employee = self.selected_primary_employee()
+        self.selected_employee_var.set(employee or "")
+        self.suppress_missing_var.set(bool(employee and employee in self.missing_email_suppressions))
+        self.note_text.delete("1.0", tk.END)
+        if employee:
+            self.note_text.insert("1.0", self.notes_map.get(employee, ""))
+
+    def _toggle_missing_email_suppression(self) -> None:
+        employee = self.selected_primary_employee()
+        if not employee:
+            self.suppress_missing_var.set(False)
+            return
+        suppressed = bool(self.suppress_missing_var.get())
+        if suppressed:
+            self.missing_email_suppressions.add(employee)
+        else:
+            self.missing_email_suppressions.discard(employee)
+        self.on_missing_email_suppression_changed(employee, suppressed)
+        self.set_data(self.employee_names, self.employee_groups, self.email_map, self.notes_map, self.missing_email_suppressions)
+        if employee in self.employee_names:
+            idx = self.employee_names.index(employee)
+            self.employee_listbox.selection_clear(0, tk.END)
+            self.employee_listbox.selection_set(idx)
+            self.employee_listbox.see(idx)
+            self._refresh_note_editor()
 
     def _notify_change(self) -> None:
         self.on_groups_changed({name: list(members) for name, members in self.employee_groups.items()})
 
     def _on_employee_double_click(self, _event=None) -> None:
-        selected_indices = self.employee_listbox.curselection()
-        if not selected_indices:
-            return
-        employee = self.employee_names[selected_indices[0]]
-        self.on_request_edit_email(employee)
+        employee = self.selected_primary_employee()
+        if employee:
+            self.on_request_edit_email(employee)
 
 
 class EmployeeNotesEditor(ttk.Frame):
@@ -4995,6 +5324,8 @@ class DssToolsApp(tk.Tk):
         self.employee_emails = load_employee_emails(self.config_path)
         self.employee_outlook_display_names = load_employee_outlook_display_names(self.config_path)
         self.employee_notes = load_employee_notes(self.config_path)
+        self.missing_email_suppressions = load_missing_email_suppressions(self.config_path)
+        self.employee_added_names, self.employee_hidden_names = load_employee_name_overrides(self.config_path)
         self.email_subject_template, self.email_body_template = load_email_templates(self.config_path)
         self.employee_groups = load_employee_groups(self.config_path)
         self.ignored_name_typos = load_ignored_name_typos(self.config_path)
@@ -5147,14 +5478,6 @@ class DssToolsApp(tk.Tk):
             source_file_column="source_file",
             ui_theme=self.app_settings.ui_theme,
         )
-        self._employee_scroll_page = VerticalScrollablePage(self.settings_notebook)
-        self.employee_editor = EmployeeListEditor(
-            self._employee_scroll_page.inner,
-            on_email_changed=self._update_employee_email,
-            on_request_edit_email=self._prompt_edit_employee_email,
-        )
-        self.employee_editor.pack(fill="both", expand=True)
-        self._employee_scroll_page.wire_mousewheel_to_canvas()
         self.weekly_rollup_table = DataTable(
             self.summaries_notebook,
             columns=["source_file", "week_start", "week_end", "employee", "st", "ot", "dt", "total", "expanded", "row_type"],
@@ -5311,14 +5634,12 @@ class DssToolsApp(tk.Tk):
             on_groups_changed=self._update_employee_groups,
             on_request_edit_email=self._prompt_edit_employee_email,
             sync_emails_callback=self.sync_outlook_emails,
+            on_roster_changed=self._update_employee_roster,
+            on_notes_changed=self._update_employee_note,
+            on_missing_email_suppression_changed=self._update_missing_email_suppression,
         )
         self.groups_frame.pack(fill="both", expand=True)
         self._groups_scroll_page.wire_mousewheel_to_canvas()
-
-        self._notes_scroll_page = VerticalScrollablePage(self.settings_notebook)
-        self.notes_frame = EmployeeNotesEditor(self._notes_scroll_page.inner, on_notes_changed=self._update_employee_note)
-        self.notes_frame.pack(fill="both", expand=True)
-        self._notes_scroll_page.wire_mousewheel_to_canvas()
 
         self._rules_scroll_page = VerticalScrollablePage(self.settings_notebook)
         self.rules_frame = ttk.Frame(self._rules_scroll_page.inner, padding=12)
@@ -5350,9 +5671,7 @@ class DssToolsApp(tk.Tk):
         self.reports_notebook.add(self.audit_data_trail_table, text="Audit Data Trail")
         self.reports_notebook.add(self._email_scroll_page, text="Email Drafts")
         self.settings_notebook.add(self._config_scroll_page, text="Configuration")
-        self.settings_notebook.add(self._employee_scroll_page, text="Employee List")
-        self.settings_notebook.add(self._notes_scroll_page, text="Employee Notes")
-        self.settings_notebook.add(self._groups_scroll_page, text="Employee Groups")
+        self.settings_notebook.add(self._groups_scroll_page, text="Employees")
         self.settings_notebook.add(self._rules_scroll_page, text="Formatting Rules")
         self._refresh_filter_options()
         self._apply_ui_theme_to_all_tables()
@@ -5708,6 +6027,20 @@ class DssToolsApp(tk.Tk):
     def _persist_employee_notes(self) -> None:
         save_employee_notes(self.config_path, self.employee_notes)
 
+    def _persist_employee_name_overrides(self) -> None:
+        save_employee_name_overrides(self.config_path, self.employee_added_names, self.employee_hidden_names)
+
+    def _persist_missing_email_suppressions(self) -> None:
+        save_missing_email_suppressions(self.config_path, self.missing_email_suppressions)
+
+    def _managed_employee_names(self, tracker_data: TrackerData | None = None) -> list[str]:
+        source = tracker_data if tracker_data is not None else self.current_data
+        raw_names = set(source.employee_names if source is not None else [])
+        names = set(raw_names)
+        names.update(name for name in self.employee_added_names if name.strip())
+        names.difference_update(self.employee_hidden_names)
+        return sorted(name for name in names if name.strip())
+
     def _persist_app_settings(self) -> None:
         save_app_settings(self.config_path, self.app_settings)
 
@@ -5768,14 +6101,8 @@ class DssToolsApp(tk.Tk):
         self._populate_rule_editor()
         self._refresh_data_tabs()
         self._refresh_filter_options()
-        self.groups_frame.set_data(
-            self.current_data.employee_names if self.current_data is not None else [],
-            self.employee_groups,
-            self.employee_emails,
-        )
-        employee_names = self.current_data.employee_names if self.current_data is not None else []
-        self.employee_editor.set_names(employee_names, self.employee_emails)
-        self.notes_frame.set_data(employee_names, self.employee_notes)
+        employee_names = self._managed_employee_names()
+        self.groups_frame.set_data(employee_names, self.employee_groups, self.employee_emails, self.employee_notes, self.missing_email_suppressions)
         self.job_preset_combo.configure(values=self._job_preset_names())
         for table in self._all_layout_tables():
             table.reset_layout()
@@ -5892,8 +6219,7 @@ class DssToolsApp(tk.Tk):
         if self.current_data is not None:
             self._render_data(self.current_data)
         else:
-            self.employee_editor.set_names([], self.employee_emails)
-            self.groups_frame.set_data([], self.employee_groups, self.employee_emails)
+            self.groups_frame.set_data([], self.employee_groups, self.employee_emails, self.employee_notes, self.missing_email_suppressions)
         messagebox.showinfo("Configuration", "Stored employee emails were cleared.")
 
     def _clear_all_stored_data(self) -> None:
@@ -5913,6 +6239,9 @@ class DssToolsApp(tk.Tk):
         self.employee_outlook_display_names = {}
         self.employee_groups = {}
         self.employee_notes = {}
+        self.missing_email_suppressions = set()
+        self.employee_added_names = set()
+        self.employee_hidden_names = set()
         self.job_presets = {}
         self.app_settings = AppSettings()
         self.hash_poll_interval_ms = self.app_settings.hash_poll_minutes * 60 * 1000
@@ -5963,6 +6292,7 @@ class DssToolsApp(tk.Tk):
             "formatting_profiles": sorted(self.formatting_profiles),
             "current_profile_name": self.current_profile_name,
             "employee_email_count": len([email for email in self.employee_emails.values() if email.strip()]),
+            "missing_email_suppression_count": len(self.missing_email_suppressions),
             "employee_group_count": len(self.employee_groups),
             "cache_file_count": len(list(self.cache_dir.glob("*.json"))),
             "update_download_dir": str(self.updates_dir),
@@ -6467,6 +6797,27 @@ class DssToolsApp(tk.Tk):
         self.employee_notes[employee] = note.strip()
         self._persist_employee_notes()
 
+    def _update_missing_email_suppression(self, employee: str, suppressed: bool) -> None:
+        if suppressed:
+            self.missing_email_suppressions.add(employee)
+        else:
+            self.missing_email_suppressions.discard(employee)
+        self._persist_missing_email_suppressions()
+        if self.current_data is not None:
+            self._refresh_email_preview(self.current_data)
+
+    def _update_employee_roster(self, employee_names: list[str]) -> None:
+        updated = {name.strip() for name in employee_names if name.strip()}
+        raw_names = set(self.current_data.employee_names) if self.current_data is not None else set()
+        self.employee_hidden_names = {name for name in raw_names if name not in updated}
+        self.employee_added_names = {name for name in updated if name not in raw_names}
+        self._persist_employee_name_overrides()
+        self._refresh_filter_options()
+        if self.current_data is not None:
+            self._render_data(self.current_data)
+        else:
+            self.groups_frame.set_data(self._managed_employee_names(), self.employee_groups, self.employee_emails, self.employee_notes, self.missing_email_suppressions)
+
     def _save_job_preset(self) -> None:
         job_name = self.job_preset_var.get().strip()
         if not job_name:
@@ -6611,7 +6962,7 @@ class DssToolsApp(tk.Tk):
         self.stats_label.configure(
             text=(
                 f"{len(self.current_data.daily_records)} daily records, "
-                f"{len(self.current_data.employee_names)} employees, "
+                f"{len(self._managed_employee_names(self.current_data))} employees, "
                 f"{len(self.current_data.week_totals)} weeks, "
                 f"{len(self.current_data.source_paths)} DSS file(s), "
                 f"rules: {self.current_profile_name}, "
@@ -6620,7 +6971,7 @@ class DssToolsApp(tk.Tk):
         )
 
     def _current_filter_selection(self) -> FilterSelection:
-        employee_names = self.current_data.employee_names if self.current_data is not None else []
+        employee_names = self._managed_employee_names()
         selected_names = tuple(
             employee for employee in employee_names
             if self._employee_filter_state.get(employee, True)
@@ -6647,7 +6998,7 @@ class DssToolsApp(tk.Tk):
         return selected if selected else pf_values
 
     def _refresh_filter_options(self) -> None:
-        employee_names = self.current_data.employee_names if self.current_data is not None else []
+        employee_names = self._managed_employee_names()
         previous_state = dict(self._employee_filter_state)
         if not previous_state:
             self._employee_filter_state = {employee: True for employee in employee_names}
@@ -6754,7 +7105,7 @@ class DssToolsApp(tk.Tk):
             fill="x", anchor="w", pady=(4, 0)
         )
 
-        employee_names = self.current_data.employee_names if self.current_data is not None else []
+        employee_names = self._managed_employee_names()
         if employee_names:
             ttk.Separator(self.filter_popup_content, orient="horizontal").pack(fill="x", pady=6)
 
@@ -6893,7 +7244,7 @@ class DssToolsApp(tk.Tk):
             self._render_data(self.current_data)
 
     def _update_filter_button_label(self) -> None:
-        employee_names = self.current_data.employee_names if self.current_data is not None else []
+        employee_names = self._managed_employee_names()
         if not employee_names:
             self.filter_button_var.set("All Employees")
             return
@@ -6944,8 +7295,8 @@ class DssToolsApp(tk.Tk):
 
         missing_names = [
             employee
-            for employee in self.current_data.employee_names
-            if not self.employee_emails.get(employee, "").strip()
+            for employee in self._managed_employee_names(self.current_data)
+            if not self.employee_emails.get(employee, "").strip() and employee not in self.missing_email_suppressions
         ]
         if not missing_names:
             if manual:
@@ -6965,14 +7316,14 @@ class DssToolsApp(tk.Tk):
 
     def _sync_outlook_emails_worker(self, employee_names: list[str], manual: bool, cancel_event: threading.Event) -> None:
         try:
-            results = lookup_outlook_emails(employee_names, should_cancel=cancel_event.is_set)
+            results, address_book_names = query_outlook_emails(employee_names, should_cancel=cancel_event.is_set)
         except OperationCancelled:
             self.after(0, lambda: self._handle_outlook_sync_cancelled(cancel_event, manual))
             return
         except Exception as exc:
             self.after(0, lambda: self._handle_outlook_sync_error(exc, manual, cancel_event))
             return
-        self.after(0, lambda: self._handle_outlook_sync_success(results, employee_names, manual, cancel_event))
+        self.after(0, lambda: self._handle_outlook_sync_success(results, address_book_names, employee_names, manual, cancel_event))
 
     def _handle_outlook_sync_cancelled(self, cancel_event: threading.Event, manual: bool) -> None:
         self._outlook_sync_in_progress = False
@@ -6991,6 +7342,7 @@ class DssToolsApp(tk.Tk):
     def _handle_outlook_sync_success(
         self,
         results: dict[str, OutlookResolution],
+        address_book_names: list[str],
         employee_names: list[str],
         manual: bool,
         cancel_event: threading.Event | None = None,
@@ -7024,7 +7376,16 @@ class DssToolsApp(tk.Tk):
                 warning
                 for warning in find_potential_name_typos(
                     unresolved_names,
-                    self.current_data.employee_names,
+                    self._managed_employee_names(self.current_data),
+                    self.current_data.daily_records,
+                )
+                if typo_warning_key(warning.employee, warning.similar_employee) not in self.ignored_name_typos
+            ]
+            address_book_typos = [
+                warning
+                for warning in find_address_book_name_typos(
+                    unresolved_names,
+                    address_book_names,
                     self.current_data.daily_records,
                 )
                 if typo_warning_key(warning.employee, warning.similar_employee) not in self.ignored_name_typos
@@ -7032,13 +7393,19 @@ class DssToolsApp(tk.Tk):
             outlook_typos = [
                 warning
                 for warning in find_outlook_display_name_typos(
-                    self.current_data.employee_names,
+                    self._managed_employee_names(self.current_data),
                     self.employee_outlook_display_names,
                     self.current_data.daily_records,
                 )
                 if typo_warning_key(warning.employee, warning.similar_employee) not in self.ignored_name_typos
             ]
             seen_typo: set[str] = {typo_warning_key(w.employee, w.similar_employee) for w in typo_warnings}
+            for warning in address_book_typos:
+                key = typo_warning_key(warning.employee, warning.similar_employee)
+                if key in seen_typo:
+                    continue
+                seen_typo.add(key)
+                typo_warnings.append(warning)
             for warning in outlook_typos:
                 key = typo_warning_key(warning.employee, warning.similar_employee)
                 if key in seen_typo:
@@ -7047,7 +7414,11 @@ class DssToolsApp(tk.Tk):
                 typo_warnings.append(warning)
 
         if manual:
-            missing_after = sum(1 for employee in employee_names if not self.employee_emails.get(employee, "").strip())
+            missing_after = sum(
+                1
+                for employee in employee_names
+                if not self.employee_emails.get(employee, "").strip() and employee not in self.missing_email_suppressions
+            )
             messagebox.showinfo(
                 "Outlook Email Sync",
                 f"Matched emails: {updated}\nStill missing: {missing_after}",
@@ -7059,13 +7430,23 @@ class DssToolsApp(tk.Tk):
         save_ignored_name_typos(self.config_path, self.ignored_name_typos)
 
     def _check_name_typos_manually(self) -> None:
-        if self.current_data is None or not self.current_data.employee_names:
+        if self.current_data is None or not self._managed_employee_names(self.current_data):
             messagebox.showinfo("Check Name Typos", "Load DSS data first.")
             return
-        employee_names = self.current_data.employee_names
+        employee_names = self._managed_employee_names(self.current_data)
         daily_records = self.current_data.daily_records
-        names_to_check = [employee for employee in employee_names if not self.employee_emails.get(employee, "").strip()]
+        names_to_check = [
+            employee
+            for employee in employee_names
+            if not self.employee_emails.get(employee, "").strip() and employee not in self.missing_email_suppressions
+        ]
         raw_warnings: list[NameTypoWarning] = []
+        address_book_names: list[str] = []
+        if names_to_check:
+            try:
+                _results, address_book_names = query_outlook_emails(names_to_check)
+            except Exception:
+                address_book_names = []
         if names_to_check:
             raw_warnings.extend(
                 find_potential_name_typos(
@@ -7076,6 +7457,8 @@ class DssToolsApp(tk.Tk):
             )
         else:
             raw_warnings.extend(find_similar_employee_name_pairs(employee_names, daily_records))
+        if address_book_names:
+            raw_warnings.extend(find_address_book_name_typos(names_to_check, address_book_names, daily_records))
         raw_warnings.extend(
             find_outlook_display_name_typos(
                 employee_names,
@@ -7307,9 +7690,7 @@ class DssToolsApp(tk.Tk):
         self.email_drafts_frame.preview_table.set_rows([])
         self.email_drafts_frame.summary_label.configure(text="Load DSS data to preview employee email drafts.")
         self.email_drafts_frame.set_week_options([])
-        self.employee_editor.set_names([], self.employee_emails)
-        self.notes_frame.set_data([], self.employee_notes)
-        self.groups_frame.set_data([], self.employee_groups, self.employee_emails)
+        self.groups_frame.set_data([], self.employee_groups, self.employee_emails, self.employee_notes, self.missing_email_suppressions)
         self._sync_reports_alert_chrome(has_errors=False, has_parse_warnings=False)
 
     def _load_source_worker(
@@ -7425,10 +7806,11 @@ class DssToolsApp(tk.Tk):
     def _render_data(self, tracker_data: TrackerData) -> None:
         filter_selection = self._current_filter_selection()
         selected_pfs = self._current_pf_selection()
+        managed_employee_names = set(self._managed_employee_names(tracker_data))
         filtered_daily_records = [
             record
             for record in tracker_data.daily_records
-            if extract_pf_identifier(record.source_file) in selected_pfs
+            if extract_pf_identifier(record.source_file) in selected_pfs and record.employee in managed_employee_names
         ]
         filtered_employee_names = sorted({record.employee for record in filtered_daily_records})
         allowed_employees = filter_employee_names(filtered_employee_names, filter_selection, self.employee_groups)
@@ -7479,9 +7861,7 @@ class DssToolsApp(tk.Tk):
             ]
         )
 
-        self.employee_editor.set_names(tracker_data.employee_names, self.employee_emails)
-        self.notes_frame.set_data(tracker_data.employee_names, self.employee_notes)
-        self.groups_frame.set_data(tracker_data.employee_names, self.employee_groups, self.employee_emails)
+        self.groups_frame.set_data(self._managed_employee_names(tracker_data), self.employee_groups, self.employee_emails, self.employee_notes, self.missing_email_suppressions)
 
         weekly_rollup_rows: list[tuple[str, ...]] = []
         weekly_rollup_tags: list[tuple[str, ...]] = []
@@ -7811,7 +8191,10 @@ class DssToolsApp(tk.Tk):
             st_total = round(sum(record.st for record in request.records), 2)
             ot_total = round(sum(record.ot for record in request.records), 2)
             dt_total = round(sum(record.dt for record in request.records), 2)
-            email_display, missing = format_email_address_display(request.email)
+            email_display, missing = format_email_address_display(
+                request.email,
+                suppressed=request.employee in self.missing_email_suppressions,
+            )
             preview_rows.append(
                 (
                     request.employee,
@@ -7826,7 +8209,11 @@ class DssToolsApp(tk.Tk):
             )
             preview_tags.append(("missing_email",) if missing else tuple())
         self.email_drafts_frame.preview_table.set_rows(preview_rows, tags=preview_tags)
-        missing = sum(1 for request in requests if not request.email)
+        missing = sum(
+            1
+            for request in requests
+            if not request.email and request.employee not in self.missing_email_suppressions
+        )
         week_end = week_start + timedelta(days=6)
         self.email_drafts_frame.summary_label.configure(
             text=(
@@ -7845,8 +8232,9 @@ class DssToolsApp(tk.Tk):
             messagebox.showerror("Email Drafts", "No week is available for draft creation.")
             return
 
+        managed_employee_names = set(self._managed_employee_names(self.current_data))
         allowed_employees = filter_employee_names(
-            self.current_data.employee_names,
+            managed_employee_names,
             self._current_filter_selection(),
             self.employee_groups,
         )
