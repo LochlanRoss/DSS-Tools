@@ -8415,10 +8415,12 @@ def main() -> int:
     initial_source = [Path(path).expanduser().resolve() for path in args.source] if args.source else None
     try:
         from dss_qt_app import launch_qt_app
-    except Exception as exc:
-        raise RuntimeError(
-            "The Qt UI could not be started. Make sure PySide6 is installed for this environment."
-        ) from exc
+    except Exception:
+        if os.name == "nt" and getattr(sys, "frozen", False):
+            _windows_set_explicit_app_user_model_id()
+        app = DssToolsApp(initial_source=initial_source)
+        app.mainloop()
+        return 0
     return int(launch_qt_app(initial_source=initial_source))
 
 
