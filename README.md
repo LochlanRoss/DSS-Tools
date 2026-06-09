@@ -2,6 +2,8 @@
 
 Desktop GUI for opening one or more DSS `.xlsx` workbooks, extracting labour hours from the protected daily sheets, and working with the results directly in the app.
 
+The current desktop shell is built on `PySide6` / Qt. The DSS parsing, aggregation, caching, Outlook, and configuration logic still lives in `dss_hours_tracker.py` as the backend core.
+
 ## What It Does
 
 - Opens one or more DSS Excel workbooks
@@ -29,7 +31,7 @@ When you run **`python dss_hours_tracker.py`**, the window looks for, in order: 
 
 ## Run
 
-Launch the GUI:
+Launch the Qt GUI:
 
 ```powershell
 python dss_hours_tracker.py
@@ -88,11 +90,13 @@ The app uses grouped navigation with two tab rows:
     - `Combined Summary by Week`
   - `Reports`
     - `Error Report`
+    - `Sheet Parse Warnings`
+    - `Workbook Health`
+    - `Audit Data Trail`
     - `Email Drafts`
   - `Settings`
     - `Configuration`
-    - `Employee List`
-    - `Employee Groups`
+    - `Employees`
     - `Formatting Rules`
 
 ## Key Features
@@ -128,7 +132,7 @@ The top `Filter` control is a checklist popup:
 - `Uncheck All`
 - one checkbox per employee
 
-You can keep the filter popup open while selecting multiple employees. It closes when you click away or press `Esc`.
+You can keep the filter popup open while selecting multiple employees. In the Qt shell it behaves like a checklist popup and closes when you click away.
 
 The filter applies across the main data views and the email draft preview.
 

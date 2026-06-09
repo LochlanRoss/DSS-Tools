@@ -721,6 +721,7 @@ class AppSettings:
     quickload_cancel_hotkey: str = "<Escape>"
     auto_update_check_enabled: bool = True
     auto_download_updates_on_unmetered_wifi: bool = True
+    dss_library_root: str = ""
     ui_theme: UiThemeColors = field(default_factory=lambda: DEFAULT_UI_THEME)
 
 
@@ -1440,6 +1441,7 @@ def load_app_settings(config_path: Path) -> AppSettings:
         quickload_cancel_hotkey=cancel_hotkey,
         auto_update_check_enabled=bool(raw_settings.get("auto_update_check_enabled", True)),
         auto_download_updates_on_unmetered_wifi=bool(raw_settings.get("auto_download_updates_on_unmetered_wifi", True)),
+        dss_library_root=str(raw_settings.get("dss_library_root", "")).strip(),
         ui_theme=parse_ui_theme_payload(raw_settings.get("ui_theme")),
     )
 
@@ -1454,6 +1456,7 @@ def save_app_settings(config_path: Path, settings: AppSettings) -> None:
         "quickload_cancel_hotkey": settings.quickload_cancel_hotkey,
         "auto_update_check_enabled": settings.auto_update_check_enabled,
         "auto_download_updates_on_unmetered_wifi": settings.auto_download_updates_on_unmetered_wifi,
+        "dss_library_root": settings.dss_library_root,
         "ui_theme": asdict(settings.ui_theme),
     }
     config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -7754,6 +7757,13 @@ class DssToolsApp(tk.Tk):
         self._pending_progress_payload = (request_id, progress_fraction, message)
         self._schedule_progress_ui_flush()
 
+    def _should_render_partial_preview(self) -> bool:
+        try:
+            selected = self.group_notebook.select()
+        except Exception:
+            return True
+        return selected != str(self.settings_group)
+
     def _clear_pending_load_ui_updates(self) -> None:
         self._pending_progress_payload = None
         self._pending_partial_payload = None
@@ -7804,15 +7814,17 @@ class DssToolsApp(tk.Tk):
             return
         self._has_partial_preview = True
         self.current_data = tracker_data
-        self._refresh_filter_options()
-        self._refresh_outlook_sync_button()
         if len(tracker_data.source_paths) == 1:
             source_text = str(tracker_data.source_paths[0])
         else:
             source_text = f"{len(tracker_data.source_paths)} DSS workbooks loading"
         self.source_label.configure(text=source_text)
-        self._render_data(tracker_data)
         self.stats_label.configure(text=message)
+        if not self._should_render_partial_preview():
+            return
+        self._refresh_filter_options()
+        self._refresh_outlook_sync_button()
+        self._render_data(tracker_data)
 
     def _handle_partial_load_update(self, request_id: int, tracker_data: TrackerData, message: str) -> None:
         if request_id != self._load_request_id:
@@ -8401,11 +8413,15 @@ def main() -> int:
         return 0
 
     initial_source = [Path(path).expanduser().resolve() for path in args.source] if args.source else None
-    if os.name == "nt" and getattr(sys, "frozen", False):
-        _windows_set_explicit_app_user_model_id()
-    app = DssToolsApp(initial_source=initial_source)
-    app.mainloop()
-    return 0
+    try:
+        from dss_qt_app import launch_qt_app
+    except Exception:
+        if os.name == "nt" and getattr(sys, "frozen", False):
+            _windows_set_explicit_app_user_model_id()
+        app = DssToolsApp(initial_source=initial_source)
+        app.mainloop()
+        return 0
+    return int(launch_qt_app(initial_source=initial_source))
 
 
 if __name__ == "__main__":

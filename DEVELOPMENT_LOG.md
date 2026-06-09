@@ -331,3 +331,29 @@ These remain on `Known bugs List.txt` until explicitly confirmed fixed by the us
 - The repo path is now writable in-session:
   - `C:\Users\LochlanRoss\Documents\GitHub\DSS-Tools` (local clone path; adjust to match your machine)
 - The current Codex config is using Windows `sandbox = "unelevated"` with per-project trust entries.
+
+## 2026-05-11 - Qt / PySide6 Shell Rewrite
+
+Moderate / major change.
+
+- Added `QT_PYSIDE6_MIGRATION_PLAN.md` to document the shell rewrite strategy, scope, phased rollout, and rollback approach.
+- Added new `dss_qt_app.py` as a PySide6 / Qt shell around the existing `dss_hours_tracker.py` backend.
+- Switched the main GUI entry path in `dss_hours_tracker.main()` from the Tk shell to the Qt shell while preserving installer cleanup mode.
+- Preserved backend parsing / aggregation / caching / Outlook / config logic rather than rewriting business rules in parallel.
+- Ported core workflows into the Qt shell:
+  - open / add / remove / update DSS workbooks
+  - background loading with progress and cancel
+  - employee and PF checklist filters
+  - grouped navigation for Data / Summaries / Reports / Settings
+  - data tables for Daily Raw, Daily by PF, Weekly by PF, Combined Daily, Combined Weekly, Week Totals, Error Report, Sheet Parse Warnings, Workbook Health, Audit Data Trail, and Email Drafts preview
+  - unified Employees management page
+  - Formatting Rules page with job presets
+  - Configuration page with maintenance / diagnostics actions
+  - Outlook email sync and draft creation
+  - export current view
+- Added PySide6 to packaging metadata and requirements.
+- Verified backend regression coverage still passes after the shell swap:
+  - `python -m py_compile dss_hours_tracker.py dss_qt_app.py test_dss_tools.py test_dss_tools_updater.py test_dss_tools_integration.py`
+  - `python -m unittest -v`
+  - Result: 100 tests passed, 29 slow integration tests skipped as expected.
+
