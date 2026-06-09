@@ -1214,6 +1214,7 @@ class EmailDraftsPage(QWidget):
                 (
                     ("employee", "Employee"),
                     ("email", "Email"),
+                    ("pf_numbers", "PF#"),
                     ("days", "Rows"),
                     ("st", "ST"),
                     ("ot", "OT"),
@@ -1418,16 +1419,16 @@ class DssQtMainWindow(QMainWindow):
         self.pages: dict[str, DataTablePage] = {}
         self._daily_raw_tab_visible = True
         for parent, spec in [
-            (self.data_tabs, TableSpec("daily_raw", "Daily Raw", (("source_file", "Source File"), ("date", "Date"), ("sheet", "Source Sheet"), ("employee", "Employee"), ("st", "ST"), ("ot", "OT"), ("dt", "DT"), ("total", "Total"), ("expanded", "Expanded Hours"), ("ranges", "Source Ranges Used")))),
+            (self.data_tabs, TableSpec("daily_raw", "Daily Raw", (("source_file", "Source File"), ("pf_number", "PF#"), ("date", "Date"), ("sheet", "Source Sheet"), ("employee", "Employee"), ("st", "ST"), ("ot", "OT"), ("dt", "DT"), ("total", "Total"), ("expanded", "Expanded Hours"), ("ranges", "Source Ranges Used")))),
             (self.data_tabs, TableSpec("week_totals", "Week Totals", (("week_start", "Week Start"), ("week_end", "Week End"), ("st", "Whole Crew ST"), ("ot", "Whole Crew OT"), ("dt", "Whole Crew DT"), ("total", "Whole Crew Total"), ("expanded", "Expanded Hours")))),
-            (self.summary_tabs, TableSpec("daily_by_pf", "Daily by PF", (("source_file", "Source File"), ("date", "Date"), ("employee", "Employee"), ("st", "ST"), ("ot", "OT"), ("dt", "DT"), ("total", "Total"), ("expanded", "Expanded Hours"), ("row_type", "Row Type")))),
-            (self.summary_tabs, TableSpec("weekly_by_pf", "Weekly by PF", (("source_file", "Source File"), ("week_start", "Week Start"), ("week_end", "Week End"), ("employee", "Employee"), ("st", "ST"), ("ot", "OT"), ("dt", "DT"), ("total", "Total"), ("expanded", "Expanded Hours"), ("row_type", "Row Type")))),
+            (self.summary_tabs, TableSpec("daily_by_pf", "Daily by PF", (("source_file", "Source File"), ("pf_number", "PF#"), ("date", "Date"), ("employee", "Employee"), ("st", "ST"), ("ot", "OT"), ("dt", "DT"), ("total", "Total"), ("expanded", "Expanded Hours"), ("row_type", "Row Type")))),
+            (self.summary_tabs, TableSpec("weekly_by_pf", "Weekly by PF", (("source_file", "Source File"), ("pf_number", "PF#"), ("week_start", "Week Start"), ("week_end", "Week End"), ("employee", "Employee"), ("st", "ST"), ("ot", "OT"), ("dt", "DT"), ("total", "Total"), ("expanded", "Expanded Hours"), ("row_type", "Row Type")))),
             (self.summary_tabs, TableSpec("combined_daily", "Combined Summary Daily", (("date", "Date"), ("employee", "Employee"), ("st", "ST"), ("ot", "OT"), ("dt", "DT"), ("total", "Total"), ("expanded", "Expanded Hours")))),
             (self.summary_tabs, TableSpec("combined_weekly", "Combined Summary Weekly", (("week_start", "Week Start"), ("week_end", "Week End"), ("employee", "Employee"), ("st", "ST"), ("ot", "OT"), ("dt", "DT"), ("total", "Total"), ("expanded", "Expanded Hours")))),
             (self.report_tabs, TableSpec("error_report", "Error Report", (("employee", "Employee"), ("week_start", "Week Start"), ("week_end", "Week End"), ("hour_type", "Rule"), ("limit", "Limit"), ("actual_total", "Actual"), ("delta", "Delta"), ("trigger_date", "Trigger Date"), ("source_files", "Source Files"), ("reason", "Reason"), ("breakdown", "Breakdown")))),
             (self.report_tabs, TableSpec("parse_warnings", "Sheet Parse Warnings", (("source_file", "Source File"), ("sheet", "Sheet"), ("date", "Date"), ("issue", "Issue"), ("details", "Details")))),
             (self.report_tabs, TableSpec("workbook_health", "Workbook Health", (("source_file", "Source File"), ("status", "Status"), ("details", "Details")))),
-            (self.report_tabs, TableSpec("audit_data_trail", "Audit Data Trail", (("source_file", "Source File"), ("date", "Date"), ("sheet", "Sheet"), ("employee", "Employee"), ("st", "ST"), ("ot", "OT"), ("dt", "DT"), ("total", "Total"), ("expanded", "Expanded Hours"), ("source_ranges", "Source Ranges"), ("audit", "Audit")))),
+            (self.report_tabs, TableSpec("audit_data_trail", "Audit Data Trail", (("source_file", "Source File"), ("pf_number", "PF#"), ("date", "Date"), ("sheet", "Sheet"), ("employee", "Employee"), ("st", "ST"), ("ot", "OT"), ("dt", "DT"), ("total", "Total"), ("expanded", "Expanded Hours"), ("source_ranges", "Source Ranges"), ("audit", "Audit")))),
         ]:
             page = DataTablePage(spec, theme, self.config_path)
             page.layoutChanged.connect(self._save_table_layout)
@@ -1531,7 +1532,7 @@ class DssQtMainWindow(QMainWindow):
     def _available_pfs(self) -> list[str]:
         if not self.current_data:
             return []
-        return sorted({core.extract_pf_identifier(path.name) for path in self.current_data.source_paths}, key=str.casefold)
+        return sorted({core.display_pf_number(record.pf_number) for record in self.current_data.daily_records}, key=str.casefold)
 
     def _sync_data_tabs_visibility(self) -> None:
         daily_raw_page = self.pages["daily_raw"]
@@ -1606,7 +1607,7 @@ class DssQtMainWindow(QMainWindow):
         for record in self.current_data.daily_records:
             if record.employee not in allowed_employees:
                 continue
-            if core.extract_pf_identifier(record.source_file) not in allowed_pfs:
+            if allowed_pfs and core.display_pf_number(record.pf_number) not in allowed_pfs:
                 continue
             results.append(record)
         return results
@@ -1639,6 +1640,7 @@ class DssQtMainWindow(QMainWindow):
         self.pages["daily_raw"].set_rows([
             {
                 "source_file": record.source_file,
+                "pf_number": core.display_pf_number(record.pf_number),
                 "date": record.work_date.isoformat(),
                 "sheet": record.source_sheet,
                 "employee": record.employee,
@@ -1654,6 +1656,7 @@ class DssQtMainWindow(QMainWindow):
         self.pages["daily_by_pf"].set_rows([
             {
                 "source_file": row.source_file,
+                "pf_number": core.display_pf_number(row.pf_number),
                 "date": row.work_date.isoformat(),
                 "employee": row.employee,
                 "st": core.fmt_hours(row.st),
@@ -1664,11 +1667,12 @@ class DssQtMainWindow(QMainWindow):
                 "row_type": row.row_type,
                 "__tags__": ("crew_total",) if row.row_type == "Crew Total" else (),
             }
-            for row in sorted(daily_rollup, key=lambda item: (item.work_date, item.source_file, item.row_type == "Crew Total", item.employee), reverse=True)
+            for row in sorted(daily_rollup, key=lambda item: (item.work_date, item.pf_number, item.row_type == "Crew Total", item.employee), reverse=True)
         ])
         self.pages["weekly_by_pf"].set_rows([
             {
                 "source_file": row.source_file,
+                "pf_number": core.display_pf_number(row.pf_number),
                 "week_start": row.week_start.isoformat(),
                 "week_end": row.week_end.isoformat(),
                 "employee": row.employee,
@@ -1684,7 +1688,7 @@ class DssQtMainWindow(QMainWindow):
                     else ("alert",) if core.is_alert_triggered(row.st, row.ot, row.dt, profile) else ()
                 ),
             }
-            for row in sorted(weekly_rollup, key=lambda item: (item.week_start, item.source_file, item.row_type == "Crew Total", item.employee), reverse=True)
+            for row in sorted(weekly_rollup, key=lambda item: (item.week_start, item.pf_number, item.row_type == "Crew Total", item.employee), reverse=True)
         ])
         self.pages["combined_daily"].set_rows([
             {
@@ -1761,11 +1765,12 @@ class DssQtMainWindow(QMainWindow):
                 "details": item.details,
             }
             for item in self.current_data.workbook_health
-            if item.source_file in {path.name for path in self.current_data.source_paths if core.extract_pf_identifier(path.name) in self._selected_pf_values()}
+            if item.source_file in filtered_source_files
         ])
         self.pages["audit_data_trail"].set_rows([
             {
                 "source_file": record.source_file,
+                "pf_number": core.display_pf_number(record.pf_number),
                 "date": record.work_date.isoformat(),
                 "sheet": record.source_sheet,
                 "employee": record.employee,
@@ -1794,6 +1799,7 @@ class DssQtMainWindow(QMainWindow):
             st_total = round(sum(record.st for record in request.records), 2)
             ot_total = round(sum(record.ot for record in request.records), 2)
             dt_total = round(sum(record.dt for record in request.records), 2)
+            pf_numbers = core.pf_numbers_for_records(request.records)
             suppressed = request.employee in self.missing_email_suppressions
             display_email, missing = core.format_email_address_display(request.email, suppressed=suppressed)
             tags = ("missing_email",) if missing else ()
@@ -1801,6 +1807,7 @@ class DssQtMainWindow(QMainWindow):
                 {
                     "employee": request.employee,
                     "email": display_email,
+                    "pf_numbers": pf_numbers or core.display_pf_number(""),
                     "days": str(len(request.records)),
                     "st": core.fmt_hours(st_total),
                     "ot": core.fmt_hours(ot_total),

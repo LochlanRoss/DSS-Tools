@@ -190,6 +190,6 @@ class DssToolsFixtures(unittest.TestCase):
             ws["C5"] = "07:00"
             ws["D5"] = "17:30"
             ws["E5"] = 10 if index == 1 else 2
-            ws["J5"] = "PF26005-3"
+            ws["J5"] = "" if index == 1 else "PF26005-3"
             ws["A35"] = "FOR OFFICE USE:"
         wb.save(path)

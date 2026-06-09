@@ -27,6 +27,7 @@ from dss_hours_tracker import (
     binding_sequence_from_keypress_event,
     az2_revision_matches_sheet_name,
     build_bug_report_html,
+    build_email_html,
     create_bug_report_draft,
     checksum_for_asset_name,
     choose_preferred_outlook_resolution,
@@ -122,37 +123,37 @@ class DssToolsTests(DssToolsFixtures):
 
     def test_daily_rollup_sort_key_keeps_sections_grouped(self) -> None:
         rows = [
-            ("PF26024-2 Electrical", "2026-04-07", "Whole Crew", "255.5", "30", "60", "345.5", "420.5", "Crew Total"),
-            ("PF26024-1 Instrumentation", "2026-04-07", "Grady Redden", "50", "0", "6", "56", "62", "Employee"),
-            ("PF26024-2 Electrical", "2026-04-07", "Dexter Olshewski", "10", "0", "4", "14", "18", "Employee"),
-            ("PF26024-1 Instrumentation", "2026-04-07", "Chuck Ehr", "50", "0", "6", "56", "62", "Employee"),
-            ("PF26024-1 Instrumentation", "2026-04-07", "Whole Crew", "288", "0", "32.5", "320.5", "353", "Crew Total"),
+            ("PF26024-2 Electrical.xlsx", "PF26024-2 Electrical", "2026-04-07", "Whole Crew", "255.5", "30", "60", "345.5", "420.5", "Crew Total"),
+            ("PF26024-1 Instrumentation.xlsx", "PF26024-1 Instrumentation", "2026-04-07", "Grady Redden", "50", "0", "6", "56", "62", "Employee"),
+            ("PF26024-2 Electrical.xlsx", "PF26024-2 Electrical", "2026-04-07", "Dexter Olshewski", "10", "0", "4", "14", "18", "Employee"),
+            ("PF26024-1 Instrumentation.xlsx", "PF26024-1 Instrumentation", "2026-04-07", "Chuck Ehr", "50", "0", "6", "56", "62", "Employee"),
+            ("PF26024-1 Instrumentation.xlsx", "PF26024-1 Instrumentation", "2026-04-07", "Whole Crew", "288", "0", "32.5", "320.5", "353", "Crew Total"),
         ]
         sorted_rows = sorted(rows, key=lambda row: daily_rollup_sort_key("work_date", row, True))
-        self.assertEqual(sorted_rows[0][0], "PF26024-1 Instrumentation")
-        self.assertEqual(sorted_rows[0][2], "Chuck Ehr")
-        self.assertEqual(sorted_rows[1][0], "PF26024-1 Instrumentation")
-        self.assertEqual(sorted_rows[2][2], "Whole Crew")
-        self.assertEqual(sorted_rows[3][0], "PF26024-2 Electrical")
-        self.assertEqual(sorted_rows[3][2], "Dexter Olshewski")
-        self.assertEqual(sorted_rows[4][2], "Whole Crew")
+        self.assertEqual(sorted_rows[0][1], "PF26024-1 Instrumentation")
+        self.assertEqual(sorted_rows[0][3], "Chuck Ehr")
+        self.assertEqual(sorted_rows[1][1], "PF26024-1 Instrumentation")
+        self.assertEqual(sorted_rows[2][3], "Whole Crew")
+        self.assertEqual(sorted_rows[3][1], "PF26024-2 Electrical")
+        self.assertEqual(sorted_rows[3][3], "Dexter Olshewski")
+        self.assertEqual(sorted_rows[4][3], "Whole Crew")
 
     def test_weekly_rollup_sort_key_keeps_sections_grouped(self) -> None:
         rows = [
-            ("PF26024-2 Electrical", "2026-04-27", "2026-05-03", "Whole Crew", "255.5", "30", "60", "345.5", "420.5", "Crew Total"),
-            ("PF26024-1 Instrumentation", "2026-04-27", "2026-05-03", "Grady Redden", "50", "0", "6", "56", "62", "Employee"),
-            ("PF26024-2 Electrical", "2026-04-27", "2026-05-03", "Dexter Olshewski", "10", "0", "4", "14", "18", "Employee"),
-            ("PF26024-1 Instrumentation", "2026-04-27", "2026-05-03", "Chuck Ehr", "50", "0", "6", "56", "62", "Employee"),
-            ("PF26024-1 Instrumentation", "2026-04-27", "2026-05-03", "Whole Crew", "288", "0", "32.5", "320.5", "353", "Crew Total"),
+            ("PF26024-2 Electrical.xlsx", "PF26024-2 Electrical", "2026-04-27", "2026-05-03", "Whole Crew", "255.5", "30", "60", "345.5", "420.5", "Crew Total"),
+            ("PF26024-1 Instrumentation.xlsx", "PF26024-1 Instrumentation", "2026-04-27", "2026-05-03", "Grady Redden", "50", "0", "6", "56", "62", "Employee"),
+            ("PF26024-2 Electrical.xlsx", "PF26024-2 Electrical", "2026-04-27", "2026-05-03", "Dexter Olshewski", "10", "0", "4", "14", "18", "Employee"),
+            ("PF26024-1 Instrumentation.xlsx", "PF26024-1 Instrumentation", "2026-04-27", "2026-05-03", "Chuck Ehr", "50", "0", "6", "56", "62", "Employee"),
+            ("PF26024-1 Instrumentation.xlsx", "PF26024-1 Instrumentation", "2026-04-27", "2026-05-03", "Whole Crew", "288", "0", "32.5", "320.5", "353", "Crew Total"),
         ]
         sorted_rows = sorted(rows, key=lambda row: weekly_rollup_sort_key("week_start", row, True))
-        self.assertEqual(sorted_rows[0][0], "PF26024-1 Instrumentation")
-        self.assertEqual(sorted_rows[0][3], "Chuck Ehr")
-        self.assertEqual(sorted_rows[1][0], "PF26024-1 Instrumentation")
-        self.assertEqual(sorted_rows[2][3], "Whole Crew")
-        self.assertEqual(sorted_rows[3][0], "PF26024-2 Electrical")
-        self.assertEqual(sorted_rows[3][3], "Dexter Olshewski")
-        self.assertEqual(sorted_rows[4][3], "Whole Crew")
+        self.assertEqual(sorted_rows[0][1], "PF26024-1 Instrumentation")
+        self.assertEqual(sorted_rows[0][4], "Chuck Ehr")
+        self.assertEqual(sorted_rows[1][1], "PF26024-1 Instrumentation")
+        self.assertEqual(sorted_rows[2][4], "Whole Crew")
+        self.assertEqual(sorted_rows[3][1], "PF26024-2 Electrical")
+        self.assertEqual(sorted_rows[3][4], "Dexter Olshewski")
+        self.assertEqual(sorted_rows[4][4], "Whole Crew")
 
     def test_parse_sheet_revision_handles_common_patterns(self) -> None:
         self.assertEqual(parse_sheet_revision("2026-04-07"), 0)
@@ -216,13 +217,16 @@ class DssToolsTests(DssToolsFixtures):
         self.assertFalse(health)
         self.assertEqual(len(records), 3)
         self.assertEqual(records[0].employee, "Lochlan Ross")
+        self.assertEqual(records[0].pf_number, "PF26005-3")
         self.assertEqual(records[0].st, 2.0)
         self.assertEqual(records[0].source_sheet, "Sheet1")
         self.assertEqual(records[0].source_ranges, "Sign-in name A5; data C5:R5")
         self.assertEqual(records[1].employee, "Lochlan Ross")
+        self.assertEqual(records[1].pf_number, "PF26044-4")
         self.assertEqual(records[1].st, 8.0)
         self.assertEqual(records[1].source_ranges, "Sign-in name A5; continuation C6:R6")
         self.assertEqual(records[2].employee, "Hayden Roddis")
+        self.assertEqual(records[2].pf_number, "PF26005-3")
         self.assertEqual(records[2].st, 10.0)
         self.assertEqual(records[2].source_ranges, "Sign-in name A7; data C7:R7")
 
@@ -233,6 +237,16 @@ class DssToolsTests(DssToolsFixtures):
 
         self.assertEqual(set(hashes), {"2026-06-08", "2026-06-09"})
         self.assertTrue(all(hashes.values()))
+
+    def test_process_workbook_bytes_infers_signin_pf_from_prior_explicit_row(self) -> None:
+        with self.workspace_files("signin_weekly") as path:
+            self.build_signin_weekly_workbook(path)
+            records, warnings, health = process_workbook_bytes(path, path.read_bytes())
+
+        self.assertFalse(warnings)
+        self.assertFalse(health)
+        by_day = {(record.work_date.isoformat(), record.employee): record for record in records}
+        self.assertEqual(by_day[("2026-06-09", "Lochlan Ross")].pf_number, "PF26005-3")
 
     def test_permission_message_mentions_onedrive_guidance(self) -> None:
         message = build_permission_denied_message(
@@ -694,6 +708,45 @@ class DssToolsTests(DssToolsFixtures):
         )
         self.assertIn('PF26024-2', subject)
         self.assertIn('PF26024-3', subject)
+
+    def test_build_email_html_and_hours_table_use_pf_numbers(self) -> None:
+        records = [
+            DailyRecord(
+                source_path=Path("C:/data/signin.xlsx"),
+                source_file="Nutrien Vanscoy Sign-in Sheet Week 24.xlsx",
+                pf_number="PF26005-3",
+                work_date=date(2026, 6, 8),
+                source_sheet="2026-06-08",
+                employee="Lochlan Ross",
+                st=2.0,
+                ot=0.0,
+                dt=0.0,
+                source_ranges="A5:F5",
+            ),
+            DailyRecord(
+                source_path=Path("C:/data/signin.xlsx"),
+                source_file="Nutrien Vanscoy Sign-in Sheet Week 24.xlsx",
+                pf_number="PF26044-4",
+                work_date=date(2026, 6, 8),
+                source_sheet="2026-06-08",
+                employee="Lochlan Ross",
+                st=8.0,
+                ot=0.0,
+                dt=0.0,
+                source_ranges="A6:F6",
+            ),
+        ]
+        html = build_email_html(
+            "Lochlan Ross",
+            date(2026, 6, 8),
+            date(2026, 6, 14),
+            records,
+            "<p>{pf_numbers}</p>{hours_table}",
+        )
+        self.assertIn("PF26005-3", html)
+        self.assertIn("PF26044-4", html)
+        self.assertIn("<th>PF#</th>", html)
+        self.assertNotIn("Source File</th>", html)
 
     def test_email_templates_round_trip(self) -> None:
         with self.workspace_json("email_templates") as path:

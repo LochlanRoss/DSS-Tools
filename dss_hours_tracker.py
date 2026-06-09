@@ -413,8 +413,36 @@ def directional_sort_key(value: str, descending: bool = False) -> tuple[int, obj
 def weekly_rollup_sort_key(column: str, row: tuple[str, ...], descending: bool) -> tuple[object, ...]:
     columns = {
         "source_file": 0,
-        "week_start": 1,
-        "week_end": 2,
+        "pf_number": 1,
+        "week_start": 2,
+        "week_end": 3,
+        "employee": 4,
+        "st": 5,
+        "ot": 6,
+        "dt": 7,
+        "total": 8,
+        "expanded": 9,
+        "row_type": 10,
+    }
+    primary_index = columns.get(column)
+    if primary_index is None:
+        return tuple()
+    row_type_rank = 1 if row[10] == "Crew Total" else 0
+    return (
+        directional_sort_key(row[primary_index], descending),
+        directional_sort_key(row[0], False),
+        directional_sort_key(row[1], False),
+        directional_sort_key(row[2], descending if column in {"week_start", "week_end"} else False),
+        row_type_rank,
+        directional_sort_key(row[4], False),
+    )
+
+
+def daily_rollup_sort_key(column: str, row: tuple[str, ...], descending: bool) -> tuple[object, ...]:
+    columns = {
+        "source_file": 0,
+        "pf_number": 1,
+        "work_date": 2,
         "employee": 3,
         "st": 4,
         "ot": 5,
@@ -430,34 +458,10 @@ def weekly_rollup_sort_key(column: str, row: tuple[str, ...], descending: bool) 
     return (
         directional_sort_key(row[primary_index], descending),
         directional_sort_key(row[0], False),
-        directional_sort_key(row[1], descending if column in {"week_start", "week_end"} else False),
+        directional_sort_key(row[1], False),
+        directional_sort_key(row[2], descending if column == "work_date" else False),
         row_type_rank,
         directional_sort_key(row[3], False),
-    )
-
-
-def daily_rollup_sort_key(column: str, row: tuple[str, ...], descending: bool) -> tuple[object, ...]:
-    columns = {
-        "source_file": 0,
-        "work_date": 1,
-        "employee": 2,
-        "st": 3,
-        "ot": 4,
-        "dt": 5,
-        "total": 6,
-        "expanded": 7,
-        "row_type": 8,
-    }
-    primary_index = columns.get(column)
-    if primary_index is None:
-        return tuple()
-    row_type_rank = 1 if row[8] == "Crew Total" else 0
-    return (
-        directional_sort_key(row[primary_index], descending),
-        directional_sort_key(row[0], False),
-        directional_sort_key(row[1], descending if column == "work_date" else False),
-        row_type_rank,
-        directional_sort_key(row[2], False),
     )
 
 
@@ -472,6 +476,7 @@ class DailyRecord:
     ot: float
     dt: float
     source_ranges: str
+    pf_number: str = ""
 
     @property
     def total(self) -> float:
@@ -481,6 +486,7 @@ class DailyRecord:
 @dataclass(frozen=True)
 class WeeklyRecord:
     source_file: str
+    pf_number: str
     week_start: date
     week_end: date
     employee: str
@@ -496,6 +502,7 @@ class WeeklyRecord:
 @dataclass(frozen=True)
 class WeeklyRollupRow:
     source_file: str
+    pf_number: str
     week_start: date
     week_end: date
     employee: str
@@ -512,6 +519,7 @@ class WeeklyRollupRow:
 @dataclass(frozen=True)
 class DailySummaryRecord:
     source_file: str
+    pf_number: str
     work_date: date
     employee: str
     st: float
@@ -526,6 +534,7 @@ class DailySummaryRecord:
 @dataclass(frozen=True)
 class DailyRollupRow:
     source_file: str
+    pf_number: str
     work_date: date
     employee: str
     st: float
@@ -1612,6 +1621,7 @@ def serialize_daily_record(record: DailyRecord) -> dict:
     return {
         "source_path": str(record.source_path),
         "source_file": record.source_file,
+        "pf_number": record.pf_number,
         "work_date": record.work_date.isoformat(),
         "source_sheet": record.source_sheet,
         "employee": record.employee,
@@ -1623,9 +1633,10 @@ def serialize_daily_record(record: DailyRecord) -> dict:
 
 
 def deserialize_daily_record(payload: dict) -> DailyRecord:
+    source_file = str(payload["source_file"])
     return DailyRecord(
         source_path=Path(payload["source_path"]),
-        source_file=str(payload["source_file"]),
+        source_file=source_file,
         work_date=datetime.strptime(str(payload["work_date"]), "%Y-%m-%d").date(),
         source_sheet=str(payload["source_sheet"]),
         employee=str(payload["employee"]),
@@ -1633,6 +1644,7 @@ def deserialize_daily_record(payload: dict) -> DailyRecord:
         ot=float(payload["ot"]),
         dt=float(payload["dt"]),
         source_ranges=str(payload["source_ranges"]),
+        pf_number=str(payload.get("pf_number", extract_pf_identifier(source_file))),
     )
 
 
@@ -2545,8 +2557,19 @@ def extract_pf_number(source_name: str) -> str | None:
     return match.group(1).upper()
 
 
+def display_pf_number(pf_number: str) -> str:
+    text = pf_number.strip()
+    return text if text else "(missing PF)"
+
+
 def pf_numbers_for_records(records: Iterable[DailyRecord]) -> str:
-    pf_numbers = sorted({pf_number for record in records if (pf_number := extract_pf_number(record.source_file))})
+    pf_numbers = sorted(
+        {
+            (getattr(record, "pf_number", "") or extract_pf_number(getattr(record, "source_file", "")) or "").strip()
+            for record in records
+            if (getattr(record, "pf_number", "") or extract_pf_number(getattr(record, "source_file", "")) or "").strip()
+        }
+    )
     return ", ".join(pf_numbers)
 
 
@@ -2622,7 +2645,7 @@ def build_hours_table_html(records: list[DailyRecord]) -> str:
             "<tr>"
             f"<td>{html.escape(record.work_date.isoformat())}</td>"
             f"<td>{html.escape(record.work_date.strftime('%A'))}</td>"
-            f"<td>{html.escape(record.source_file)}</td>"
+            f"<td>{html.escape(display_pf_number(record.pf_number))}</td>"
             f"<td>{html.escape(record.source_sheet)}</td>"
             f"<td>{html.escape(fmt_hours(record.st))}</td>"
             f"<td>{html.escape(fmt_hours(record.ot))}</td>"
@@ -2635,7 +2658,7 @@ def build_hours_table_html(records: list[DailyRecord]) -> str:
     return (
         "<table border='1' cellspacing='0' cellpadding='4' style='border-collapse:collapse;'>"
         "<thead><tr>"
-        "<th>Date</th><th>Day</th><th>Source File</th><th>Source Sheet</th><th>ST</th><th>OT</th><th>DT</th><th>Total</th>"
+        "<th>Date</th><th>Day</th><th>PF#</th><th>Source Sheet</th><th>ST</th><th>OT</th><th>DT</th><th>Total</th>"
         "</tr></thead>"
         f"<tbody>{rows_html}</tbody>"
         "<tfoot><tr>"
@@ -2658,11 +2681,13 @@ def build_email_html(
 ) -> str:
     first_name = employee.strip().split()[0] if employee.strip() else employee
     template = body_template.strip() or default_email_body_template()
+    pf_numbers = pf_numbers_for_records(records)
     return template.format(
         employee=html.escape(employee),
         first_name=html.escape(first_name),
         week_start=html.escape(week_start.isoformat()),
         week_end=html.escape(week_end.isoformat()),
+        pf_numbers=html.escape(pf_numbers),
         hours_table=build_hours_table_html(records),
     )
 
@@ -3044,7 +3069,7 @@ def _process_signin_workbook(
     raise_if_cancelled: Callable[[], None],
     restrict_to_sheet_names: frozenset[str] | None,
 ) -> tuple[list[DailyRecord], list[SheetParseWarning], list[WorkbookHealthItem]]:
-    records: list[DailyRecord] = []
+    raw_rows: list[dict[str, object]] = []
     warnings: list[SheetParseWarning] = []
     health: list[WorkbookHealthItem] = []
     signin_sheets: list[tuple[date, str]] = []
@@ -3098,24 +3123,74 @@ def _process_signin_workbook(
             if st == 0.0 and ot == 0.0:
                 continue
 
-            records.append(
-                DailyRecord(
-                    source_path=source_path,
-                    source_file=source_path.name,
-                    work_date=sheet_date,
-                    source_sheet=sheet_name,
-                    employee=current_employee,
-                    st=st,
-                    ot=ot,
-                    dt=0.0,
-                    source_ranges=_signin_source_range(current_name_row or row_idx, row_idx),
-                )
+            raw_rows.append(
+                {
+                    "source_path": source_path,
+                    "source_file": source_path.name,
+                    "work_date": sheet_date,
+                    "source_sheet": sheet_name,
+                    "employee": current_employee,
+                    "st": st,
+                    "ot": ot,
+                    "dt": 0.0,
+                    "source_ranges": _signin_source_range(current_name_row or row_idx, row_idx),
+                    "pf_number": extract_pf_identifier(_sheet_cell_text(ws, row_idx, SIGNIN_JOB_COL)) if _sheet_cell_text(ws, row_idx, SIGNIN_JOB_COL) else "",
+                    "description": _sheet_cell_text(ws, row_idx, SIGNIN_DESCRIPTION_COL),
+                    "order_index": len(raw_rows),
+                }
             )
 
         pf_label = extract_pf_identifier(source_path.name)
         emit_progress(
             0.2 + (0.75 * sheet_index / total_sheets),
             f"Processed {pf_label} - {sheet_name}",
+        )
+    description_pf_map: dict[tuple[str, str], set[str]] = {}
+    explicit_pf_by_employee: dict[str, list[tuple[date, int, str]]] = {}
+    for row in raw_rows:
+        employee = str(row["employee"])
+        pf_number = str(row["pf_number"]).strip()
+        if not pf_number:
+            continue
+        description = str(row["description"]).strip().casefold()
+        if description:
+            description_pf_map.setdefault((employee, description), set()).add(pf_number)
+        explicit_pf_by_employee.setdefault(employee, []).append(
+            (row["work_date"], int(row["order_index"]), pf_number)  # type: ignore[arg-type]
+        )
+    for values in explicit_pf_by_employee.values():
+        values.sort()
+
+    records: list[DailyRecord] = []
+    for row in sorted(raw_rows, key=lambda item: (item["work_date"], int(item["order_index"]))):  # type: ignore[index]
+        pf_number = str(row["pf_number"]).strip()
+        employee = str(row["employee"])
+        description = str(row["description"]).strip().casefold()
+        if not pf_number and description:
+            matches = description_pf_map.get((employee, description), set())
+            if len(matches) == 1:
+                pf_number = next(iter(matches))
+        if not pf_number:
+            prior_matches = [
+                prior_pf
+                for prior_date, prior_index, prior_pf in explicit_pf_by_employee.get(employee, [])
+                if (prior_date, prior_index) < (row["work_date"], int(row["order_index"]))  # type: ignore[index]
+            ]
+            if prior_matches:
+                pf_number = prior_matches[-1]
+        records.append(
+            DailyRecord(
+                source_path=row["source_path"],  # type: ignore[arg-type]
+                source_file=str(row["source_file"]),
+                work_date=row["work_date"],  # type: ignore[arg-type]
+                source_sheet=str(row["source_sheet"]),
+                employee=employee,
+                st=float(row["st"]),
+                ot=float(row["ot"]),
+                dt=float(row["dt"]),
+                source_ranges=str(row["source_ranges"]),
+                pf_number=pf_number,
+            )
         )
     return records, warnings, health
 
@@ -3316,6 +3391,7 @@ def process_workbook_bytes(
                             ot=ot,
                             dt=dt,
                             source_ranges=build_source_ranges(label, start_row, tuple(name_cols), tuple(hour_cols)),
+                            pf_number=extract_pf_identifier(source_path.name),
                         )
                     )
 
@@ -3685,50 +3761,66 @@ def monday_week_start(value: date) -> date:
 
 
 def aggregate_weekly(records: Iterable[DailyRecord], combine_sources: bool = False) -> list[WeeklyRecord]:
-    grouped: dict[tuple[str, date, str], dict[str, float]] = {}
+    grouped: dict[tuple[str, date, str], dict[str, object]] = {}
     for record in records:
         week_start = monday_week_start(record.work_date)
-        source_file = "All DSSs" if combine_sources else record.source_file
-        bucket = grouped.setdefault((source_file, week_start, record.employee), {"ST": 0.0, "OT": 0.0, "DT": 0.0})
-        bucket["ST"] += record.st
-        bucket["OT"] += record.ot
-        bucket["DT"] += record.dt
+        pf_number = "All PFs" if combine_sources else record.pf_number
+        bucket = grouped.setdefault(
+            (pf_number, week_start, record.employee),
+            {"ST": 0.0, "OT": 0.0, "DT": 0.0, "source_files": set()},
+        )
+        bucket["ST"] = float(bucket["ST"]) + record.st
+        bucket["OT"] = float(bucket["OT"]) + record.ot
+        bucket["DT"] = float(bucket["DT"]) + record.dt
+        cast_sources = bucket["source_files"]
+        if isinstance(cast_sources, set):
+            cast_sources.add(record.source_file)
 
     results = []
-    for (source_file, week_start, employee), totals in sorted(grouped.items(), key=lambda item: (item[0][1], item[0][0], item[0][2])):
+    for (pf_number, week_start, employee), totals in sorted(grouped.items(), key=lambda item: (item[0][1], item[0][0], item[0][2])):
+        source_file = "All DSSs" if combine_sources else ", ".join(sorted(totals["source_files"]))  # type: ignore[arg-type]
         results.append(
             WeeklyRecord(
                 source_file=source_file,
+                pf_number=pf_number,
                 week_start=week_start,
                 week_end=week_start + timedelta(days=6),
                 employee=employee,
-                st=round(totals["ST"], 2),
-                ot=round(totals["OT"], 2),
-                dt=round(totals["DT"], 2),
+                st=round(float(totals["ST"]), 2),
+                ot=round(float(totals["OT"]), 2),
+                dt=round(float(totals["DT"]), 2),
             )
         )
     return results
 
 
 def aggregate_daily(records: Iterable[DailyRecord], combine_sources: bool = False) -> list[DailySummaryRecord]:
-    grouped: dict[tuple[str, date, str], dict[str, float]] = {}
+    grouped: dict[tuple[str, date, str], dict[str, object]] = {}
     for record in records:
-        source_file = "All DSSs" if combine_sources else record.source_file
-        bucket = grouped.setdefault((source_file, record.work_date, record.employee), {"ST": 0.0, "OT": 0.0, "DT": 0.0})
-        bucket["ST"] += record.st
-        bucket["OT"] += record.ot
-        bucket["DT"] += record.dt
+        pf_number = "All PFs" if combine_sources else record.pf_number
+        bucket = grouped.setdefault(
+            (pf_number, record.work_date, record.employee),
+            {"ST": 0.0, "OT": 0.0, "DT": 0.0, "source_files": set()},
+        )
+        bucket["ST"] = float(bucket["ST"]) + record.st
+        bucket["OT"] = float(bucket["OT"]) + record.ot
+        bucket["DT"] = float(bucket["DT"]) + record.dt
+        cast_sources = bucket["source_files"]
+        if isinstance(cast_sources, set):
+            cast_sources.add(record.source_file)
 
     results: list[DailySummaryRecord] = []
-    for (source_file, work_date, employee), totals in sorted(grouped.items(), key=lambda item: (item[0][1], item[0][0], item[0][2])):
+    for (pf_number, work_date, employee), totals in sorted(grouped.items(), key=lambda item: (item[0][1], item[0][0], item[0][2])):
+        source_file = "All DSSs" if combine_sources else ", ".join(sorted(totals["source_files"]))  # type: ignore[arg-type]
         results.append(
             DailySummaryRecord(
                 source_file=source_file,
+                pf_number=pf_number,
                 work_date=work_date,
                 employee=employee,
-                st=round(totals["ST"], 2),
-                ot=round(totals["OT"], 2),
-                dt=round(totals["DT"], 2),
+                st=round(float(totals["ST"]), 2),
+                ot=round(float(totals["OT"]), 2),
+                dt=round(float(totals["DT"]), 2),
             )
         )
     return results
@@ -3737,19 +3829,22 @@ def aggregate_daily(records: Iterable[DailyRecord], combine_sources: bool = Fals
 def build_weekly_rollup(weekly_records: list[WeeklyRecord]) -> list[WeeklyRollupRow]:
     grouped: dict[tuple[str, date], list[WeeklyRecord]] = {}
     for record in weekly_records:
-        grouped.setdefault((record.source_file, record.week_start), []).append(record)
+        grouped.setdefault((record.pf_number, record.week_start), []).append(record)
 
     rows: list[WeeklyRollupRow] = []
-    for source_file, week_start in sorted(grouped):
-        week_entries = sorted(grouped[(source_file, week_start)], key=lambda item: item.employee)
+    for pf_number, week_start in sorted(grouped):
+        week_entries = sorted(grouped[(pf_number, week_start)], key=lambda item: item.employee)
         week_end = week_start + timedelta(days=6)
         crew_st = 0.0
         crew_ot = 0.0
         crew_dt = 0.0
+        crew_sources: set[str] = set()
         for record in week_entries:
+            crew_sources.update(source.strip() for source in record.source_file.split(",") if source.strip())
             rows.append(
                 WeeklyRollupRow(
-                    source_file=source_file,
+                    source_file=record.source_file,
+                    pf_number=pf_number,
                     week_start=week_start,
                     week_end=week_end,
                     employee=record.employee,
@@ -3764,7 +3859,8 @@ def build_weekly_rollup(weekly_records: list[WeeklyRecord]) -> list[WeeklyRollup
             crew_dt += record.dt
         rows.append(
             WeeklyRollupRow(
-                source_file=source_file,
+                source_file=", ".join(sorted(crew_sources)) if crew_sources else "All DSSs",
+                pf_number=pf_number,
                 week_start=week_start,
                 week_end=week_end,
                 employee="Whole Crew",
@@ -3780,18 +3876,21 @@ def build_weekly_rollup(weekly_records: list[WeeklyRecord]) -> list[WeeklyRollup
 def build_daily_rollup(daily_summary: list[DailySummaryRecord]) -> list[DailyRollupRow]:
     grouped: dict[tuple[str, date], list[DailySummaryRecord]] = {}
     for record in daily_summary:
-        grouped.setdefault((record.source_file, record.work_date), []).append(record)
+        grouped.setdefault((record.pf_number, record.work_date), []).append(record)
 
     rows: list[DailyRollupRow] = []
-    for source_file, work_date in sorted(grouped):
-        day_entries = sorted(grouped[(source_file, work_date)], key=lambda item: item.employee)
+    for pf_number, work_date in sorted(grouped):
+        day_entries = sorted(grouped[(pf_number, work_date)], key=lambda item: item.employee)
         crew_st = 0.0
         crew_ot = 0.0
         crew_dt = 0.0
+        crew_sources: set[str] = set()
         for record in day_entries:
+            crew_sources.update(source.strip() for source in record.source_file.split(",") if source.strip())
             rows.append(
                 DailyRollupRow(
-                    source_file=source_file,
+                    source_file=record.source_file,
+                    pf_number=pf_number,
                     work_date=work_date,
                     employee=record.employee,
                     st=record.st,
@@ -3805,7 +3904,8 @@ def build_daily_rollup(daily_summary: list[DailySummaryRecord]) -> list[DailyRol
             crew_dt += record.dt
         rows.append(
             DailyRollupRow(
-                source_file=source_file,
+                source_file=", ".join(sorted(crew_sources)) if crew_sources else "All DSSs",
+                pf_number=pf_number,
                 work_date=work_date,
                 employee="Whole Crew",
                 st=round(crew_st, 2),
@@ -5754,8 +5854,8 @@ class DssToolsApp(tk.Tk):
 
         self.daily_table = DataTable(
             self.data_notebook,
-            columns=["source_file", "date", "sheet", "employee", "st", "ot", "dt", "total", "expanded", "ranges"],
-            headings=["Source File", "Date", "Source Sheet", "Employee", "ST", "OT", "DT", "Total", "Expanded Hours", "Source Ranges Used"],
+            columns=["source_file", "pf_number", "date", "sheet", "employee", "st", "ot", "dt", "total", "expanded", "ranges"],
+            headings=["Source File", "PF#", "Date", "Source Sheet", "Employee", "ST", "OT", "DT", "Total", "Expanded Hours", "Source Ranges Used"],
             table_id="daily_raw",
             config_path=self.config_path,
             default_sort_column="sheet",
@@ -5766,8 +5866,8 @@ class DssToolsApp(tk.Tk):
         )
         self.weekly_rollup_table = DataTable(
             self.summaries_notebook,
-            columns=["source_file", "week_start", "week_end", "employee", "st", "ot", "dt", "total", "expanded", "row_type"],
-            headings=["Source File", "Week Start", "Week End", "Employee", "ST", "OT", "DT", "Total", "Expanded Hours", "Row Type"],
+            columns=["source_file", "pf_number", "week_start", "week_end", "employee", "st", "ot", "dt", "total", "expanded", "row_type"],
+            headings=["Source File", "PF#", "Week Start", "Week End", "Employee", "ST", "OT", "DT", "Total", "Expanded Hours", "Row Type"],
             table_id="weekly_rollup",
             config_path=self.config_path,
             default_sort_column="week_start",
@@ -5779,8 +5879,8 @@ class DssToolsApp(tk.Tk):
         )
         self.daily_by_pf_table = DataTable(
             self.summaries_notebook,
-            columns=["source_file", "work_date", "employee", "st", "ot", "dt", "total", "expanded", "row_type"],
-            headings=["Source File", "Date", "Employee", "ST", "OT", "DT", "Total", "Expanded Hours", "Row Type"],
+            columns=["source_file", "pf_number", "work_date", "employee", "st", "ot", "dt", "total", "expanded", "row_type"],
+            headings=["Source File", "PF#", "Date", "Employee", "ST", "OT", "DT", "Total", "Expanded Hours", "Row Type"],
             table_id="daily_by_pf",
             config_path=self.config_path,
             default_sort_column="work_date",
@@ -5890,8 +5990,8 @@ class DssToolsApp(tk.Tk):
         )
         self.audit_data_trail_table = DataTable(
             self.reports_notebook,
-            columns=["source_file", "date", "sheet", "employee", "st", "ot", "dt", "total", "expanded", "source_ranges", "audit"],
-            headings=["Source File", "Date", "Sheet", "Employee", "ST", "OT", "DT", "Total", "Expanded Hours", "Source Ranges", "Audit"],
+            columns=["source_file", "pf_number", "date", "sheet", "employee", "st", "ot", "dt", "total", "expanded", "source_ranges", "audit"],
+            headings=["Source File", "PF#", "Date", "Sheet", "Employee", "ST", "OT", "DT", "Total", "Expanded Hours", "Source Ranges", "Audit"],
             table_id="audit_data_trail",
             config_path=self.config_path,
             default_sort_column="sheet",
@@ -7252,13 +7352,21 @@ class DssToolsApp(tk.Tk):
     def _pf_identifier_by_source_path(self) -> dict[Path, str]:
         if self.current_data is None:
             return {}
-        return {
-            source_path: extract_pf_identifier(source_path.name)
-            for source_path in self.current_data.source_paths
-        }
+        pf_by_source: dict[Path, str] = {}
+        for source_path in self.current_data.source_paths:
+            values = {
+                display_pf_number(record.pf_number)
+                for record in self.current_data.daily_records
+                if record.source_path == source_path
+            }
+            pf_by_source[source_path] = ", ".join(sorted(values, key=str.casefold)) if values else display_pf_number("")
+        return pf_by_source
 
     def _current_pf_selection(self) -> set[str]:
-        pf_values = set(self._pf_identifier_by_source_path().values())
+        pf_values = {
+            display_pf_number(record.pf_number)
+            for record in (self.current_data.daily_records if self.current_data is not None else [])
+        }
         selected = {
             pf_value
             for pf_value in pf_values
@@ -7277,7 +7385,12 @@ class DssToolsApp(tk.Tk):
                 for employee in employee_names
             }
 
-        pf_values = sorted(set(self._pf_identifier_by_source_path().values()))
+        pf_values = sorted(
+            {
+                display_pf_number(record.pf_number)
+                for record in (self.current_data.daily_records if self.current_data is not None else [])
+            }
+        )
         previous_pf_state = dict(self._pf_filter_state)
         if not previous_pf_state:
             self._pf_filter_state = {pf_value: True for pf_value in pf_values}
@@ -8140,7 +8253,7 @@ class DssToolsApp(tk.Tk):
         filtered_daily_records = [
             record
             for record in tracker_data.daily_records
-            if extract_pf_identifier(record.source_file) in selected_pfs and record.employee in managed_employee_names
+            if display_pf_number(record.pf_number) in selected_pfs and record.employee in managed_employee_names
         ]
         filtered_employee_names = sorted({record.employee for record in filtered_daily_records})
         allowed_employees = filter_employee_names(filtered_employee_names, filter_selection, self.employee_groups)
@@ -8148,14 +8261,14 @@ class DssToolsApp(tk.Tk):
         filtered_weekly_rollup = [
             record for record in tracker_data.weekly_rollup
             if (
-                extract_pf_identifier(record.source_file) in selected_pfs
+                display_pf_number(record.pf_number) in selected_pfs
                 and (record.row_type == "Crew Total" or record.employee in allowed_employees)
             )
         ]
         filtered_daily_rollup = [
             record for record in tracker_data.daily_rollup
             if (
-                extract_pf_identifier(record.source_file) in selected_pfs
+                display_pf_number(record.pf_number) in selected_pfs
                 and (record.row_type == "Crew Total" or record.employee in allowed_employees)
             )
         ]
@@ -8177,6 +8290,7 @@ class DssToolsApp(tk.Tk):
             [
                 (
                     record.source_file,
+                    display_pf_number(record.pf_number),
                     record.work_date.isoformat(),
                     record.source_sheet,
                     record.employee,
@@ -8199,6 +8313,7 @@ class DssToolsApp(tk.Tk):
             weekly_rollup_rows.append(
                 (
                     record.source_file,
+                    display_pf_number(record.pf_number),
                     record.week_start.isoformat(),
                     record.week_end.isoformat(),
                     record.employee,
@@ -8222,6 +8337,7 @@ class DssToolsApp(tk.Tk):
             daily_rollup_rows.append(
                 (
                     record.source_file,
+                    display_pf_number(record.pf_number),
                     record.work_date.isoformat(),
                     record.employee,
                     fmt_hours(record.st),
@@ -8329,13 +8445,19 @@ class DssToolsApp(tk.Tk):
                     item.details,
                 )
                 for item in tracker_data.workbook_health
+                if item.source_file in filtered_source_files or not filtered_daily_records
             ],
-            tags=[("alert",) if item.status.lower() == "warning" else tuple() for item in tracker_data.workbook_health],
+            tags=[
+                ("alert",) if item.status.lower() == "warning" else tuple()
+                for item in tracker_data.workbook_health
+                if item.source_file in filtered_source_files or not filtered_daily_records
+            ],
         )
         self.audit_data_trail_table.set_rows(
             [
                 (
                     record.source_file,
+                    display_pf_number(record.pf_number),
                     record.work_date.isoformat(),
                     record.source_sheet,
                     record.employee,
