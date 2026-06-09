@@ -1303,6 +1303,7 @@ class DssQtMainWindow(QMainWindow):
         self._refresh_filters()
         self._refresh_employee_page()
         self.refresh_views()
+        self._set_loading_state(False)
 
     def _managed_employee_names(self) -> list[str]:
         discovered = set(self.current_data.employee_names if self.current_data else [])
@@ -1600,17 +1601,22 @@ class DssQtMainWindow(QMainWindow):
         core.save_app_settings(self.config_path, self.app_settings)
         core.save_last_open_dss_paths(self.config_path, self.source_paths)
         self._sync_data_tabs_visibility()
+        self.hash_poll_timer.setInterval(max(1, self.app_settings.hash_poll_minutes) * 60 * 1000)
 
     def _set_loading_state(self, loading: bool, message: str = "") -> None:
         load_active = self.load_worker is not None
         outlook_active = self.outlook_worker is not None
+        busy = load_active or outlook_active
+        has_sources = bool(self.source_paths)
+        has_data = self.current_data is not None
         self.open_button.setEnabled(not load_active)
         self.quick_open_button.setEnabled(not load_active)
         self.add_button.setEnabled(not load_active)
         self.quick_add_button.setEnabled(not load_active)
-        self.remove_button.setEnabled(not load_active)
-        self.update_button.setEnabled(not load_active)
-        self.cancel_button.setEnabled(load_active or outlook_active)
+        self.remove_button.setEnabled(has_sources and not load_active)
+        self.update_button.setEnabled(has_sources and not load_active)
+        self.export_button.setEnabled(has_data and not busy)
+        self.cancel_button.setEnabled(busy)
         if message:
             self.status_label.setText(message)
 
@@ -1701,7 +1707,11 @@ class DssQtMainWindow(QMainWindow):
             self.reload_data()
         else:
             self.current_data = None
-            self.status_label.setText("No DSS workbooks loaded")
+            self.progress_bar.setValue(0)
+            self.percent_label.setText("0.0%")
+            self._refresh_filters()
+            self._refresh_employee_page()
+            self._set_loading_state(False, "No DSS workbooks loaded")
             self.refresh_views()
 
     def reload_data(self) -> None:
@@ -1771,6 +1781,8 @@ class DssQtMainWindow(QMainWindow):
         self.current_data = tracker_data
         self.progress_bar.setValue(1000)
         self.percent_label.setText("100.0%")
+        self.load_worker = None
+        self.load_thread = None
         self._set_loading_state(False, f"Loaded {len(tracker_data.source_paths)} DSS workbook(s)")
         self._refresh_filters()
         self._refresh_employee_page()
@@ -1781,23 +1793,23 @@ class DssQtMainWindow(QMainWindow):
                 "Update View",
                 f"Reloaded: {len(tracker_data.reloaded_paths)}\nUnchanged: {len(tracker_data.reused_paths)}",
             )
-        self.load_worker = None
-        self.load_thread = None
 
     def _on_load_failed(self, token: int, message: str) -> None:
         if token != self._active_load_token:
             return
-        self._set_loading_state(False, "Load failed")
-        QMessageBox.critical(self, "Failed to open workbook", message)
         self.load_worker = None
         self.load_thread = None
+        self._set_loading_state(False, "Load failed")
+        QMessageBox.critical(self, "Failed to open workbook", message)
 
     def _on_load_cancelled(self, token: int) -> None:
         if token != self._active_load_token:
             return
-        self._set_loading_state(False, "Load cancelled")
         self.load_worker = None
         self.load_thread = None
+        self.progress_bar.setValue(0)
+        self.percent_label.setText("0.0%")
+        self._set_loading_state(False, "Load cancelled")
 
     def save_email_templates(self) -> None:
         self.subject_template = self.email_drafts_page.subject_edit.toPlainText().strip()
@@ -1830,6 +1842,8 @@ class DssQtMainWindow(QMainWindow):
     def _on_outlook_sync_finished(self, token: int, results: dict[str, core.OutlookResolution], address_book_names: list[str]) -> None:
         if token != self._active_outlook_token:
             return
+        self.outlook_worker = None
+        self.outlook_thread = None
         updated = 0
         for employee, resolution in results.items():
             if resolution.email and not self.employee_emails.get(employee, "").strip():
@@ -1857,25 +1871,23 @@ class DssQtMainWindow(QMainWindow):
                 QMessageBox.warning(self, "Potential Name Typos", detail)
         else:
             QMessageBox.information(self, "Outlook Email Sync", f"Matched emails: {updated}")
-        self.outlook_worker = None
-        self.outlook_thread = None
 
     def _on_outlook_sync_failed(self, token: int, message: str) -> None:
         if token != self._active_outlook_token:
             return
+        self.outlook_worker = None
+        self.outlook_thread = None
         if self.load_worker is None:
             self._set_loading_state(False, "Outlook sync failed")
         QMessageBox.critical(self, "Outlook Email Sync", message)
-        self.outlook_worker = None
-        self.outlook_thread = None
 
     def _on_outlook_sync_cancelled(self, token: int) -> None:
         if token != self._active_outlook_token:
             return
-        if self.load_worker is None:
-            self._set_loading_state(False, "Outlook sync cancelled")
         self.outlook_worker = None
         self.outlook_thread = None
+        if self.load_worker is None:
+            self._set_loading_state(False, "Outlook sync cancelled")
 
     def _current_filtered_records(self) -> list[core.DailyRecord]:
         return self._daily_records_filtered()
