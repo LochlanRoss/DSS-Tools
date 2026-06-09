@@ -1440,9 +1440,13 @@ class DssQtMainWindow(QMainWindow):
         self.report_tabs.addTab(self.email_drafts_page, "Email Drafts")
 
         self.configuration_page = ConfigurationPage()
+        self.configuration_scroll = QScrollArea()
+        self.configuration_scroll.setWidgetResizable(True)
+        self.configuration_scroll.setFrameShape(QScrollArea.NoFrame)
+        self.configuration_scroll.setWidget(self.configuration_page)
         self.employees_page = EmployeesPage()
         self.formatting_page = FormattingRulesPage()
-        self.settings_tabs.addTab(self.configuration_page, "Configuration")
+        self.settings_tabs.addTab(self.configuration_scroll, "Configuration")
         self.settings_tabs.addTab(self.employees_page, "Employees")
         self.settings_tabs.addTab(self.formatting_page, "Formatting Rules")
 
