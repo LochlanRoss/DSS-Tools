@@ -3,7 +3,10 @@ from __future__ import annotations
 import csv
 import json
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 import threading
 from fnmatch import fnmatch
 from dataclasses import dataclass
@@ -20,6 +23,7 @@ from PySide6.QtGui import QAction, QColor, QDesktopServices, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QColorDialog,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -170,6 +174,7 @@ class DataTablePage(QWidget):
         top = QHBoxLayout()
         top.addStretch(1)
         top.addWidget(self.columns_button)
+        self.top_bar = top
 
         layout = QVBoxLayout(self)
         layout.addLayout(top)
@@ -181,6 +186,12 @@ class DataTablePage(QWidget):
         self.view.horizontalHeader().sortIndicatorChanged.connect(self._emit_layout_change)
         self.view.horizontalHeader().sectionMoved.connect(lambda *_: self._emit_layout_change())
         self.view.horizontalHeader().sectionResized.connect(lambda *_: self._emit_layout_change())
+
+    def add_toolbar_button(self, text: str, callback: Callable[[], None]) -> QPushButton:
+        button = QPushButton(text, self)
+        button.clicked.connect(callback)
+        self.top_bar.insertWidget(0, button)
+        return button
 
     def set_theme(self, theme: core.UiThemeColors) -> None:
         self.model.theme = theme
@@ -821,7 +832,10 @@ class FormattingRulesPage(QWidget):
         self.weekly_st_edit = QLineEdit()
         self.weekly_ot_edit = QLineEdit()
         self.max_hours_edit = QLineEdit()
+        self.job_preset_combo = QComboBox()
+        self.job_preset_combo.setEditable(True)
         form.addRow("Profile", self.profile_combo)
+        form.addRow("Job Preset", self.job_preset_combo)
         form.addRow("Daily ST Alert", self.daily_st_edit)
         form.addRow("Weekly ST Alert", self.weekly_st_edit)
         form.addRow("Weekly OT Alert", self.weekly_ot_edit)
@@ -838,8 +852,10 @@ class FormattingRulesPage(QWidget):
         presets_layout = QVBoxLayout(presets_box)
         self.presets_list = QListWidget()
         preset_buttons = QHBoxLayout()
-        self.add_preset_button = QPushButton("Add Job Preset")
-        self.remove_preset_button = QPushButton("Remove Job Preset")
+        self.apply_preset_button = QPushButton("Apply Job Preset")
+        self.add_preset_button = QPushButton("Save Job Preset")
+        self.remove_preset_button = QPushButton("Delete Job Preset")
+        preset_buttons.addWidget(self.apply_preset_button)
         preset_buttons.addWidget(self.add_preset_button)
         preset_buttons.addWidget(self.remove_preset_button)
         presets_layout.addWidget(self.presets_list, 1)
@@ -850,9 +866,11 @@ class FormattingRulesPage(QWidget):
         layout.addWidget(presets_box, 1)
 
         self.profile_combo.currentTextChanged.connect(self._profile_changed)
+        self.presets_list.currentItemChanged.connect(self._preset_selected)
         self.new_button.clicked.connect(self._new_profile)
         self.delete_button.clicked.connect(self._delete_profile)
         self.save_button.clicked.connect(self._save_profile)
+        self.apply_preset_button.clicked.connect(self._apply_preset)
         self.add_preset_button.clicked.connect(self._add_preset)
         self.remove_preset_button.clicked.connect(self._remove_preset)
 
@@ -924,36 +942,69 @@ class FormattingRulesPage(QWidget):
         self.changed.emit()
 
     def _refresh_presets(self) -> None:
+        current_job = self.job_preset_combo.currentText().strip()
+        self.job_preset_combo.blockSignals(True)
+        self.job_preset_combo.clear()
+        self.job_preset_combo.addItems(sorted(self.job_presets, key=str.casefold))
+        if current_job:
+            self.job_preset_combo.setCurrentText(current_job)
+        self.job_preset_combo.blockSignals(False)
         self.presets_list.clear()
         for job_name, profile_name in sorted(self.job_presets.items(), key=lambda item: item[0].casefold()):
             item = QListWidgetItem(f"{job_name} -> {profile_name}")
             item.setData(Qt.UserRole, job_name)
             self.presets_list.addItem(item)
 
-    def _add_preset(self) -> None:
-        job_name, ok = QInputDialog.getText(self, "Add Job Preset", "Job name / PF text:")
-        if not ok or not job_name.strip():
+    def _preset_selected(self, current: QListWidgetItem | None, _previous: QListWidgetItem | None) -> None:
+        if current is None:
             return
-        self.job_presets[job_name.strip()] = self.profile_combo.currentText().strip() or self.current_profile_name
+        self.job_preset_combo.setCurrentText(str(current.data(Qt.UserRole)))
+
+    def _apply_preset(self) -> None:
+        job_name = self.job_preset_combo.currentText().strip()
+        profile_name = self.job_presets.get(job_name, "")
+        if not profile_name or profile_name not in self.profiles:
+            QMessageBox.critical(self, "Formatting Rules", "That job preset is missing or points to a deleted profile.")
+            return
+        self.current_profile_name = profile_name
+        self.profile_combo.setCurrentText(profile_name)
+        self._load_profile(self.profiles[profile_name])
+        self.changed.emit()
+
+    def _add_preset(self) -> None:
+        job_name = self.job_preset_combo.currentText().strip()
+        if not job_name:
+            QMessageBox.critical(self, "Formatting Rules", "Enter a job preset name first.")
+            return
+        self.job_presets[job_name] = self.profile_combo.currentText().strip() or self.current_profile_name
         self._refresh_presets()
         self.changed.emit()
 
     def _remove_preset(self) -> None:
-        item = self.presets_list.currentItem()
-        if not item:
+        job_name = self.job_preset_combo.currentText().strip()
+        if not job_name or job_name not in self.job_presets:
             return
-        self.job_presets.pop(str(item.data(Qt.UserRole)), None)
+        if QMessageBox.question(self, "Delete Job Preset", f"Delete job preset '{job_name}'?") != QMessageBox.Yes:
+            return
+        self.job_presets.pop(job_name, None)
         self._refresh_presets()
         self.changed.emit()
 
 
 class ConfigurationPage(QWidget):
     settingsChanged = Signal()
+    applyRequested = Signal()
     resetRequested = Signal()
     clearCacheRequested = Signal()
     clearEmailsRequested = Signal()
     clearAllRequested = Signal()
+    exportDiagnosticRequested = Signal()
+    testOutlookRequested = Signal()
+    showLoadedStatusRequested = Signal()
     submitBugRequested = Signal()
+    checkUpdatesRequested = Signal()
+    syncOutlookRequested = Signal()
+    checkNameTyposRequested = Signal()
     showAppDataRequested = Signal()
 
     def __init__(self) -> None:
@@ -967,8 +1018,14 @@ class ConfigurationPage(QWidget):
         self.quickload_box = QCheckBox()
         self.hash_poll_spin = QSpinBox()
         self.hash_poll_spin.setRange(1, 1440)
+        self.quickload_hotkey_combo = QComboBox()
+        self.quickload_hotkey_combo.setEditable(True)
+        self.quickload_hotkey_combo.addItems(list(core.QUICKLOAD_CANCEL_HOTKEY_PRESETS))
+        self.auto_update_check_box = QCheckBox()
+        self.auto_update_download_box = QCheckBox()
         self.library_root_edit = QLineEdit()
         self.library_root_browse_button = QPushButton("Browse...")
+        self.version_label = QLabel(f"Application version: {core.APP_VERSION}")
         library_root_row = QWidget()
         library_root_layout = QHBoxLayout(library_root_row)
         library_root_layout.setContentsMargins(0, 0, 0, 0)
@@ -978,7 +1035,29 @@ class ConfigurationPage(QWidget):
         form.addRow("Show Daily Raw tab", self.show_daily_raw_box)
         form.addRow("Quick load last DSS set on startup", self.quickload_box)
         form.addRow("Check source DSS(s) frequency (minutes)", self.hash_poll_spin)
+        form.addRow("Cancel quick-load hotkey", self.quickload_hotkey_combo)
+        form.addRow("Automatically check GitHub for updates on startup", self.auto_update_check_box)
+        form.addRow("Automatically download updates on unmetered Wi-Fi", self.auto_update_download_box)
         form.addRow("DSS library root folder", library_root_row)
+        form.addRow("", self.version_label)
+
+        appearance = QGroupBox("Appearance")
+        appearance_layout = QGridLayout(appearance)
+        self._theme_line_edits: dict[str, QLineEdit] = {}
+        for row, (label, attr) in enumerate(core.UI_THEME_CONFIG_FIELDS):
+            appearance_layout.addWidget(QLabel(label), row, 0)
+            edit = QLineEdit()
+            self._theme_line_edits[attr] = edit
+            pick_button = QPushButton("Pick...")
+            pick_button.clicked.connect(lambda _checked=False, key=attr: self._pick_theme_colour(key))
+            appearance_layout.addWidget(edit, row, 1)
+            appearance_layout.addWidget(pick_button, row, 2)
+        self.reset_colours_button = QPushButton("Reset colours to sample defaults")
+        self.reset_colours_button.clicked.connect(self._reset_theme_defaults)
+        appearance_layout.addWidget(self.reset_colours_button, len(core.UI_THEME_CONFIG_FIELDS), 0, 1, 3)
+
+        self.apply_button = QPushButton("Apply Settings")
+        self.apply_button.clicked.connect(self.applyRequested.emit)
 
         maintenance = QGroupBox("Maintenance")
         maintenance_layout = QGridLayout(maintenance)
@@ -993,27 +1072,63 @@ class ConfigurationPage(QWidget):
             self.clear_cache_button,
             self.clear_emails_button,
             self.clear_all_button,
-            self.show_app_data_button,
-            self.bug_report_button,
         ]
         for idx, button in enumerate(buttons):
             maintenance_layout.addWidget(button, idx // 2, idx % 2)
 
+        diagnostics = QGroupBox("Diagnostics")
+        diagnostics_layout = QGridLayout(diagnostics)
+        self.export_diagnostic_button = QPushButton("Export Diagnostic Snapshot")
+        self.test_outlook_button = QPushButton("Test Outlook Connection")
+        self.show_loaded_status_button = QPushButton("Show Loaded DSS Status")
+        self.check_updates_button = QPushButton("Check for Updates")
+        self.sync_outlook_button = QPushButton("Sync Outlook Emails")
+        self.check_name_typos_button = QPushButton("Check Name Typos")
+        diagnostics_buttons = [
+            self.show_app_data_button,
+            self.export_diagnostic_button,
+            self.test_outlook_button,
+            self.show_loaded_status_button,
+            self.bug_report_button,
+            self.check_updates_button,
+            self.sync_outlook_button,
+            self.check_name_typos_button,
+        ]
+        for idx, button in enumerate(diagnostics_buttons):
+            diagnostics_layout.addWidget(button, idx // 2, idx % 2)
+        self.update_status_label = QLabel("")
+        self.update_status_label.setWordWrap(True)
+        diagnostics_layout.addWidget(self.update_status_label, (len(diagnostics_buttons) + 1) // 2, 0, 1, 2)
+
         layout.addWidget(settings_box)
+        layout.addWidget(appearance)
+        layout.addWidget(self.apply_button, 0, Qt.AlignLeft)
         layout.addWidget(maintenance)
+        layout.addWidget(diagnostics)
         layout.addStretch(1)
 
         self.disable_typo_box.toggled.connect(self.settingsChanged.emit)
         self.show_daily_raw_box.toggled.connect(self.settingsChanged.emit)
         self.quickload_box.toggled.connect(self.settingsChanged.emit)
         self.hash_poll_spin.valueChanged.connect(self.settingsChanged.emit)
+        self.quickload_hotkey_combo.lineEdit().editingFinished.connect(self.settingsChanged.emit)
+        self.auto_update_check_box.toggled.connect(self.settingsChanged.emit)
+        self.auto_update_download_box.toggled.connect(self.settingsChanged.emit)
         self.library_root_edit.editingFinished.connect(self.settingsChanged.emit)
+        for edit in self._theme_line_edits.values():
+            edit.editingFinished.connect(self.settingsChanged.emit)
         self.library_root_browse_button.clicked.connect(self._browse_library_root)
         self.reset_button.clicked.connect(self.resetRequested.emit)
         self.clear_cache_button.clicked.connect(self.clearCacheRequested.emit)
         self.clear_emails_button.clicked.connect(self.clearEmailsRequested.emit)
         self.clear_all_button.clicked.connect(self.clearAllRequested.emit)
+        self.export_diagnostic_button.clicked.connect(self.exportDiagnosticRequested.emit)
+        self.test_outlook_button.clicked.connect(self.testOutlookRequested.emit)
+        self.show_loaded_status_button.clicked.connect(self.showLoadedStatusRequested.emit)
         self.bug_report_button.clicked.connect(self.submitBugRequested.emit)
+        self.check_updates_button.clicked.connect(self.checkUpdatesRequested.emit)
+        self.sync_outlook_button.clicked.connect(self.syncOutlookRequested.emit)
+        self.check_name_typos_button.clicked.connect(self.checkNameTyposRequested.emit)
         self.show_app_data_button.clicked.connect(self.showAppDataRequested.emit)
 
     def _browse_library_root(self) -> None:
@@ -1022,24 +1137,66 @@ class ConfigurationPage(QWidget):
             self.library_root_edit.setText(folder)
             self.settingsChanged.emit()
 
+    def _pick_theme_colour(self, attr: str) -> None:
+        edit = self._theme_line_edits.get(attr)
+        if edit is None:
+            return
+        current = core.normalize_ui_hex_color(edit.text().strip()) or "#ffffff"
+        picked = QColorDialog.getColor(QColor(current), self, "Choose colour")
+        if picked.isValid():
+            edit.setText(picked.name().lower())
+            self.settingsChanged.emit()
+
+    def _reset_theme_defaults(self) -> None:
+        defaults = core.DEFAULT_UI_THEME
+        for _label, attr in core.UI_THEME_CONFIG_FIELDS:
+            edit = self._theme_line_edits.get(attr)
+            if edit is not None:
+                edit.setText(getattr(defaults, attr))
+        self.settingsChanged.emit()
+
+    def set_update_status(self, text: str) -> None:
+        self.update_status_label.setText(text)
+
     def set_settings(self, settings: core.AppSettings) -> None:
         self.disable_typo_box.setChecked(settings.disable_name_typo_notifications)
         self.show_daily_raw_box.setChecked(settings.show_daily_raw_tab)
         self.quickload_box.setChecked(settings.quickload_last_sources_enabled)
         self.hash_poll_spin.setValue(settings.hash_poll_minutes)
+        self.quickload_hotkey_combo.setCurrentText(settings.quickload_cancel_hotkey)
+        self.auto_update_check_box.setChecked(settings.auto_update_check_enabled)
+        self.auto_update_download_box.setChecked(settings.auto_download_updates_on_unmetered_wifi)
         self.library_root_edit.setText(settings.dss_library_root)
+        for _label, attr in core.UI_THEME_CONFIG_FIELDS:
+            edit = self._theme_line_edits.get(attr)
+            if edit is not None:
+                edit.setText(getattr(settings.ui_theme, attr))
 
     def snapshot(self, current: core.AppSettings) -> core.AppSettings:
+        hotkey = core.normalize_quickload_cancel_hotkey(self.quickload_hotkey_combo.currentText().strip())
+        if not core.is_allowed_quickload_cancel_hotkey(hotkey):
+            raise ValueError("Cancel quick-load hotkey is invalid.")
+        theme_payload: dict[str, str] = {
+            "reports_outline_background": current.ui_theme.reports_outline_background,
+            "reports_outline_foreground": current.ui_theme.reports_outline_foreground,
+        }
+        for label, attr in core.UI_THEME_CONFIG_FIELDS:
+            edit = self._theme_line_edits.get(attr)
+            raw = edit.text().strip() if edit is not None else getattr(current.ui_theme, attr)
+            normalized = core.normalize_ui_hex_color(raw)
+            if normalized is None:
+                raise ValueError(f'Invalid colour for "{label}". Use #RRGGBB.')
+            theme_payload[attr] = normalized
         return core.AppSettings(
             disable_name_typo_notifications=self.disable_typo_box.isChecked(),
             hash_poll_minutes=int(self.hash_poll_spin.value()),
             show_daily_raw_tab=self.show_daily_raw_box.isChecked(),
             quickload_last_sources_enabled=self.quickload_box.isChecked(),
-            quickload_cancel_hotkey=current.quickload_cancel_hotkey,
-            auto_update_check_enabled=current.auto_update_check_enabled,
-            auto_download_updates_on_unmetered_wifi=current.auto_download_updates_on_unmetered_wifi,
+            quickload_cancel_hotkey=hotkey,
+            auto_update_check_enabled=self.auto_update_check_box.isChecked(),
+            auto_download_updates_on_unmetered_wifi=self.auto_update_download_box.isChecked(),
             dss_library_root=self.library_root_edit.text().strip(),
-            ui_theme=current.ui_theme,
+            ui_theme=core.parse_ui_theme_payload(theme_payload, defaults=current.ui_theme),
         )
 
 
@@ -1128,9 +1285,16 @@ class EmailDraftsPage(QWidget):
 
 
 class DssQtMainWindow(QMainWindow):
+    updateCheckResultReady = Signal(object, object, bool)
+    updateCheckErrorRaised = Signal(str, bool)
+    updateDownloadSuccessReady = Signal(object, object, bool, bool)
+    updateDownloadErrorRaised = Signal(str, bool)
+
     def __init__(self, initial_source: list[Path] | None = None) -> None:
         super().__init__()
         self.app_root, self.cache_dir = core.ensure_app_directories()
+        self.updates_dir = self.app_root / core.UPDATE_DIRNAME
+        self.updates_dir.mkdir(parents=True, exist_ok=True)
         self.config_path = self.app_root / core.CONFIG_FILENAME
         self.table_layouts = core.load_table_layouts(self.config_path)
         self.app_settings = core.load_app_settings(self.config_path)
@@ -1154,7 +1318,19 @@ class DssQtMainWindow(QMainWindow):
         self._active_load_token = -1
         self._next_outlook_token = 0
         self._active_outlook_token = -1
+        self._cancel_shortcut_action: QAction | None = None
+        self._quickload_session = False
+        self._update_check_in_progress = False
+        self._update_download_in_progress = False
+        self._auto_update_check_done = False
+        self._downloaded_update_path: Path | None = None
+        self._update_status_text = f"Installed version: {core.APP_VERSION}"
+        self._hash_alerted_paths: set[Path] = set()
         self.hash_poll_timer = QTimer(self)
+        self.updateCheckResultReady.connect(self._handle_update_check_result)
+        self.updateCheckErrorRaised.connect(self._handle_update_check_error)
+        self.updateDownloadSuccessReady.connect(self._handle_update_download_success)
+        self.updateDownloadErrorRaised.connect(self._handle_update_download_error)
         self._build_ui()
         self._bind_shortcuts()
         self._apply_window_icon()
@@ -1165,8 +1341,10 @@ class DssQtMainWindow(QMainWindow):
         elif self.app_settings.quickload_last_sources_enabled:
             last_paths = [path for path in core.load_last_open_dss_paths(self.config_path) if path.exists()]
             if last_paths:
+                self._quickload_session = True
                 self.source_paths = last_paths
                 QTimer.singleShot(0, self.reload_data)
+        QTimer.singleShot(core.AUTO_UPDATE_CHECK_DELAY_MS, self._auto_check_for_updates)
 
     def _build_ui(self) -> None:
         self.setWindowTitle(core.DISPLAY_APP_NAME)
@@ -1184,7 +1362,8 @@ class DssQtMainWindow(QMainWindow):
         self.export_button = QPushButton("Export Current View")
         self.employee_filter = CheckListButton("All Employees", "Employees")
         self.pf_filter = CheckListButton("All PFs", "PFs")
-        self.status_label = QLabel("No DSS workbooks loaded")
+        self.source_label = QLabel("No workbook loaded")
+        self.loading_label = QLabel("")
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 1000)
         self.percent_label = QLabel("0.0%")
@@ -1202,15 +1381,25 @@ class DssQtMainWindow(QMainWindow):
             self.employee_filter,
             QLabel("PF"),
             self.pf_filter,
-            self.status_label,
         ):
             if isinstance(widget, QWidget):
                 toolbar.addWidget(widget)
         toolbar.addStretch(1)
-        toolbar.addWidget(self.percent_label)
-        toolbar.addWidget(self.progress_bar)
-        toolbar.addWidget(self.cancel_button)
+        toolbar.addWidget(self.source_label, 1)
+        toolbar.addWidget(self.loading_label)
         root_layout.addLayout(toolbar)
+
+        status_row = QHBoxLayout()
+        self.status_label = QLabel("Load a DSS workbook to view daily and weekly labour summaries.")
+        self.status_label.setWordWrap(True)
+        self.quickload_hint_label = QLabel("")
+        self.quickload_hint_label.setWordWrap(True)
+        status_row.addWidget(self.status_label, 1)
+        status_row.addWidget(self.quickload_hint_label)
+        status_row.addWidget(self.percent_label)
+        status_row.addWidget(self.progress_bar)
+        status_row.addWidget(self.cancel_button)
+        root_layout.addLayout(status_row)
 
         self.group_tabs = QTabWidget()
         root_layout.addWidget(self.group_tabs, 1)
@@ -1244,6 +1433,7 @@ class DssQtMainWindow(QMainWindow):
             page.layoutChanged.connect(self._save_table_layout)
             parent.addTab(page, spec.title)
             self.pages[spec.table_id] = page
+        self.pages["error_report"].add_toolbar_button("Check Name Typos", self.check_name_typos_manually)
 
         self.email_drafts_page = EmailDraftsPage(theme, self.config_path)
         self.email_drafts_page.preview_table.layoutChanged.connect(self._save_table_layout)
@@ -1274,20 +1464,31 @@ class DssQtMainWindow(QMainWindow):
         self.employees_page.syncRequested.connect(self.sync_outlook_emails)
         self.formatting_page.changed.connect(self._formatting_changed)
         self.configuration_page.settingsChanged.connect(self._settings_changed)
+        self.configuration_page.applyRequested.connect(self.apply_settings)
         self.configuration_page.resetRequested.connect(self.reset_settings)
         self.configuration_page.clearCacheRequested.connect(self.clear_cached_dss)
         self.configuration_page.clearEmailsRequested.connect(self.clear_stored_emails)
         self.configuration_page.clearAllRequested.connect(self.clear_all_stored_data)
+        self.configuration_page.exportDiagnosticRequested.connect(self.export_diagnostic_snapshot)
+        self.configuration_page.testOutlookRequested.connect(self.test_outlook_connection)
+        self.configuration_page.showLoadedStatusRequested.connect(self.show_loaded_dss_status)
         self.configuration_page.submitBugRequested.connect(self.submit_bug_report)
+        self.configuration_page.checkUpdatesRequested.connect(self.check_for_updates)
+        self.configuration_page.syncOutlookRequested.connect(self.sync_outlook_emails)
+        self.configuration_page.checkNameTyposRequested.connect(self.check_name_typos_manually)
         self.configuration_page.showAppDataRequested.connect(self.show_app_data_folder)
 
     def _bind_shortcuts(self) -> None:
+        if self._cancel_shortcut_action is not None:
+            self.removeAction(self._cancel_shortcut_action)
+            self._cancel_shortcut_action = None
         cancel_shortcut = QKeySequence(self.app_settings.quickload_cancel_hotkey.strip("<>").replace("-", "+"))
         if not cancel_shortcut.isEmpty():
             action = QAction(self)
             action.setShortcut(cancel_shortcut)
             action.triggered.connect(self.cancel_active_work)
             self.addAction(action)
+            self._cancel_shortcut_action = action
 
     def _apply_window_icon(self) -> None:
         icon_path = core.resolve_app_icon_path()
@@ -1296,12 +1497,16 @@ class DssQtMainWindow(QMainWindow):
 
     def _sync_ui_from_state(self) -> None:
         self.configuration_page.set_settings(self.app_settings)
+        self.configuration_page.set_update_status(self._update_status_text)
         self.formatting_page.set_data(self.profiles, self.current_profile_name, self.job_presets)
         self.email_drafts_page.set_templates(self.subject_template, self.body_template)
         self._sync_data_tabs_visibility()
         self.hash_poll_timer.setInterval(max(1, self.app_settings.hash_poll_minutes) * 60 * 1000)
         self._refresh_filters()
         self._refresh_employee_page()
+        self._refresh_source_status_labels()
+        self._refresh_quickload_hint_label()
+        self._apply_ui_theme_chrome()
         self.refresh_views()
         self._set_loading_state(False)
 
@@ -1347,6 +1552,44 @@ class DssQtMainWindow(QMainWindow):
             self.missing_email_suppressions,
         )
 
+    def _set_update_status(self, text: str) -> None:
+        self._update_status_text = text
+        self.configuration_page.set_update_status(text)
+
+    def _refresh_source_status_labels(self) -> None:
+        if self.current_data and self.current_data.source_paths:
+            if len(self.current_data.source_paths) == 1:
+                self.source_label.setText(self.current_data.source_paths[0].name)
+            else:
+                self.source_label.setText(f"{len(self.current_data.source_paths)} DSS workbooks loaded")
+            return
+        if self.source_paths:
+            if len(self.source_paths) == 1:
+                self.source_label.setText(self.source_paths[0].name)
+            else:
+                self.source_label.setText(f"{len(self.source_paths)} DSS workbooks selected")
+            return
+        self.source_label.setText("No workbook loaded")
+
+    def _refresh_quickload_hint_label(self) -> None:
+        if self.load_worker is not None and self._quickload_session:
+            hotkey = self.app_settings.quickload_cancel_hotkey.strip() or "<Escape>"
+            self.quickload_hint_label.setText(f"Quick load active. Cancel with {hotkey}.")
+        else:
+            self.quickload_hint_label.setText("")
+
+    def _apply_ui_theme_chrome(self) -> None:
+        theme = self.app_settings.ui_theme
+        self.centralWidget().setStyleSheet(f"background-color: {theme.content_chrome_background};")
+
+    def _sync_reports_alert_chrome(self, has_errors: bool, has_parse_warnings: bool) -> None:
+        error_index = self.report_tabs.indexOf(self.pages["error_report"])
+        parse_index = self.report_tabs.indexOf(self.pages["parse_warnings"])
+        reports_index = self.group_tabs.indexOf(self.report_tabs)
+        self.report_tabs.setTabText(error_index, "Error Report (!)" if has_errors else "Error Report")
+        self.report_tabs.setTabText(parse_index, "Sheet Parse Warnings (!)" if has_parse_warnings else "Sheet Parse Warnings")
+        self.group_tabs.setTabText(reports_index, "Reports (!)" if (has_errors or has_parse_warnings) else "Reports")
+
     def _active_profile(self) -> core.FormattingProfile:
         return self.profiles.get(self.current_profile_name, next(iter(self.profiles.values())))
 
@@ -1373,6 +1616,7 @@ class DssQtMainWindow(QMainWindow):
                 page.set_rows([])
             self.email_drafts_page.preview_table.set_rows([])
             self.email_drafts_page.set_weeks([])
+            self._sync_reports_alert_chrome(False, False)
             return
 
         filtered_records = self._daily_records_filtered()
@@ -1494,7 +1738,7 @@ class DssQtMainWindow(QMainWindow):
             for item in sorted(findings, key=lambda finding: (finding.week_start, finding.employee, finding.hour_type), reverse=True)
         ])
         filtered_source_files = {record.source_file for record in filtered_records}
-        self.pages["parse_warnings"].set_rows([
+        parse_warning_rows = [
             {
                 "source_file": warning.source_file,
                 "sheet": warning.source_sheet,
@@ -1504,7 +1748,8 @@ class DssQtMainWindow(QMainWindow):
             }
             for warning in self.current_data.parse_warnings
             if warning.source_file in filtered_source_files
-        ])
+        ]
+        self.pages["parse_warnings"].set_rows(parse_warning_rows)
         self.pages["workbook_health"].set_rows([
             {
                 "source_file": item.source_file,
@@ -1532,6 +1777,7 @@ class DssQtMainWindow(QMainWindow):
         ])
         self._refresh_email_preview(filtered_records)
         self._refresh_filters()
+        self._sync_reports_alert_chrome(bool(findings), bool(parse_warning_rows))
 
     def _refresh_email_preview(self, filtered_records: list[core.DailyRecord]) -> None:
         week_start = self.email_drafts_page.selected_week_start()
@@ -1597,11 +1843,22 @@ class DssQtMainWindow(QMainWindow):
         self.refresh_views()
 
     def _settings_changed(self) -> None:
-        self.app_settings = self.configuration_page.snapshot(self.app_settings)
+        try:
+            self.app_settings = self.configuration_page.snapshot(self.app_settings)
+        except ValueError as exc:
+            self._set_update_status(f"Settings error: {exc}")
+            return
         core.save_app_settings(self.config_path, self.app_settings)
         core.save_last_open_dss_paths(self.config_path, self.source_paths)
         self._sync_data_tabs_visibility()
         self.hash_poll_timer.setInterval(max(1, self.app_settings.hash_poll_minutes) * 60 * 1000)
+        self._bind_shortcuts()
+        self._apply_ui_theme_chrome()
+        self.refresh_views()
+
+    def apply_settings(self) -> None:
+        self._settings_changed()
+        QMessageBox.information(self, "Configuration", "Settings applied.")
 
     def _set_loading_state(self, loading: bool, message: str = "") -> None:
         load_active = self.load_worker is not None
@@ -1617,6 +1874,9 @@ class DssQtMainWindow(QMainWindow):
         self.update_button.setEnabled(has_sources and not load_active)
         self.export_button.setEnabled(has_data and not busy)
         self.cancel_button.setEnabled(busy)
+        self.loading_label.setText("Working..." if busy else "")
+        self._refresh_quickload_hint_label()
+        self._refresh_source_status_labels()
         if message:
             self.status_label.setText(message)
 
@@ -1711,6 +1971,7 @@ class DssQtMainWindow(QMainWindow):
             self.percent_label.setText("0.0%")
             self._refresh_filters()
             self._refresh_employee_page()
+            self.loading_label.setText("")
             self._set_loading_state(False, "No DSS workbooks loaded")
             self.refresh_views()
 
@@ -1719,8 +1980,16 @@ class DssQtMainWindow(QMainWindow):
             QMessageBox.information(self, "Open DSS", "Select one or more DSS workbooks first.")
             return
         self.cancel_active_work(abandon_ui=True, reset_ui=False, message="")
+        if self.app_settings.quickload_last_sources_enabled and not self.current_data:
+            last_paths = [path for path in core.load_last_open_dss_paths(self.config_path) if path.exists()]
+            self._quickload_session = bool(last_paths) and self.source_paths == last_paths
+        else:
+            self._quickload_session = False
+        self._hash_alerted_paths.clear()
         self.progress_bar.setValue(0)
         self.percent_label.setText("0.0%")
+        self.loading_label.setText("Loading...")
+        self._refresh_quickload_hint_label()
         self._next_load_token += 1
         token = self._next_load_token
         self._active_load_token = token
@@ -1763,6 +2032,7 @@ class DssQtMainWindow(QMainWindow):
         value = max(0, min(1000, int(round(fraction * 1000))))
         self.progress_bar.setValue(value)
         self.percent_label.setText(f"{fraction * 100:.1f}%")
+        self.loading_label.setText(f"{fraction * 100:.1f}%")
         self.status_label.setText(message)
 
     def _on_partial_ready(self, token: int, tracker_data: core.TrackerData, message: str) -> None:
@@ -1770,6 +2040,7 @@ class DssQtMainWindow(QMainWindow):
             return
         self.current_data = tracker_data
         self.status_label.setText(message)
+        self._refresh_source_status_labels()
         self._refresh_filters()
         self._refresh_employee_page()
         if self.group_tabs.currentWidget() != self.settings_tabs:
@@ -1781,8 +2052,10 @@ class DssQtMainWindow(QMainWindow):
         self.current_data = tracker_data
         self.progress_bar.setValue(1000)
         self.percent_label.setText("100.0%")
+        self.loading_label.setText("")
         self.load_worker = None
         self.load_thread = None
+        self._quickload_session = False
         self._set_loading_state(False, f"Loaded {len(tracker_data.source_paths)} DSS workbook(s)")
         self._refresh_filters()
         self._refresh_employee_page()
@@ -1799,6 +2072,8 @@ class DssQtMainWindow(QMainWindow):
             return
         self.load_worker = None
         self.load_thread = None
+        self.loading_label.setText("")
+        self._quickload_session = False
         self._set_loading_state(False, "Load failed")
         QMessageBox.critical(self, "Failed to open workbook", message)
 
@@ -1809,6 +2084,8 @@ class DssQtMainWindow(QMainWindow):
         self.load_thread = None
         self.progress_bar.setValue(0)
         self.percent_label.setText("0.0%")
+        self.loading_label.setText("")
+        self._quickload_session = False
         self._set_loading_state(False, "Load cancelled")
 
     def save_email_templates(self) -> None:
@@ -1861,16 +2138,19 @@ class DssQtMainWindow(QMainWindow):
             self._set_loading_state(False, f"Matched emails: {updated}")
         self._refresh_employee_page()
         self.refresh_views()
-        if warnings:
-            detail = "\n\n".join(
-                f"{warning.employee} -> {warning.similar_employee}\n{', '.join(warning.locations)}"
-                for warning in warnings[:10]
-                if core.typo_warning_key(warning.employee, warning.similar_employee) not in self.ignored_name_typos
-            )
-            if detail.strip():
-                QMessageBox.warning(self, "Potential Name Typos", detail)
-        else:
-            QMessageBox.information(self, "Outlook Email Sync", f"Matched emails: {updated}")
+        warnings = [
+            warning
+            for warning in warnings
+            if core.typo_warning_key(warning.employee, warning.similar_employee) not in self.ignored_name_typos
+        ]
+        missing_after = sum(
+            1
+            for employee in self._managed_employee_names()
+            if not self.employee_emails.get(employee, "").strip() and employee not in self.missing_email_suppressions
+        )
+        QMessageBox.information(self, "Outlook Email Sync", f"Matched emails: {updated}\nStill missing: {missing_after}")
+        if warnings and not self.app_settings.disable_name_typo_notifications:
+            self._show_typo_warning_dialog(warnings)
 
     def _on_outlook_sync_failed(self, token: int, message: str) -> None:
         if token != self._active_outlook_token:
@@ -1991,6 +2271,8 @@ class DssQtMainWindow(QMainWindow):
         self.status_label.setText("No DSS workbooks loaded")
         self.progress_bar.setValue(0)
         self.percent_label.setText("0.0%")
+        self._hash_alerted_paths.clear()
+        self._set_update_status(f"Installed version: {core.APP_VERSION}")
         self._sync_ui_from_state()
 
     def reset_settings(self) -> None:
@@ -2003,21 +2285,68 @@ class DssQtMainWindow(QMainWindow):
         self.formatting_page.set_data(self.profiles, self.current_profile_name, self.job_presets)
         self._sync_data_tabs_visibility()
         self.hash_poll_timer.setInterval(max(1, self.app_settings.hash_poll_minutes) * 60 * 1000)
+        self._bind_shortcuts()
+        self._apply_ui_theme_chrome()
         self.refresh_views()
+
+    def export_diagnostic_snapshot(self) -> None:
+        try:
+            export_path = self._write_diagnostic_snapshot()
+        except OSError as exc:
+            QMessageBox.critical(self, "Diagnostic Snapshot", f"Could not write the diagnostic snapshot.\n\n{exc}")
+            return
+        QMessageBox.information(self, "Diagnostic Snapshot", f"Saved diagnostic snapshot:\n{export_path}")
 
     def _write_diagnostic_snapshot(self) -> Path:
         snapshot: dict[str, Any] = {
-            "app_version": core.APP_VERSION,
-            "generated_at": datetime.now().isoformat(),
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "app_name": core.DISPLAY_APP_NAME,
             "app_root": str(self.app_root),
+            "config_path": str(self.config_path),
             "source_paths": [str(path) for path in self.source_paths],
             "cache_dir": str(self.cache_dir),
-            "current_profile": self.current_profile_name,
-            "cache_status": {
-                str(path): (self.current_data.cache_status_by_path.get(path, "Unknown") if self.current_data else "Unknown")
-                for path in self.source_paths
+            "python_version": sys.version,
+            "app_version": core.APP_VERSION,
+            "os_name": os.name,
+            "app_settings": {
+                "disable_name_typo_notifications": self.app_settings.disable_name_typo_notifications,
+                "hash_poll_minutes": self.app_settings.hash_poll_minutes,
+                "show_daily_raw_tab": self.app_settings.show_daily_raw_tab,
+                "quickload_last_sources_enabled": self.app_settings.quickload_last_sources_enabled,
+                "quickload_cancel_hotkey": self.app_settings.quickload_cancel_hotkey,
+                "auto_update_check_enabled": self.app_settings.auto_update_check_enabled,
+                "auto_download_updates_on_unmetered_wifi": self.app_settings.auto_download_updates_on_unmetered_wifi,
+                "ui_theme": core.asdict(self.app_settings.ui_theme),
             },
+            "formatting_profiles": sorted(self.profiles),
+            "current_profile_name": self.current_profile_name,
+            "employee_email_count": len([email for email in self.employee_emails.values() if email.strip()]),
+            "missing_email_suppression_count": len(self.missing_email_suppressions),
+            "employee_group_count": len(self.employee_groups),
+            "cache_file_count": len(list(self.cache_dir.glob("*.json"))),
+            "update_download_dir": str(self.updates_dir),
+            "downloaded_update_path": str(self._downloaded_update_path) if self._downloaded_update_path else "",
+            "loaded_dss": [],
         }
+        if self.current_data is not None:
+            for source_path in self.current_data.source_paths:
+                snapshot["loaded_dss"].append(
+                    {
+                        "path": str(source_path),
+                        "hash": self.current_data.file_hashes.get(source_path, ""),
+                        "reused": source_path in self.current_data.reused_paths,
+                        "reloaded": source_path in self.current_data.reloaded_paths,
+                        "hash_alerted": source_path in self._hash_alerted_paths,
+                    }
+                )
+            snapshot["current_data"] = {
+                "daily_record_count": len(self.current_data.daily_records),
+                "employee_count": len(self.current_data.employee_names),
+                "week_count": len(self.current_data.week_totals),
+                "source_count": len(self.current_data.source_paths),
+            }
+        else:
+            snapshot["current_data"] = None
         export_path = self.app_root / f"diagnostic_snapshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         export_path.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
         return export_path
@@ -2046,8 +2375,469 @@ class DssQtMainWindow(QMainWindow):
             message += f"\n\n{warning}"
         QMessageBox.information(self, "Submit Bug Report", message)
 
+    def test_outlook_connection(self) -> None:
+        if core.pythoncom is None or core.win32com is None:
+            QMessageBox.critical(self, "Outlook Connection", "Outlook integration requires pywin32 and desktop Outlook.")
+            return
+        core.pythoncom.CoInitialize()
+        try:
+            outlook = core.win32com.client.Dispatch("Outlook.Application")
+            namespace = outlook.GetNamespace("MAPI")
+            current_user = getattr(namespace, "CurrentUser", None)
+            user_name = str(getattr(current_user, "Name", "")).strip() or "Unknown user"
+        except Exception as exc:
+            QMessageBox.critical(self, "Outlook Connection", f"Could not connect to Outlook.\n\n{exc}")
+            return
+        finally:
+            core.pythoncom.CoUninitialize()
+        QMessageBox.information(self, "Outlook Connection", f"Connected to desktop Outlook successfully.\nUser: {user_name}")
+
+    def show_loaded_dss_status(self) -> None:
+        if self.current_data is None or not self.current_data.source_paths:
+            QMessageBox.information(self, "Loaded DSS Status", "No DSS workbooks are currently loaded.")
+            return
+        lines = [
+            f"Loaded DSS files: {len(self.current_data.source_paths)}",
+            f"Daily records: {len(self.current_data.daily_records)}",
+            f"Employees: {len(self.current_data.employee_names)}",
+            f"Weeks: {len(self.current_data.week_totals)}",
+            "",
+        ]
+        for source_path in self.current_data.source_paths:
+            status_bits: list[str] = []
+            if source_path in self.current_data.reloaded_paths:
+                status_bits.append("reloaded")
+            if source_path in self.current_data.reused_paths:
+                status_bits.append("reused")
+            if source_path in self._hash_alerted_paths:
+                status_bits.append("changed since load")
+            if not status_bits:
+                status_bits.append("loaded")
+            lines.append(str(source_path))
+            lines.append(f"Hash: {self.current_data.file_hashes.get(source_path, '')}")
+            lines.append(f"Cache: {self.current_data.cache_status_by_path.get(source_path, 'Unknown')}")
+            lines.append(f"Status: {', '.join(status_bits)}")
+            lines.append("")
+        QMessageBox.information(self, "Loaded DSS Status", "\n".join(lines).rstrip())
+
+    def _persist_ignored_name_typos(self) -> None:
+        core.save_ignored_name_typos(self.config_path, self.ignored_name_typos)
+
+    def check_name_typos_manually(self) -> None:
+        if self.current_data is None or not self._managed_employee_names():
+            QMessageBox.information(self, "Check Name Typos", "Load DSS data first.")
+            return
+        employee_names = self._managed_employee_names()
+        daily_records = self.current_data.daily_records
+        names_to_check = [
+            employee
+            for employee in employee_names
+            if not self.employee_emails.get(employee, "").strip() and employee not in self.missing_email_suppressions
+        ]
+        raw_warnings: list[core.NameTypoWarning] = []
+        address_book_names: list[str] = []
+        if names_to_check:
+            try:
+                _results, address_book_names = core.query_outlook_emails(names_to_check)
+            except Exception:
+                address_book_names = []
+        if names_to_check:
+            raw_warnings.extend(core.find_potential_name_typos(names_to_check, employee_names, daily_records))
+        else:
+            raw_warnings.extend(core.find_similar_employee_name_pairs(employee_names, daily_records))
+        if address_book_names:
+            raw_warnings.extend(core.find_address_book_name_typos(names_to_check, address_book_names, daily_records))
+        raw_warnings.extend(core.find_outlook_display_name_typos(employee_names, self.employee_outlook_display_names, daily_records))
+        deduped: list[core.NameTypoWarning] = []
+        seen_keys: set[str] = set()
+        for warning in raw_warnings:
+            key = core.typo_warning_key(warning.employee, warning.similar_employee)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            deduped.append(warning)
+        warnings = [
+            warning
+            for warning in deduped
+            if core.typo_warning_key(warning.employee, warning.similar_employee) not in self.ignored_name_typos
+        ]
+        if not warnings:
+            QMessageBox.information(self, "Check Name Typos", "No likely name typos were found.")
+            return
+        self._show_typo_warning_dialog(warnings)
+
+    def _show_typo_warning_dialog(self, typo_warnings: list[core.NameTypoWarning]) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Potential Name Typos")
+        dialog.resize(780, 420)
+        layout = QVBoxLayout(dialog)
+        intro = QLabel(
+            "Possible name typo(s): similar names on the DSS roster, or a roster name that does not match the Outlook address book display name (after Sync Outlook Emails). Select an entry and choose Ignore Selected to stop warning on that pair. Notifications can also be disabled in Settings > Configuration."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        content = QHBoxLayout()
+        list_widget = QListWidget()
+        list_widget.setSelectionMode(QListWidget.ExtendedSelection)
+        details = QTextEdit()
+        details.setReadOnly(True)
+        content.addWidget(list_widget, 2)
+        content.addWidget(details, 3)
+        layout.addLayout(content, 1)
+
+        for warning in typo_warnings:
+            item = QListWidgetItem(f"{warning.employee} -> {warning.similar_employee} ({warning.similarity * 100:.0f}% similar)")
+            item.setData(Qt.UserRole, warning)
+            list_widget.addItem(item)
+
+        def refresh_details() -> None:
+            item = list_widget.currentItem()
+            if item is None:
+                details.clear()
+                return
+            warning = item.data(Qt.UserRole)
+            if not isinstance(warning, core.NameTypoWarning):
+                details.clear()
+                return
+            lines = [
+                f"{warning.employee} may match {warning.similar_employee}",
+                f"Similarity: {warning.similarity * 100:.0f}%",
+                "",
+                "Locations:",
+                *(warning.locations or ["(No locations found)"]),
+            ]
+            details.setPlainText("\n".join(lines))
+
+        list_widget.currentItemChanged.connect(lambda _current, _previous: refresh_details())
+        if list_widget.count():
+            list_widget.setCurrentRow(0)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        ignore_button = QPushButton("Ignore Selected")
+        buttons.addButton(ignore_button, QDialogButtonBox.ActionRole)
+
+        def ignore_selected() -> None:
+            selected_items = list_widget.selectedItems()
+            if not selected_items:
+                return
+            for item in selected_items:
+                warning = item.data(Qt.UserRole)
+                if isinstance(warning, core.NameTypoWarning):
+                    self.ignored_name_typos.add(core.typo_warning_key(warning.employee, warning.similar_employee))
+            self._persist_ignored_name_typos()
+            dialog.accept()
+
+        ignore_button.clicked.connect(ignore_selected)
+        buttons.rejected.connect(dialog.reject)
+        buttons.accepted.connect(dialog.accept)
+        layout.addWidget(buttons)
+        dialog.exec()
+
     def show_app_data_folder(self) -> None:
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.app_root)))
+
+    def _auto_check_for_updates(self) -> None:
+        if self._auto_update_check_done or not self.app_settings.auto_update_check_enabled:
+            return
+        self._auto_update_check_done = True
+        self.check_for_updates(manual=False)
+
+    def check_for_updates(self, manual: bool = True) -> None:
+        if self._update_check_in_progress or self._update_download_in_progress:
+            return
+        self._update_check_in_progress = True
+        if manual:
+            self._set_update_status(f"Checking GitHub releases from version {core.APP_VERSION}...")
+        else:
+            self._set_update_status(f"Background update check from version {core.APP_VERSION}...")
+        threading.Thread(target=self._check_for_updates_worker, args=(manual,), daemon=True).start()
+
+    def _check_for_updates_worker(self, manual: bool) -> None:
+        try:
+            release_info = core.fetch_latest_release_info()
+            latest_version = str(release_info.get("version", "")).strip()
+            network_profile = core.get_windows_network_profile() if latest_version and core.is_newer_version(latest_version, core.APP_VERSION) else None
+        except Exception as exc:
+            self.updateCheckErrorRaised.emit(str(exc), manual)
+            return
+        self.updateCheckResultReady.emit(release_info, network_profile, manual)
+
+    def _handle_update_check_error(self, message: str, manual: bool) -> None:
+        self._update_check_in_progress = False
+        self._set_update_status(f"Installed version: {core.APP_VERSION}")
+        if manual:
+            QMessageBox.critical(self, "Check for Updates", f"Could not check for updates.\n\n{message}")
+
+    def _handle_update_check_result(self, release_info: dict[str, object], network_profile: dict[str, object] | None, manual: bool) -> None:
+        self._update_check_in_progress = False
+        latest_version = str(release_info.get("version", "")).strip()
+        latest_tag = str(release_info.get("tag_name", "")).strip()
+        html_url = str(release_info.get("html_url", "")).strip()
+        published_at = str(release_info.get("published_at", "")).strip()
+        asset_names = release_info.get("asset_names", [])
+        assets_text = ", ".join(asset_names) if isinstance(asset_names, list) and asset_names else "No assets listed"
+        if latest_version and core.is_newer_version(latest_version, core.APP_VERSION):
+            self._set_update_status(f"Update available: {latest_tag or latest_version} (installed: {core.APP_VERSION})")
+            installer_asset = core.choose_release_installer_asset(release_info)
+            can_auto_download = installer_asset is not None and self.app_settings.auto_download_updates_on_unmetered_wifi and core.is_unmetered_wifi_profile(network_profile or {})
+            if can_auto_download:
+                self._start_update_download(release_info, manual=manual)
+                if manual:
+                    QMessageBox.information(
+                        self,
+                        "Check for Updates",
+                        "A newer version is available\n\n"
+                        f"Installed: {core.APP_VERSION}\n"
+                        f"Latest: {latest_tag or latest_version}\n"
+                        f"Published: {published_at or 'Unknown'}\n"
+                        f"Assets: {assets_text}\n\n"
+                        "This machine is on unmetered Wi-Fi, so the installer is being downloaded automatically.",
+                    )
+                return
+            network_text = core.describe_network_profile(network_profile or {}) if network_profile is not None else "network state unavailable"
+            self._set_update_status(f"Update available: {latest_tag or latest_version} (installed: {core.APP_VERSION}; {network_text})")
+            if manual:
+                if installer_asset is not None:
+                    if QMessageBox.question(
+                        self,
+                        "Update Available",
+                        "A newer version is available\n\n"
+                        f"Installed: {core.APP_VERSION}\n"
+                        f"Latest: {latest_tag or latest_version}\n"
+                        f"Published: {published_at or 'Unknown'}\n"
+                        f"Assets: {assets_text}\n"
+                        f"Network: {network_text}\n\n"
+                        "Automatic download is only offered on unmetered Wi-Fi.\n\n"
+                        "Download the installer to this PC now?",
+                    ) == QMessageBox.Yes:
+                        self._start_update_download(release_info, manual=manual)
+                    else:
+                        QMessageBox.information(self, "Check for Updates", "You can install later from the release page:\n\n" + html_url)
+                else:
+                    QMessageBox.information(
+                        self,
+                        "Check for Updates",
+                        "A newer version is available\n\n"
+                        f"Installed: {core.APP_VERSION}\n"
+                        f"Latest: {latest_tag or latest_version}\n"
+                        f"Published: {published_at or 'Unknown'}\n"
+                        f"Assets: {assets_text}\n"
+                        f"Network: {network_text}\n\n"
+                        "No downloadable installer asset was found on the release.\n\n"
+                        f"Release page:\n{html_url}",
+                    )
+            return
+        self._set_update_status(f"Installed version: {core.APP_VERSION} (up to date)")
+        if manual:
+            QMessageBox.information(
+                self,
+                "Check for Updates",
+                "You are up to date.\n\n"
+                f"Installed: {core.APP_VERSION}\n"
+                f"Latest release: {latest_tag or latest_version or 'Unknown'}",
+            )
+
+    def _start_update_download(self, release_info: dict[str, object], manual: bool) -> None:
+        if self._update_download_in_progress:
+            return
+        self._update_download_in_progress = True
+        latest_tag = str(release_info.get("tag_name", "")).strip() or str(release_info.get("version", "")).strip() or "update"
+        self._set_update_status(f"Downloading update {latest_tag}...")
+        threading.Thread(target=self._download_update_worker, args=(release_info, manual), daemon=True).start()
+
+    def _download_update_worker(self, release_info: dict[str, object], manual: bool) -> None:
+        try:
+            installer_asset = core.choose_release_installer_asset(release_info)
+            if installer_asset is None:
+                raise RuntimeError("No installer asset was found in the latest GitHub release.")
+            asset_name = str(installer_asset.get("name", "")).strip()
+            download_url = str(installer_asset.get("download_url", "")).strip()
+            if not asset_name or not download_url:
+                raise RuntimeError("The release installer asset is missing its download URL.")
+            destination = self.updates_dir / asset_name
+            core.download_release_asset(download_url, destination)
+            checksum_verified = False
+            checksum_asset = core.choose_release_checksum_asset(release_info)
+            if checksum_asset is not None:
+                checksum_url = str(checksum_asset.get("download_url", "")).strip()
+                if checksum_url:
+                    checksum_text = core.download_url_bytes(checksum_url, timeout=60).decode("utf-8", errors="replace")
+                    expected_checksum = core.checksum_for_asset_name(checksum_text, asset_name)
+                    if expected_checksum and core.sha256_file(destination) != expected_checksum:
+                        raise RuntimeError("Downloaded update failed SHA-256 verification.")
+                    checksum_verified = bool(expected_checksum)
+            self.updateDownloadSuccessReady.emit(release_info, destination, checksum_verified, manual)
+        except Exception as exc:
+            self.updateDownloadErrorRaised.emit(str(exc), manual)
+
+    def _handle_update_download_error(self, message: str, manual: bool) -> None:
+        self._update_download_in_progress = False
+        self._set_update_status(f"Update download failed for installed version {core.APP_VERSION}")
+        if manual:
+            QMessageBox.critical(self, "Update Download", f"Could not download the update.\n\n{message}")
+
+    def _handle_update_download_success(self, release_info: dict[str, object], destination: Path, checksum_verified: bool, manual: bool) -> None:
+        self._update_download_in_progress = False
+        self._downloaded_update_path = destination
+        latest_tag = str(release_info.get("tag_name", "")).strip() or str(release_info.get("version", "")).strip() or destination.name
+        verification_text = " and verified" if checksum_verified else ""
+        self._set_update_status(f"Downloaded update {latest_tag}{verification_text}: {destination.name}")
+        if QMessageBox.question(
+            self,
+            "Install Update",
+            "The update installer has been downloaded.\n\n"
+            f"Release: {latest_tag}\n"
+            f"File: {destination.name}\n"
+            f"Saved to: {destination}\n"
+            f"Checksum verified: {'Yes' if checksum_verified else 'No checksum asset found'}\n\n"
+            f"Install it now? The {core.DISPLAY_APP_NAME} window will close first.",
+        ) == QMessageBox.Yes:
+            self._launch_update_installer(destination)
+        elif manual:
+            QMessageBox.information(self, "Update Download", f"The installer is ready at:\n{destination}")
+
+    def _updater_exe_for_handoff(self) -> Path | None:
+        if os.name != "nt":
+            return None
+        sibling = Path(sys.executable).resolve().parent / core.UPDATER_EXE_NAME
+        if sibling.is_file():
+            return sibling
+        if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+            bundled = Path(sys._MEIPASS) / core.UPDATER_EXE_NAME
+            if bundled.is_file():
+                dest = self.app_root / core.UPDATER_EXE_NAME
+                try:
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(bundled, dest)
+                except OSError:
+                    return None
+                return dest if dest.is_file() else None
+        return None
+
+    def _resolve_updater_handoff_argv(self, installer_path: Path) -> list[str] | None:
+        inst = installer_path.resolve()
+        if os.name != "nt":
+            return None
+        parent_exe = str(Path(sys.executable).resolve())
+        try:
+            from dss_tools_updater import get_process_image_path_windows
+
+            live = get_process_image_path_windows(os.getpid())
+            if live:
+                parent_exe = live
+        except Exception:
+            pass
+        updater_exe = self._updater_exe_for_handoff()
+        if updater_exe is not None:
+            return [str(updater_exe.resolve()), str(inst), str(os.getpid()), parent_exe]
+        if not getattr(sys, "frozen", False):
+            dev_script = Path(__file__).resolve().parent / "dss_tools_updater.py"
+            if dev_script.is_file():
+                return [sys.executable, str(dev_script), str(inst), str(os.getpid()), parent_exe]
+        return None
+
+    def _stage_installer_for_updater(self, installer_path: Path) -> Path:
+        inst = installer_path.expanduser().resolve()
+        try:
+            inst.relative_to(self.app_root.resolve())
+        except ValueError:
+            return inst
+        fd, staged = tempfile.mkstemp(prefix="dss_tools_setup_", suffix=".exe", dir=str(tempfile.gettempdir()))
+        os.close(fd)
+        staged_path = Path(staged)
+        try:
+            shutil.copy2(inst, staged_path)
+        except OSError:
+            try:
+                staged_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+        return staged_path
+
+    def _stage_updater_exe_to_temp(self, updater_src: Path) -> Path:
+        fd, staged = tempfile.mkstemp(prefix="dss_tools_updater_", suffix=".exe", dir=str(tempfile.gettempdir()))
+        os.close(fd)
+        dest = Path(staged)
+        shutil.copy2(updater_src, dest)
+        return dest
+
+    def _launch_update_installer(self, installer_path: Path) -> None:
+        if not installer_path.exists():
+            QMessageBox.critical(self, "Install Update", f"The downloaded installer could not be found.\n\n{installer_path}")
+            return
+        try:
+            inst = self._stage_installer_for_updater(Path(installer_path)).resolve()
+        except OSError as exc:
+            QMessageBox.critical(self, "Install Update", f"Could not stage the installer for the update helper.\n\n{exc}")
+            return
+        argv = self._resolve_updater_handoff_argv(inst)
+        if argv is not None:
+            if os.name == "nt" and len(argv) >= 1 and Path(argv[0]).suffix.lower() == ".exe" and core._is_updater_executable_path(Path(argv[0])):
+                try:
+                    staged_u = self._stage_updater_exe_to_temp(Path(argv[0]).resolve())
+                except OSError as exc:
+                    QMessageBox.critical(self, "Install Update", f"Could not stage the update helper.\n\n{exc}")
+                    return
+                argv = [str(staged_u), *argv[1:]]
+            try:
+                if os.name == "nt" and Path(argv[0]).suffix.lower() == ".exe" and core._is_updater_executable_path(Path(argv[0])):
+                    core._shell_execute_runas_windows(
+                        argv[0],
+                        subprocess.list2cmdline(argv[1:]),
+                        str(inst.parent),
+                        show_cmd=1,
+                    )
+                else:
+                    creationflags = 0
+                    if os.name == "nt":
+                        creationflags = (
+                            getattr(subprocess, "DETACHED_PROCESS", 0)
+                            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                            | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                        )
+                    subprocess.Popen(
+                        argv,
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        close_fds=False,
+                        cwd=str(inst.parent),
+                        creationflags=creationflags,
+                    )
+            except OSError as exc:
+                QMessageBox.critical(self, "Install Update", f"Could not start the update helper.\n\n{exc}")
+                return
+            QApplication.instance().quit()
+            return
+        pid = os.getpid()
+        escaped_path = str(inst).replace("'", "''")
+        command = f"while (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ Start-Sleep -Milliseconds 500 }}; Start-Process -FilePath '{escaped_path}'"
+        creationflags = 0
+        startupinfo = None
+        if os.name == "nt":
+            creationflags = (
+                getattr(subprocess, "DETACHED_PROCESS", 0)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            )
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+        try:
+            subprocess.Popen(
+                ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", command],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                close_fds=False,
+                creationflags=creationflags,
+                startupinfo=startupinfo,
+            )
+        except OSError as exc:
+            QMessageBox.critical(self, "Install Update", f"Could not launch the installer.\n\n{exc}")
+            return
+        QApplication.instance().quit()
 
     def _start_hash_poll_timer(self) -> None:
         self.hash_poll_timer.setInterval(max(1, self.app_settings.hash_poll_minutes) * 60 * 1000)
@@ -2057,7 +2847,7 @@ class DssQtMainWindow(QMainWindow):
     def _poll_source_hashes(self) -> None:
         if not self.current_data or self.load_worker is not None or self.outlook_worker is not None:
             return
-        changed_paths: list[str] = []
+        changed_paths: list[Path] = []
         for path in self.current_data.source_paths:
             try:
                 workbook_bytes = core.read_source_bytes(path)
@@ -2065,10 +2855,20 @@ class DssQtMainWindow(QMainWindow):
             except Exception:
                 continue
             if self.current_data.file_hashes.get(path) and self.current_data.file_hashes.get(path) != content_hash:
-                changed_paths.append(str(path))
+                changed_paths.append(path)
         if changed_paths:
-            self.status_label.setText("Source DSS changed since last load")
-            QMessageBox.information(self, "Source DSS Changed", "\n".join(changed_paths[:10]))
+            unseen = [path for path in changed_paths if path not in self._hash_alerted_paths]
+            if not unseen:
+                return
+            self._hash_alerted_paths.update(unseen)
+            names = ", ".join(path.name for path in unseen[:10])
+            self.loading_label.setText("Changed")
+            self.status_label.setText(f"DSS changed since last view: {names}. Press Update View to refresh.")
+            QMessageBox.information(
+                self,
+                "Source DSS Changed",
+                "One or more loaded DSS workbooks changed since the last inspected state.\n\nPress 'Update View' to refresh the summaries.",
+            )
 
 
 def launch_qt_app(initial_source: list[Path] | None = None) -> int:
