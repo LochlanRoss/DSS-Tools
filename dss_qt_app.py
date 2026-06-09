@@ -1154,6 +1154,7 @@ class DssQtMainWindow(QMainWindow):
         self._active_load_token = -1
         self._next_outlook_token = 0
         self._active_outlook_token = -1
+        self.hash_poll_timer = QTimer(self)
         self._build_ui()
         self._bind_shortcuts()
         self._apply_window_icon()
@@ -2037,7 +2038,6 @@ class DssQtMainWindow(QMainWindow):
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.app_root)))
 
     def _start_hash_poll_timer(self) -> None:
-        self.hash_poll_timer = QTimer(self)
         self.hash_poll_timer.setInterval(max(1, self.app_settings.hash_poll_minutes) * 60 * 1000)
         self.hash_poll_timer.timeout.connect(self._poll_source_hashes)
         self.hash_poll_timer.start()
