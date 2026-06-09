@@ -2581,55 +2581,37 @@ class DssQtMainWindow(QMainWindow):
         asset_names = release_info.get("asset_names", [])
         assets_text = ", ".join(asset_names) if isinstance(asset_names, list) and asset_names else "No assets listed"
         if latest_version and core.is_newer_version(latest_version, core.APP_VERSION):
-            self._set_update_status(f"Update available: {latest_tag or latest_version} (installed: {core.APP_VERSION})")
             installer_asset = core.choose_release_installer_asset(release_info)
-            can_auto_download = installer_asset is not None and self.app_settings.auto_download_updates_on_unmetered_wifi and core.is_unmetered_wifi_profile(network_profile or {})
-            if can_auto_download:
-                self._start_update_download(release_info, manual=manual)
-                if manual:
-                    QMessageBox.information(
-                        self,
-                        "Check for Updates",
-                        "A newer version is available\n\n"
-                        f"Installed: {core.APP_VERSION}\n"
-                        f"Latest: {latest_tag or latest_version}\n"
-                        f"Published: {published_at or 'Unknown'}\n"
-                        f"Assets: {assets_text}\n\n"
-                        "This machine is on unmetered Wi-Fi, so the installer is being downloaded automatically.",
-                    )
-                return
             network_text = core.describe_network_profile(network_profile or {}) if network_profile is not None else "network state unavailable"
             self._set_update_status(f"Update available: {latest_tag or latest_version} (installed: {core.APP_VERSION}; {network_text})")
-            if manual:
-                if installer_asset is not None:
-                    if QMessageBox.question(
-                        self,
-                        "Update Available",
-                        "A newer version is available\n\n"
-                        f"Installed: {core.APP_VERSION}\n"
-                        f"Latest: {latest_tag or latest_version}\n"
-                        f"Published: {published_at or 'Unknown'}\n"
-                        f"Assets: {assets_text}\n"
-                        f"Network: {network_text}\n\n"
-                        "Automatic download is only offered on unmetered Wi-Fi.\n\n"
-                        "Download the installer to this PC now?",
-                    ) == QMessageBox.Yes:
-                        self._start_update_download(release_info, manual=manual)
-                    else:
-                        QMessageBox.information(self, "Check for Updates", "You can install later from the release page:\n\n" + html_url)
-                else:
-                    QMessageBox.information(
-                        self,
-                        "Check for Updates",
-                        "A newer version is available\n\n"
-                        f"Installed: {core.APP_VERSION}\n"
-                        f"Latest: {latest_tag or latest_version}\n"
-                        f"Published: {published_at or 'Unknown'}\n"
-                        f"Assets: {assets_text}\n"
-                        f"Network: {network_text}\n\n"
-                        "No downloadable installer asset was found on the release.\n\n"
-                        f"Release page:\n{html_url}",
-                    )
+            if installer_asset is not None:
+                if QMessageBox.question(
+                    self,
+                    "Update Available",
+                    "A newer version is available\n\n"
+                    f"Installed: {core.APP_VERSION}\n"
+                    f"Latest: {latest_tag or latest_version}\n"
+                    f"Published: {published_at or 'Unknown'}\n"
+                    f"Assets: {assets_text}\n"
+                    f"Network: {network_text}\n\n"
+                    "Download the installer to this PC now?",
+                ) == QMessageBox.Yes:
+                    self._start_update_download(release_info, manual=manual)
+                elif manual:
+                    QMessageBox.information(self, "Check for Updates", "You can install later from the release page:\n\n" + html_url)
+            elif manual:
+                QMessageBox.information(
+                    self,
+                    "Check for Updates",
+                    "A newer version is available\n\n"
+                    f"Installed: {core.APP_VERSION}\n"
+                    f"Latest: {latest_tag or latest_version}\n"
+                    f"Published: {published_at or 'Unknown'}\n"
+                    f"Assets: {assets_text}\n"
+                    f"Network: {network_text}\n\n"
+                    "No downloadable installer asset was found on the release.\n\n"
+                    f"Release page:\n{html_url}",
+                )
             return
         self._set_update_status(f"Installed version: {core.APP_VERSION} (up to date)")
         if manual:

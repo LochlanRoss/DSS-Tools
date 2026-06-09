@@ -6700,27 +6700,11 @@ class DssToolsApp(tk.Tk):
         asset_names = release_info.get("asset_names", [])
         assets_text = ", ".join(asset_names) if isinstance(asset_names, list) and asset_names else "No assets listed"
         if latest_version and is_newer_version(latest_version, APP_VERSION):
-            self.update_status_var.set(f"Update available: {latest_tag or latest_version} (installed: {APP_VERSION})")
             installer_asset = choose_release_installer_asset(release_info)
-            can_auto_download = installer_asset is not None and self.app_settings.auto_download_updates_on_unmetered_wifi and is_unmetered_wifi_profile(network_profile or {})
-            if can_auto_download:
-                self._start_update_download(release_info, manual=manual)
-                if manual:
-                    messagebox.showinfo(
-                        "Check for Updates",
-                        "A newer version is available\n\n"
-                        f"Installed: {APP_VERSION}\n"
-                        f"Latest: {latest_tag or latest_version}\n"
-                        f"Published: {published_at or 'Unknown'}\n"
-                        f"Assets: {assets_text}\n\n"
-                        "This machine is on unmetered Wi-Fi, so the installer is being downloaded automatically.",
-                    )
-                return
             network_text = describe_network_profile(network_profile or {}) if network_profile is not None else "network state unavailable"
             self.update_status_var.set(f"Update available: {latest_tag or latest_version} (installed: {APP_VERSION}; {network_text})")
-            if manual:
-                if installer_asset is not None:
-                    if messagebox.askyesno(
+            if installer_asset is not None:
+                if messagebox.askyesno(
                         "Update Available",
                         "A newer version is available\n\n"
                         f"Installed: {APP_VERSION}\n"
@@ -6728,27 +6712,26 @@ class DssToolsApp(tk.Tk):
                         f"Published: {published_at or 'Unknown'}\n"
                         f"Assets: {assets_text}\n"
                         f"Network: {network_text}\n\n"
-                        "Automatic download is only offered on unmetered Wi‑Fi.\n\n"
                         "Download the installer to this PC now?",
-                    ):
-                        self._start_update_download(release_info, manual=manual)
-                    else:
-                        messagebox.showinfo(
-                            "Check for Updates",
-                            "You can install later from the release page:\n\n" + html_url,
-                        )
-                else:
+                ):
+                    self._start_update_download(release_info, manual=manual)
+                elif manual:
                     messagebox.showinfo(
                         "Check for Updates",
-                        "A newer version is available\n\n"
-                        f"Installed: {APP_VERSION}\n"
-                        f"Latest: {latest_tag or latest_version}\n"
-                        f"Published: {published_at or 'Unknown'}\n"
-                        f"Assets: {assets_text}\n"
-                        f"Network: {network_text}\n\n"
-                        "No downloadable installer asset was found on the release.\n\n"
-                        f"Release page:\n{html_url}",
+                        "You can install later from the release page:\n\n" + html_url,
                     )
+            elif manual:
+                messagebox.showinfo(
+                    "Check for Updates",
+                    "A newer version is available\n\n"
+                    f"Installed: {APP_VERSION}\n"
+                    f"Latest: {latest_tag or latest_version}\n"
+                    f"Published: {published_at or 'Unknown'}\n"
+                    f"Assets: {assets_text}\n"
+                    f"Network: {network_text}\n\n"
+                    "No downloadable installer asset was found on the release.\n\n"
+                    f"Release page:\n{html_url}",
+                )
             return
         self.update_status_var.set(f"Installed version: {APP_VERSION} (up to date)")
         if manual:
