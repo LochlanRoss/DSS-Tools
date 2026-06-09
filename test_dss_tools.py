@@ -37,7 +37,9 @@ from dss_hours_tracker import (
     normalize_release_version,
     parse_checksum_manifest,
     parse_latest_release_payload,
+    process_workbook_bytes,
     compute_bytes_hash,
+    compute_all_dated_sheet_hashes,
     format_email_address_display,
     combine_sheet_hashes,
     load_ignored_name_typos,
@@ -204,6 +206,33 @@ class DssToolsTests(DssToolsFixtures):
                 (date(2026, 4, 8), "2026-04-08 rev 2"),
             ],
         )
+
+    def test_process_workbook_bytes_parses_signin_rows_and_time_fallback(self) -> None:
+        with self.workspace_files("signin_source") as path:
+            self.build_signin_source_workbook(path)
+            records, warnings, health = process_workbook_bytes(path, path.read_bytes())
+
+        self.assertFalse(warnings)
+        self.assertFalse(health)
+        self.assertEqual(len(records), 3)
+        self.assertEqual(records[0].employee, "Lochlan Ross")
+        self.assertEqual(records[0].st, 2.0)
+        self.assertEqual(records[0].source_sheet, "Sheet1")
+        self.assertEqual(records[0].source_ranges, "Sign-in name A5; data C5:R5")
+        self.assertEqual(records[1].employee, "Lochlan Ross")
+        self.assertEqual(records[1].st, 8.0)
+        self.assertEqual(records[1].source_ranges, "Sign-in name A5; continuation C6:R6")
+        self.assertEqual(records[2].employee, "Hayden Roddis")
+        self.assertEqual(records[2].st, 10.0)
+        self.assertEqual(records[2].source_ranges, "Sign-in name A7; data C7:R7")
+
+    def test_compute_all_dated_sheet_hashes_includes_signin_weekly_sheets(self) -> None:
+        with self.workspace_files("signin_weekly") as path:
+            self.build_signin_weekly_workbook(path)
+            hashes = compute_all_dated_sheet_hashes(path.read_bytes())
+
+        self.assertEqual(set(hashes), {"2026-06-08", "2026-06-09"})
+        self.assertTrue(all(hashes.values()))
 
     def test_permission_message_mentions_onedrive_guidance(self) -> None:
         message = build_permission_denied_message(

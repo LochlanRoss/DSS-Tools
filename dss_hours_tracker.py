@@ -59,6 +59,45 @@ DSS_HASH_MAX_COL = 52  # AZ
 DSS_HASH_MIN_ROW = 25
 DSS_HASH_MAX_ROW = 36
 BLOCK_START_ROWS = (25, 28, 31, 34)
+SIGNIN_HEADER_ROW = 3
+SIGNIN_DATA_START_ROW = 5
+SIGNIN_DATE_COL = 19  # S
+SIGNIN_SHIFT_COL = 17  # Q
+SIGNIN_NAME_COL = 1  # A
+SIGNIN_TIME_IN_COL = 3  # C
+SIGNIN_TIME_OUT_COL = 4  # D
+SIGNIN_ST_COL = 5  # E
+SIGNIN_OT_COL = 6  # F
+SIGNIN_JOB_COL = 10  # J
+SIGNIN_WORK_ORDER_COL = 12  # L
+SIGNIN_OPERATION_COL = 13  # M
+SIGNIN_VEHICLE_COL = 14  # N
+SIGNIN_DESCRIPTION_COL = 15  # O
+SIGNIN_EQUIPMENT_COL = 18  # R
+SIGNIN_LAST_DATA_COL = 18  # R
+SIGNIN_HASH_CELLS = (
+    "Q1",
+    "R1",
+    "S1",
+    "A3",
+    "C3",
+    "D3",
+    "E3",
+    "F3",
+    "J3",
+    "L3",
+    "M3",
+    "N3",
+    "O3",
+)
+SIGNIN_FOOTER_PREFIXES = (
+    "FOR OFFICE USE",
+    "* EVERYONE SIGNED IN AND OUT",
+    "* ALL TIME IN AND OUT VERIFIED",
+    "*CORRECT JOB # USED",
+    "*DETAILED DESCRIPTION OF DAILY WORK PROVIDED",
+    "*ALL EQUIPMENT/TRAILERS USED VERIFIED/NOTHING MISSED",
+)
 
 LEFT_NAME_COLS = tuple(range(20, 28))   # T:AA
 LEFT_HOUR_COLS = tuple(range(29, 32))   # AC:AE
@@ -2869,6 +2908,218 @@ def to_number(value: object) -> float:
     return 0.0
 
 
+def _compact_cell_text(value: object) -> str:
+    if value is None:
+        return ""
+    return " ".join(str(value).replace("\r", " ").replace("\n", " ").split()).strip()
+
+
+def _sheet_cell_text(ws, row: int, column: int) -> str:
+    return _compact_cell_text(ws.cell(row=row, column=column).value)
+
+
+def _parse_excel_date_like(value: object) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = _compact_cell_text(value)
+    if not text:
+        return None
+    match = DATE_PATTERN.search(text)
+    if not match:
+        return None
+    return datetime.strptime(match.group(1), "%Y-%m-%d").date()
+
+
+def _parse_excel_time_fraction(value: object) -> float | None:
+    if value in (None, "") or isinstance(value, bool):
+        return None
+    if isinstance(value, datetime):
+        return value.hour + (value.minute / 60.0) + (value.second / 3600.0)
+    if hasattr(value, "hour") and hasattr(value, "minute") and hasattr(value, "second"):
+        return float(value.hour) + (float(value.minute) / 60.0) + (float(value.second) / 3600.0)
+    if isinstance(value, (int, float, Decimal)):
+        numeric = float(value)
+        if 0 <= numeric < 2:
+            return round((numeric % 1.0) * 24.0, 4)
+        return None
+    text = _compact_cell_text(value)
+    if not text:
+        return None
+    for fmt in ("%H:%M", "%H:%M:%S", "%I:%M %p", "%I:%M:%S %p"):
+        try:
+            parsed = datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+        return parsed.hour + (parsed.minute / 60.0) + (parsed.second / 3600.0)
+    return None
+
+
+def _derive_signin_regular_hours(time_in: object, time_out: object) -> float:
+    start = _parse_excel_time_fraction(time_in)
+    end = _parse_excel_time_fraction(time_out)
+    if start is None or end is None:
+        return 0.0
+    elapsed = end - start
+    if elapsed < 0:
+        elapsed += 24.0
+    if elapsed > 5.0:
+        elapsed -= 0.5
+    return round(max(elapsed, 0.0), 2)
+
+
+def _parse_signin_sheet_date(ws, sheet_name: str) -> date | None:
+    return _parse_excel_date_like(ws.cell(row=1, column=SIGNIN_DATE_COL).value) or parse_sheet_date(sheet_name)
+
+
+def _is_signin_sheet(ws, sheet_name: str) -> bool:
+    expected_headers = {
+        SIGNIN_NAME_COL: "NAME",
+        SIGNIN_TIME_IN_COL: "TIME IN",
+        SIGNIN_TIME_OUT_COL: "TIME OUT",
+        SIGNIN_ST_COL: "REG HOURS",
+        SIGNIN_OT_COL: "HOURS OT",
+        SIGNIN_JOB_COL: "JA TECH JOB #",
+        SIGNIN_WORK_ORDER_COL: "WORK ORDER #",
+        SIGNIN_OPERATION_COL: "OPERATION #",
+        SIGNIN_DESCRIPTION_COL: "DESCRIPTION OF WORK",
+    }
+    if _parse_signin_sheet_date(ws, sheet_name) is None:
+        return False
+    if "SHIFT:" not in _sheet_cell_text(ws, 1, SIGNIN_SHIFT_COL).upper():
+        return False
+    for column, expected in expected_headers.items():
+        actual = _sheet_cell_text(ws, SIGNIN_HEADER_ROW, column).upper()
+        if actual != expected:
+            return False
+    return True
+
+
+def _signin_source_range(name_row: int, data_row: int) -> str:
+    if name_row == data_row:
+        return f"Sign-in name A{name_row}; data C{data_row}:R{data_row}"
+    return f"Sign-in name A{name_row}; continuation C{data_row}:R{data_row}"
+
+
+def _signin_footer_reached(name_text: str) -> bool:
+    normalized = _compact_cell_text(name_text).upper()
+    return any(normalized.startswith(prefix) for prefix in SIGNIN_FOOTER_PREFIXES)
+
+
+def _signin_row_has_data(ws, row_idx: int) -> bool:
+    for column in range(SIGNIN_NAME_COL, SIGNIN_LAST_DATA_COL + 1):
+        if ws.cell(row=row_idx, column=column).value not in (None, ""):
+            return True
+    return False
+
+
+def _sheet_value_map_from_worksheet(ws, cell_refs: Iterable[str]) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for cell_ref in cell_refs:
+        normalized = _compact_cell_text(ws[cell_ref].value)
+        if normalized:
+            values[cell_ref.upper()] = normalized
+    return values
+
+
+def _digest_signin_sheet(ws, sheet_name: str, sheet_date: date) -> str:
+    cell_refs = list(SIGNIN_HASH_CELLS)
+    stop_row = ws.max_row or SIGNIN_DATA_START_ROW
+    for row_idx in range(SIGNIN_DATA_START_ROW, stop_row + 1):
+        name_text = _sheet_cell_text(ws, row_idx, SIGNIN_NAME_COL)
+        if _signin_footer_reached(name_text):
+            break
+        if not _signin_row_has_data(ws, row_idx):
+            continue
+        for column in range(SIGNIN_NAME_COL, SIGNIN_LAST_DATA_COL + 1):
+            cell_refs.append(f"{get_column_letter(column)}{row_idx}")
+    return _digest_sheet_cells(sheet_date, sheet_name, _sheet_value_map_from_worksheet(ws, cell_refs))
+
+
+def _process_signin_workbook(
+    source_path: Path,
+    workbook,
+    emit_progress: Callable[[float, str], None],
+    raise_if_cancelled: Callable[[], None],
+    restrict_to_sheet_names: frozenset[str] | None,
+) -> tuple[list[DailyRecord], list[SheetParseWarning], list[WorkbookHealthItem]]:
+    records: list[DailyRecord] = []
+    warnings: list[SheetParseWarning] = []
+    health: list[WorkbookHealthItem] = []
+    signin_sheets: list[tuple[date, str]] = []
+    for sheet_name in workbook.sheetnames:
+        ws = workbook[sheet_name]
+        if _is_signin_sheet(ws, sheet_name):
+            sheet_date = _parse_signin_sheet_date(ws, sheet_name)
+            if sheet_date is not None:
+                signin_sheets.append((sheet_date, sheet_name))
+    signin_sheets.sort(key=lambda item: (item[0], item[1].strip().casefold()), reverse=True)
+    emit_progress(0.2, f"Selected sign-in sheets for {source_path.name}")
+    if not signin_sheets:
+        health.append(
+            WorkbookHealthItem(
+                source_file=source_path.name,
+                status="Warning",
+                details="No recognized sign-in sheets were found.",
+            )
+        )
+        return records, warnings, health
+
+    total_sheets = max(len(signin_sheets), 1)
+    for sheet_index, (sheet_date, sheet_name) in enumerate(signin_sheets, start=1):
+        raise_if_cancelled()
+        if restrict_to_sheet_names is not None and sheet_name not in restrict_to_sheet_names:
+            continue
+        ws = workbook[sheet_name]
+        current_employee: str | None = None
+        current_name_row: int | None = None
+        stop_row = ws.max_row or SIGNIN_DATA_START_ROW
+        for row_idx in range(SIGNIN_DATA_START_ROW, stop_row + 1):
+            raise_if_cancelled()
+            name_text = _sheet_cell_text(ws, row_idx, SIGNIN_NAME_COL)
+            if _signin_footer_reached(name_text):
+                break
+            if name_text:
+                current_employee = name_text
+                current_name_row = row_idx
+            elif not current_employee:
+                continue
+            if not _signin_row_has_data(ws, row_idx):
+                continue
+
+            st = to_number(ws.cell(row=row_idx, column=SIGNIN_ST_COL).value)
+            ot = to_number(ws.cell(row=row_idx, column=SIGNIN_OT_COL).value)
+            if st == 0.0 and ot == 0.0:
+                st = _derive_signin_regular_hours(
+                    ws.cell(row=row_idx, column=SIGNIN_TIME_IN_COL).value,
+                    ws.cell(row=row_idx, column=SIGNIN_TIME_OUT_COL).value,
+                )
+            if st == 0.0 and ot == 0.0:
+                continue
+
+            records.append(
+                DailyRecord(
+                    source_path=source_path,
+                    source_file=source_path.name,
+                    work_date=sheet_date,
+                    source_sheet=sheet_name,
+                    employee=current_employee,
+                    st=st,
+                    ot=ot,
+                    dt=0.0,
+                    source_ranges=_signin_source_range(current_name_row or row_idx, row_idx),
+                )
+            )
+
+        pf_label = extract_pf_identifier(source_path.name)
+        emit_progress(
+            0.2 + (0.75 * sheet_index / total_sheets),
+            f"Processed {pf_label} - {sheet_name}",
+        )
+    return records, warnings, health
+
+
 def detect_employee_name(ws, start_row: int, column_indexes: Iterable[int]) -> str | None:
     for col_idx in reversed(tuple(column_indexes)):
         for row_idx in range(start_row, start_row + 3):
@@ -2922,6 +3173,14 @@ def process_workbook_bytes(
     try:
         raise_if_cancelled()
         emit_progress(0.1, f"Opened {source_path.name}")
+        if any(_is_signin_sheet(workbook[sheet_name], sheet_name) for sheet_name in workbook.sheetnames):
+            return _process_signin_workbook(
+                source_path,
+                workbook,
+                emit_progress,
+                raise_if_cancelled,
+                restrict_to_sheet_names,
+            )
         selected_sheets = sorted(
             select_preferred_dated_sheets(workbook.sheetnames),
             key=lambda item: (item[0], item[1].strip().casefold()),
@@ -3256,6 +3515,7 @@ def _digest_sheet_cells(sheet_date: date, sheet_name: str, cell_values: dict[str
 def compute_all_dated_sheet_hashes(workbook_bytes: bytes) -> dict[str, str]:
     """Per–dated-sheet digest of K25:AZ36 plus AZ2 (same window as parsing / cache invalidation)."""
     hashes: dict[str, str] = {}
+    workbook = None
     try:
         with zipfile.ZipFile(io.BytesIO(workbook_bytes)) as archive:
             sheet_targets = parse_workbook_sheet_targets(archive)
@@ -3271,7 +3531,24 @@ def compute_all_dated_sheet_hashes(workbook_bytes: bytes) -> dict[str, str]:
                 cell_values = worksheet_window_value_map(worksheet_root, shared_strings)
                 hashes[sheet_name] = _digest_sheet_cells(sheet_date, sheet_name, cell_values)
     except (OSError, ValueError, zipfile.BadZipFile, KeyError, ET.ParseError):
+        hashes = {}
+    if hashes:
+        return hashes
+    try:
+        workbook = load_workbook(io.BytesIO(workbook_bytes), data_only=False, read_only=True)
+        for sheet_name in workbook.sheetnames:
+            ws = workbook[sheet_name]
+            if not _is_signin_sheet(ws, sheet_name):
+                continue
+            sheet_date = _parse_signin_sheet_date(ws, sheet_name)
+            if sheet_date is None:
+                continue
+            hashes[sheet_name] = _digest_signin_sheet(ws, sheet_name, sheet_date)
+    except OSError:
         return {}
+    finally:
+        if workbook is not None:
+            workbook.close()
     return hashes
 
 

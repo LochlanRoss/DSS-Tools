@@ -7,6 +7,8 @@ from contextlib import contextmanager
 from pathlib import Path
 import unittest
 
+from datetime import datetime
+
 from openpyxl import Workbook
 
 
@@ -124,4 +126,70 @@ class DssToolsFixtures(unittest.TestCase):
             ws["T25"] = employee
             ws["AC25"] = st_hours
 
+        wb.save(path)
+
+    def build_signin_source_workbook(self, path: Path) -> None:
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Sheet1"
+        ws["Q1"] = "SHIFT: Day R.00"
+        ws["R1"] = "DATE:"
+        ws["S1"] = datetime(2026, 6, 8)
+        ws["A3"] = "NAME"
+        ws["C3"] = "TIME   IN"
+        ws["D3"] = "TIME OUT"
+        ws["E3"] = "REG HOURS"
+        ws["F3"] = "Hours OT"
+        ws["J3"] = "JA TECH JOB #"
+        ws["L3"] = "WORK  ORDER #"
+        ws["M3"] = "OPERATION #"
+        ws["N3"] = "JA TECH VEHICLE UNIT #"
+        ws["O3"] = "DESCRIPTION OF WORK"
+
+        ws["A5"] = "Lochlan Ross"
+        ws["C5"] = "07:00"
+        ws["D5"] = "09:00"
+        ws["E5"] = 2
+        ws["J5"] = "PF26005-3"
+        ws["O5"] = "Transformer Testing Prep"
+
+        ws["C6"] = "09:00"
+        ws["D6"] = "17:30"
+        ws["E6"] = 8
+        ws["J6"] = "PF26044-4"
+        ws["O6"] = "Online Battery Testing"
+
+        ws["A7"] = "Hayden Roddis"
+        ws["C7"] = "07:00"
+        ws["D7"] = "17:30"
+        ws["J7"] = "PF26005-3"
+        ws["O7"] = "Transformer Testing Prep"
+
+        ws["A35"] = "FOR OFFICE USE:"
+        wb.save(path)
+
+    def build_signin_weekly_workbook(self, path: Path) -> None:
+        wb = Workbook()
+        for index, (sheet_name, day_value) in enumerate((("2026-06-08", datetime(2026, 6, 8)), ("2026-06-09", datetime(2026, 6, 9)))):
+            ws = wb.active if index == 0 else wb.create_sheet()
+            ws.title = sheet_name
+            ws["Q1"] = "SHIFT: Day R.00"
+            ws["R1"] = "DATE:"
+            ws["S1"] = day_value
+            ws["A3"] = "NAME"
+            ws["C3"] = "TIME   IN"
+            ws["D3"] = "TIME OUT"
+            ws["E3"] = "REG HOURS"
+            ws["F3"] = "Hours OT"
+            ws["J3"] = "JA TECH JOB #"
+            ws["L3"] = "WORK  ORDER #"
+            ws["M3"] = "OPERATION #"
+            ws["N3"] = "JA TECH VEHICLE UNIT #"
+            ws["O3"] = "DESCRIPTION OF WORK"
+            ws["A5"] = "Lochlan Ross"
+            ws["C5"] = "07:00"
+            ws["D5"] = "17:30"
+            ws["E5"] = 10 if index == 1 else 2
+            ws["J5"] = "PF26005-3"
+            ws["A35"] = "FOR OFFICE USE:"
         wb.save(path)
