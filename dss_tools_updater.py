@@ -51,6 +51,9 @@ CONFIG_FILENAME = "dss_hours_tracker_config.json"
 DISPLAY_NAME = "DSS Tools"
 INNO_UNINSTALL_SILENT_FLAGS = ("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART")
 INNO_INSTALL_SILENT_FLAGS = ("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS")
+PARENT_TERMINATION_MAX_ATTEMPTS = 5
+PARENT_TERMINATION_RETRY_DELAY_SECONDS = 1.0
+PARENT_TERMINATION_FINAL_WAIT_SECONDS = 30.0
 
 
 def _windows_hidden_subprocess_kwargs(extra_creationflags: int = 0) -> dict:
@@ -184,6 +187,65 @@ def terminate_process_tree_windows(parent_pid: int, parent_executable: str = "")
     parts = [proc.stdout or "", proc.stderr or ""]
     detail = "\n".join(p.strip() for p in parts if p and p.strip())
     return int(proc.returncode or 0), detail[:800]
+
+
+def terminate_process_tree_with_retries_windows(
+    parent_pid: int,
+    parent_executable: str = "",
+    log: Callable[[str], None] | None = None,
+    *,
+    max_attempts: int = PARENT_TERMINATION_MAX_ATTEMPTS,
+    retry_delay_seconds: float = PARENT_TERMINATION_RETRY_DELAY_SECONDS,
+    final_wait_seconds: float = PARENT_TERMINATION_FINAL_WAIT_SECONDS,
+) -> tuple[int, str]:
+    """Retry ending the parent process tree before the upgrade proceeds.
+
+    Defaults to 5 total attempts, with a 30 second wait before the final attempt.
+    """
+    attempts = max(1, int(max_attempts or 1))
+    final_code = 0
+    details: list[str] = []
+
+    for attempt in range(1, attempts + 1):
+        code, detail = terminate_process_tree_windows(parent_pid, parent_executable)
+        final_code = code
+
+        if detail:
+            details.append(f"Attempt {attempt}/{attempts}: {detail}")
+        elif code not in (0, 128):
+            details.append(f"Attempt {attempt}/{attempts}: taskkill exit {code}")
+
+        if log:
+            if detail:
+                if detail.startswith("Skipped:"):
+                    log(detail)
+                else:
+                    log(f"Stop DSS attempt {attempt}/{attempts}: {detail}")
+            else:
+                log(f"Stop DSS attempt {attempt}/{attempts}: taskkill exit {code}.")
+
+        ok, skip_reason = should_taskkill_parent_process(parent_pid, parent_executable)
+        if not ok:
+            if skip_reason and (not details or details[-1] != skip_reason):
+                details.append(skip_reason)
+            return final_code, "\n".join(details).strip()
+
+        if attempt >= attempts:
+            break
+
+        wait_seconds = final_wait_seconds if attempt == attempts - 1 else retry_delay_seconds
+        if wait_seconds > 0:
+            if log:
+                if attempt == attempts - 1:
+                    log(
+                        f"DSS Tools is still running after {attempt} close attempts. "
+                        f"Waiting {int(wait_seconds)}s before the final retry."
+                    )
+                else:
+                    log(f"DSS Tools is still running; retrying close in {wait_seconds:.0f}s.")
+            time.sleep(wait_seconds)
+
+    return final_code, "\n".join(details).strip()
 
 
 def localappdata_dss_tools_root() -> Path | None:
@@ -610,7 +672,7 @@ def run_headless_legacy(installer: Path, parent_pid: int, parent_executable: str
     inst = installer.expanduser().resolve()
     if not inst.is_file():
         return 1
-    terminate_process_tree_windows(parent_pid, parent_executable)
+    terminate_process_tree_with_retries_windows(parent_pid, parent_executable)
     time.sleep(1.0)
     try:
         os.startfile(str(inst))  # noqa: S606
@@ -688,7 +750,11 @@ class UpdateMiniApp(tk.Tk):
         self._status.set("Stopping the previous application…")
 
         def work() -> None:
-            code, detail = terminate_process_tree_windows(self._parent_pid, self._parent_executable)
+            code, detail = terminate_process_tree_with_retries_windows(
+                self._parent_pid,
+                self._parent_executable,
+                lambda msg: self.after(0, lambda line=msg: self._log(line)),
+            )
             time.sleep(1.0)
 
             def on_done() -> None:

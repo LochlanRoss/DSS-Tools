@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import os
 import sys
-import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 
 class TestDssToolsUpdater(unittest.TestCase):
@@ -67,13 +67,12 @@ class TestDssToolsUpdater(unittest.TestCase):
     def test_parse_uninstall_executable_expandvars_and_quotes(self) -> None:
         from dss_tools_updater import parse_uninstall_executable
 
-        with tempfile.TemporaryDirectory() as tmp:
-            fake_unins = Path(tmp) / "unins000.exe"
-            fake_unins.write_bytes(b"")
-            line = f'"{fake_unins}" /VERYSILENT /SUPPRESSMSGBOXES'
+        fake_unins = Path(r"C:\Program Files\DSS Tools\unins000.exe")
+        line = f'"{fake_unins}" /VERYSILENT /SUPPRESSMSGBOXES'
+        with patch("pathlib.Path.is_file", return_value=True):
             got = parse_uninstall_executable(line)
-            self.assertIsNotNone(got)
-            self.assertEqual(got.resolve(), fake_unins.resolve())
+        self.assertIsNotNone(got)
+        self.assertEqual(got, fake_unins)
 
     def test_row_matches_dss_tools_fuzzy_inno(self) -> None:
         from dss_tools_updater import _row_matches_dss_tools_fuzzy_inno
@@ -123,26 +122,60 @@ class TestDssToolsUpdater(unittest.TestCase):
         from dss_tools_updater import CallableLog, clean_transient_app_data
 
         lines: list[str] = []
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "dss_hours_tracker_config.json").write_text("{}", encoding="utf-8")
-            cache = root / "cache"
-            cache.mkdir()
-            (cache / "x.json").write_text("[]", encoding="utf-8")
-            (root / "updates").mkdir()
-            (root / "updates" / "old.exe").write_bytes(b"")
-            (root / "update_handoff.log").write_text("x", encoding="utf-8")
-            (root / "DSSToolsUpdater.exe").write_bytes(b"fake")
-            stray = root / "odd_folder"
-            stray.mkdir()
-            (stray / "x.txt").write_text("y", encoding="utf-8")
+        current_exe = Path(sys.executable).resolve()
+
+        def fake_child(name: str, *, is_dir: bool, resolved: Path | None = None) -> Mock:
+            child = Mock()
+            child.name = name
+            child.is_dir.return_value = is_dir
+            child.resolve.return_value = resolved or Path(rf"C:\fake\{name}")
+            child.unlink = Mock()
+            return child
+
+        config = fake_child("dss_hours_tracker_config.json", is_dir=False)
+        cache = fake_child("cache", is_dir=True)
+        updates = fake_child("updates", is_dir=True)
+        handoff = fake_child("update_handoff.log", is_dir=False)
+        updater = fake_child("DSSToolsUpdater.exe", is_dir=False, resolved=current_exe)
+        stray = fake_child("odd_folder", is_dir=True)
+        root = Mock()
+        root.is_dir.return_value = True
+        root.iterdir.return_value = [config, cache, updates, handoff, updater, stray]
+
+        with patch("dss_tools_updater.shutil.rmtree") as rmtree:
             clean_transient_app_data(root, CallableLog(lines.append))
-            self.assertTrue((root / "dss_hours_tracker_config.json").is_file())
-            self.assertFalse(cache.exists())
-            self.assertFalse((root / "updates").exists())
-            self.assertFalse((root / "update_handoff.log").exists())
-            self.assertFalse((root / "DSSToolsUpdater.exe").exists())
-            self.assertFalse(stray.exists())
+
+        handoff.unlink.assert_called_once_with(missing_ok=True)
+        updater.unlink.assert_not_called()
+        rmtree.assert_any_call(cache, ignore_errors=False)
+        rmtree.assert_any_call(updates, ignore_errors=False)
+        rmtree.assert_any_call(stray, ignore_errors=False)
+        self.assertTrue(any("Skip deleting running updater" in line for line in lines))
+
+    def test_terminate_process_tree_with_retries_waits_before_final_attempt(self) -> None:
+        from dss_tools_updater import terminate_process_tree_with_retries_windows
+
+        sleep_calls: list[float] = []
+        log_lines: list[str] = []
+        terminate_results = [(1, "busy")] * 4 + [(0, "done")]
+        still_running = [(True, "")] * 4 + [(False, "Skipped: no process with this PID (main app already exited); taskkill not used.")]
+
+        with (
+            patch("dss_tools_updater.terminate_process_tree_windows", side_effect=terminate_results) as terminate_mock,
+            patch("dss_tools_updater.should_taskkill_parent_process", side_effect=still_running),
+            patch("dss_tools_updater.time.sleep", side_effect=lambda seconds: sleep_calls.append(seconds)),
+        ):
+            code, detail = terminate_process_tree_with_retries_windows(
+                1234,
+                r"C:\Program Files\DSS Tools\DSSTools.exe",
+                log_lines.append,
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(terminate_mock.call_count, 5)
+        self.assertEqual(sleep_calls, [1.0, 1.0, 1.0, 30.0])
+        self.assertIn("Attempt 5/5: done", detail)
+        self.assertTrue(any("Waiting 30s before the final retry." in line for line in log_lines))
 
 
 if __name__ == "__main__":

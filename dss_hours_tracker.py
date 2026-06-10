@@ -337,11 +337,54 @@ def download_url_bytes(url: str, timeout: int = 60) -> bytes:
         raise RuntimeError("Could not download the update asset.") from exc
 
 
-def download_release_asset(url: str, destination: Path, timeout: int = 300) -> Path:
-    payload = download_url_bytes(url, timeout=timeout)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_bytes(payload)
-    return destination
+def download_release_asset(
+    url: str,
+    destination: Path,
+    timeout: int = 300,
+    progress_callback: Callable[[int, int | None], None] | None = None,
+) -> Path:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": f"dss-tools/{APP_VERSION}",
+            "Accept": "application/octet-stream, application/vnd.github+json",
+        },
+    )
+    temp_destination = destination.with_name(destination.name + ".part")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            total_bytes: int | None = None
+            content_length = response.headers.get("Content-Length", "").strip()
+            if content_length.isdigit():
+                total_bytes = int(content_length)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            downloaded = 0
+            with temp_destination.open("wb") as handle:
+                while True:
+                    chunk = response.read(1024 * 256)
+                    if not chunk:
+                        break
+                    handle.write(chunk)
+                    downloaded += len(chunk)
+                    if progress_callback is not None:
+                        progress_callback(downloaded, total_bytes)
+        temp_destination.replace(destination)
+        if progress_callback is not None:
+            final_size = destination.stat().st_size if destination.exists() else 0
+            progress_callback(final_size, final_size or None)
+        return destination
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"Download failed with HTTP {exc.code}.") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError("Could not reach GitHub to download the update asset.") from exc
+    except OSError as exc:
+        raise RuntimeError("Could not download the update asset.") from exc
+    finally:
+        try:
+            if temp_destination.exists() and not destination.exists():
+                temp_destination.unlink()
+        except OSError:
+            pass
 
 
 def get_windows_network_profile(timeout: int = 10) -> dict[str, object]:
@@ -6929,6 +6972,8 @@ class DssToolsApp(tk.Tk):
         self._update_download_in_progress = True
         latest_tag = str(release_info.get("tag_name", "")).strip() or str(release_info.get("version", "")).strip() or "update"
         self.update_status_var.set(f"Downloading update {latest_tag}...")
+        self.progress_var.set(0.0)
+        self.loading_label.configure(text="Downloading...")
         threading.Thread(target=self._download_update_worker, args=(release_info, manual), daemon=True).start()
 
     def _download_update_worker(self, release_info: dict[str, object], manual: bool) -> None:
@@ -6941,7 +6986,14 @@ class DssToolsApp(tk.Tk):
             if not asset_name or not download_url:
                 raise RuntimeError("The release installer asset is missing its download URL.")
             destination = self.updates_dir / asset_name
-            download_release_asset(download_url, destination)
+            download_release_asset(
+                download_url,
+                destination,
+                progress_callback=lambda downloaded, total: self.after(
+                    0,
+                    lambda d=downloaded, t=total: self._handle_update_download_progress(d, t),
+                ),
+            )
             checksum_verified = False
             checksum_asset = choose_release_checksum_asset(release_info)
             if checksum_asset is not None:
@@ -6959,8 +7011,25 @@ class DssToolsApp(tk.Tk):
     def _handle_update_download_error(self, exc: Exception, manual: bool) -> None:
         self._update_download_in_progress = False
         self.update_status_var.set(f"Update download failed for installed version {APP_VERSION}")
+        self.progress_var.set(0.0)
+        self.loading_label.configure(text="")
         if manual:
             messagebox.showerror("Update Download", f"Could not download the update.\n\n{exc}")
+
+    def _handle_update_download_progress(self, downloaded: int, total: int | None) -> None:
+        if not self._update_download_in_progress:
+            return
+        if total:
+            fraction = min(max(downloaded / total, 0.0), 1.0)
+            percentage = round(fraction * 100, 1)
+            self.progress_var.set(percentage)
+            self.loading_label.configure(text=f"{percentage:.1f}%")
+            self.update_status_var.set(
+                f"Downloading update... {fmt_hours(downloaded / (1024 * 1024))} / {fmt_hours(total / (1024 * 1024))} MB"
+            )
+        else:
+            self.loading_label.configure(text="Downloading...")
+            self.update_status_var.set(f"Downloading update... {fmt_hours(downloaded / (1024 * 1024))} MB")
 
     def _handle_update_download_success(self, release_info: dict[str, object], destination: Path, checksum_verified: bool, manual: bool) -> None:
         self._update_download_in_progress = False
@@ -6968,6 +7037,8 @@ class DssToolsApp(tk.Tk):
         latest_tag = str(release_info.get("tag_name", "")).strip() or str(release_info.get("version", "")).strip() or destination.name
         verification_text = " and verified" if checksum_verified else ""
         self.update_status_var.set(f"Downloaded update {latest_tag}{verification_text}: {destination.name}")
+        self.progress_var.set(100.0)
+        self.loading_label.configure(text="")
         should_install = messagebox.askyesno(
             "Install Update",
             "The update installer has been downloaded.\n\n"

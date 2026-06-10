@@ -1233,6 +1233,7 @@ class DssQtMainWindow(QMainWindow):
     updateCheckErrorRaised = Signal(str, bool)
     updateDownloadSuccessReady = Signal(object, object, bool, bool)
     updateDownloadErrorRaised = Signal(str, bool)
+    updateDownloadProgressReady = Signal(int, int)
 
     def __init__(self, initial_source: list[Path] | None = None) -> None:
         super().__init__()
@@ -1274,6 +1275,7 @@ class DssQtMainWindow(QMainWindow):
         self.updateCheckErrorRaised.connect(self._handle_update_check_error)
         self.updateDownloadSuccessReady.connect(self._handle_update_download_success)
         self.updateDownloadErrorRaised.connect(self._handle_update_download_error)
+        self.updateDownloadProgressReady.connect(self._handle_update_download_progress)
         self._build_ui()
         self._bind_shortcuts()
         self._apply_window_icon()
@@ -2589,6 +2591,10 @@ class DssQtMainWindow(QMainWindow):
         self._update_download_in_progress = True
         latest_tag = str(release_info.get("tag_name", "")).strip() or str(release_info.get("version", "")).strip() or "update"
         self._set_update_status(f"Downloading update {latest_tag}...")
+        self.progress_bar.setRange(0, 1000)
+        self.progress_bar.setValue(0)
+        self.percent_label.setText("0.0%")
+        self.loading_label.setText("Downloading...")
         threading.Thread(target=self._download_update_worker, args=(release_info, manual), daemon=True).start()
 
     def _download_update_worker(self, release_info: dict[str, object], manual: bool) -> None:
@@ -2601,7 +2607,11 @@ class DssQtMainWindow(QMainWindow):
             if not asset_name or not download_url:
                 raise RuntimeError("The release installer asset is missing its download URL.")
             destination = self.updates_dir / asset_name
-            core.download_release_asset(download_url, destination)
+            core.download_release_asset(
+                download_url,
+                destination,
+                progress_callback=lambda downloaded, total: self.updateDownloadProgressReady.emit(downloaded, total or 0),
+            )
             checksum_verified = False
             checksum_asset = core.choose_release_checksum_asset(release_info)
             if checksum_asset is not None:
@@ -2619,8 +2629,30 @@ class DssQtMainWindow(QMainWindow):
     def _handle_update_download_error(self, message: str, manual: bool) -> None:
         self._update_download_in_progress = False
         self._set_update_status(f"Update download failed for installed version {core.APP_VERSION}")
+        self.progress_bar.setRange(0, 1000)
+        self.progress_bar.setValue(0)
+        self.percent_label.setText("0.0%")
+        self.loading_label.setText("")
         if manual:
             QMessageBox.critical(self, "Update Download", f"Could not download the update.\n\n{message}")
+
+    def _handle_update_download_progress(self, downloaded: int, total: int) -> None:
+        if not self._update_download_in_progress:
+            return
+        if total > 0:
+            fraction = min(max(downloaded / total, 0.0), 1.0)
+            self.progress_bar.setRange(0, 1000)
+            self.progress_bar.setValue(int(round(fraction * 1000)))
+            self.percent_label.setText(f"{fraction * 100:.1f}%")
+            self.loading_label.setText(f"{fraction * 100:.1f}%")
+            self._set_update_status(
+                f"Downloading update... {core.fmt_hours(downloaded / (1024 * 1024))} / {core.fmt_hours(total / (1024 * 1024))} MB"
+            )
+        else:
+            self.progress_bar.setRange(0, 0)
+            self.percent_label.setText("...")
+            self.loading_label.setText("Downloading...")
+            self._set_update_status(f"Downloading update... {core.fmt_hours(downloaded / (1024 * 1024))} MB")
 
     def _handle_update_download_success(self, release_info: dict[str, object], destination: Path, checksum_verified: bool, manual: bool) -> None:
         self._update_download_in_progress = False
@@ -2628,6 +2660,10 @@ class DssQtMainWindow(QMainWindow):
         latest_tag = str(release_info.get("tag_name", "")).strip() or str(release_info.get("version", "")).strip() or destination.name
         verification_text = " and verified" if checksum_verified else ""
         self._set_update_status(f"Downloaded update {latest_tag}{verification_text}: {destination.name}")
+        self.progress_bar.setRange(0, 1000)
+        self.progress_bar.setValue(1000)
+        self.percent_label.setText("100.0%")
+        self.loading_label.setText("")
         if QMessageBox.question(
             self,
             "Install Update",
