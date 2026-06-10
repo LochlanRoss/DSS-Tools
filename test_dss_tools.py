@@ -18,10 +18,12 @@ from unittest import mock
 
 from dss_hours_tracker import (
     AppSettings,
+    DEFAULT_PROFILE_NAME,
     DEFAULT_UI_THEME,
     OUTLOOK_NAME_RULE_LABEL,
     _bug_report_attachment_strings_to_try,
     build_employee_email_list_label,
+    build_signin_hours_mismatch_warnings,
     load_employee_name_overrides,
     _is_updater_executable_path,
     binding_sequence_from_keypress_event,
@@ -248,6 +250,56 @@ class DssToolsTests(DssToolsFixtures):
         by_day = {(record.work_date.isoformat(), record.employee): record for record in records}
         self.assertEqual(by_day[("2026-06-09", "Lochlan Ross")].pf_number, "PF26005-3")
 
+    def test_build_signin_hours_mismatch_warnings_uses_noon_lunch(self) -> None:
+        with self.workspace_files("signin_mismatch") as path:
+            self.build_signin_mismatch_workbook(path)
+            records, warnings, health = process_workbook_bytes(path, path.read_bytes())
+
+        self.assertFalse(warnings)
+        self.assertFalse(health)
+        self.assertEqual(len(records), 2)
+        by_employee = {record.employee: record for record in records}
+        self.assertEqual(by_employee["Hayden Roddis"].st, 1.5)
+        mismatch_warnings = build_signin_hours_mismatch_warnings(records, AppSettings(), default_formatting_profiles()[DEFAULT_PROFILE_NAME])
+        self.assertEqual(len(mismatch_warnings), 1)
+        self.assertEqual(mismatch_warnings[0].issue, "Sign-in Hours Mismatch")
+        self.assertIn("Lochlan Ross", mismatch_warnings[0].details)
+        self.assertIn("10.5", mismatch_warnings[0].details)
+        self.assertIn("10", mismatch_warnings[0].details)
+        self.assertIn("noon lunch deduction", mismatch_warnings[0].details)
+
+    def test_build_signin_hours_mismatch_warnings_respects_settings_and_tolerance(self) -> None:
+        records = [
+            DailyRecord(
+                source_path=Path("C:/data/signin.xlsx"),
+                source_file="signin.xlsx",
+                work_date=date(2026, 6, 10),
+                source_sheet="Sheet1",
+                employee="Lochlan Ross",
+                st=10.5,
+                ot=0.0,
+                dt=0.0,
+                source_ranges="Sign-in name A5; data C5:R5",
+                signin_entered_st=10.5,
+                signin_entered_ot=0.0,
+                signin_derived_hours=10.0,
+                signin_lunch_deducted=True,
+            )
+        ]
+        disabled_settings = AppSettings(signin_hours_check_enabled=False)
+        self.assertEqual(build_signin_hours_mismatch_warnings(records, disabled_settings, default_formatting_profiles()[DEFAULT_PROFILE_NAME]), [])
+
+        tolerant_profile = FormattingProfile(
+            name="Tolerant",
+            st_threshold=40.0,
+            ot_threshold=10.0,
+            daily_st_threshold=None,
+            max_hours_per_day=None,
+            signin_hours_check_enabled=True,
+            signin_hours_mismatch_tolerance=0.5,
+        )
+        self.assertEqual(build_signin_hours_mismatch_warnings(records, AppSettings(), tolerant_profile), [])
+
     def test_permission_message_mentions_onedrive_guidance(self) -> None:
         message = build_permission_denied_message(
             Path(r"C:\Users\Test\OneDrive - JA Tech\SharePoint - PF26024\Outage DSS.xlsx")
@@ -373,6 +425,8 @@ class DssToolsTests(DssToolsFixtures):
                 ot_threshold=8.0,
                 daily_st_threshold=9.0,
                 max_hours_per_day=12.0,
+                signin_hours_check_enabled=False,
+                signin_hours_mismatch_tolerance=0.25,
             )
             save_formatting_profiles(path, profiles, "Job B")
 
@@ -383,6 +437,8 @@ class DssToolsTests(DssToolsFixtures):
             self.assertEqual(loaded_profiles["Job B"].ot_threshold, 8.0)
             self.assertEqual(loaded_profiles["Job B"].daily_st_threshold, 9.0)
             self.assertEqual(loaded_profiles["Job B"].max_hours_per_day, 12.0)
+            self.assertFalse(loaded_profiles["Job B"].signin_hours_check_enabled)
+            self.assertEqual(loaded_profiles["Job B"].signin_hours_mismatch_tolerance, 0.25)
 
     def test_employee_emails_round_trip(self) -> None:
         with self.workspace_json("emails") as path:
@@ -494,6 +550,27 @@ class DssToolsTests(DssToolsFixtures):
         self.assertEqual(warnings[0].employee, "Dwayne Moffat")
         self.assertEqual(warnings[0].similar_employee, "Dwayne Moffatt")
 
+    def test_find_address_book_name_typos_skips_exact_name_match(self) -> None:
+        records = [
+            DailyRecord(
+                source_path=Path("C:/data/PF1.xlsx"),
+                source_file="PF26024-1.xlsx",
+                work_date=date(2026, 4, 8),
+                source_sheet="Sheet1",
+                employee="David Brown",
+                st=8.0,
+                ot=0.0,
+                dt=0.0,
+                source_ranges="",
+            ),
+        ]
+        warnings = find_address_book_name_typos(
+            ["David Brown"],
+            ["David Brown"],
+            records,
+        )
+        self.assertEqual(warnings, [])
+
     def test_employee_groups_round_trip(self) -> None:
         with self.workspace_json("groups") as path:
             save_employee_groups(path, {"Crew A": ["Alice Smith", "Bob Jones"], "Crew B": ["Charlie West"]})
@@ -559,6 +636,7 @@ class DssToolsTests(DssToolsFixtures):
                     quickload_cancel_hotkey="<F9>",
                     auto_update_check_enabled=False,
                     auto_download_updates_on_unmetered_wifi=False,
+                    signin_hours_check_enabled=False,
                 ),
             )
 
@@ -571,6 +649,7 @@ class DssToolsTests(DssToolsFixtures):
             self.assertEqual(loaded.quickload_cancel_hotkey, "<F9>")
             self.assertFalse(loaded.auto_update_check_enabled)
             self.assertFalse(loaded.auto_download_updates_on_unmetered_wifi)
+            self.assertFalse(loaded.signin_hours_check_enabled)
             self.assertEqual(loaded.ui_theme, DEFAULT_UI_THEME)
 
     def test_normalize_ui_hex_color(self) -> None:

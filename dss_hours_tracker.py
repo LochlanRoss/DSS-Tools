@@ -477,6 +477,10 @@ class DailyRecord:
     dt: float
     source_ranges: str
     pf_number: str = ""
+    signin_entered_st: float | None = None
+    signin_entered_ot: float | None = None
+    signin_derived_hours: float | None = None
+    signin_lunch_deducted: bool = False
 
     @property
     def total(self) -> float:
@@ -587,6 +591,8 @@ class FormattingProfile:
     ot_threshold: float | None
     daily_st_threshold: float | None
     max_hours_per_day: float | None
+    signin_hours_check_enabled: bool = True
+    signin_hours_mismatch_tolerance: float | None = 0.01
 
 
 @dataclass(frozen=True)
@@ -769,6 +775,7 @@ class AppSettings:
     quickload_cancel_hotkey: str = "<Escape>"
     auto_update_check_enabled: bool = True
     auto_download_updates_on_unmetered_wifi: bool = True
+    signin_hours_check_enabled: bool = True
     dss_library_root: str = ""
     ui_theme: UiThemeColors = field(default_factory=lambda: DEFAULT_UI_THEME)
 
@@ -1179,6 +1186,8 @@ def default_formatting_profiles() -> dict[str, FormattingProfile]:
             ot_threshold=10.0,
             daily_st_threshold=None,
             max_hours_per_day=None,
+            signin_hours_check_enabled=True,
+            signin_hours_mismatch_tolerance=0.01,
         )
     }
 
@@ -1217,6 +1226,8 @@ def load_formatting_profiles(config_path: Path) -> tuple[dict[str, FormattingPro
             ot_threshold=item.get("ot_threshold"),
             daily_st_threshold=item.get("daily_st_threshold"),
             max_hours_per_day=item.get("max_hours_per_day"),
+            signin_hours_check_enabled=bool(item.get("signin_hours_check_enabled", True)),
+            signin_hours_mismatch_tolerance=item.get("signin_hours_mismatch_tolerance", 0.01),
         )
 
     if not profiles:
@@ -1242,6 +1253,8 @@ def save_formatting_profiles(
                 "ot_threshold": profile.ot_threshold,
                 "daily_st_threshold": profile.daily_st_threshold,
                 "max_hours_per_day": profile.max_hours_per_day,
+                "signin_hours_check_enabled": profile.signin_hours_check_enabled,
+                "signin_hours_mismatch_tolerance": profile.signin_hours_mismatch_tolerance,
             }
         for profile in sorted(profiles.values(), key=lambda item: item.name.lower())
     ]
@@ -1489,6 +1502,7 @@ def load_app_settings(config_path: Path) -> AppSettings:
         quickload_cancel_hotkey=cancel_hotkey,
         auto_update_check_enabled=bool(raw_settings.get("auto_update_check_enabled", True)),
         auto_download_updates_on_unmetered_wifi=bool(raw_settings.get("auto_download_updates_on_unmetered_wifi", True)),
+        signin_hours_check_enabled=bool(raw_settings.get("signin_hours_check_enabled", True)),
         dss_library_root=str(raw_settings.get("dss_library_root", "")).strip(),
         ui_theme=parse_ui_theme_payload(raw_settings.get("ui_theme")),
     )
@@ -1504,6 +1518,7 @@ def save_app_settings(config_path: Path, settings: AppSettings) -> None:
         "quickload_cancel_hotkey": settings.quickload_cancel_hotkey,
         "auto_update_check_enabled": settings.auto_update_check_enabled,
         "auto_download_updates_on_unmetered_wifi": settings.auto_download_updates_on_unmetered_wifi,
+        "signin_hours_check_enabled": settings.signin_hours_check_enabled,
         "dss_library_root": settings.dss_library_root,
         "ui_theme": asdict(settings.ui_theme),
     }
@@ -1629,6 +1644,10 @@ def serialize_daily_record(record: DailyRecord) -> dict:
         "ot": record.ot,
         "dt": record.dt,
         "source_ranges": record.source_ranges,
+        "signin_entered_st": record.signin_entered_st,
+        "signin_entered_ot": record.signin_entered_ot,
+        "signin_derived_hours": record.signin_derived_hours,
+        "signin_lunch_deducted": record.signin_lunch_deducted,
     }
 
 
@@ -1645,6 +1664,10 @@ def deserialize_daily_record(payload: dict) -> DailyRecord:
         dt=float(payload["dt"]),
         source_ranges=str(payload["source_ranges"]),
         pf_number=str(payload.get("pf_number", extract_pf_identifier(source_file))),
+        signin_entered_st=float(payload["signin_entered_st"]) if payload.get("signin_entered_st") is not None else None,
+        signin_entered_ot=float(payload["signin_entered_ot"]) if payload.get("signin_entered_ot") is not None else None,
+        signin_derived_hours=float(payload["signin_derived_hours"]) if payload.get("signin_derived_hours") is not None else None,
+        signin_lunch_deducted=bool(payload.get("signin_lunch_deducted", False)),
     )
 
 
@@ -2170,6 +2193,8 @@ def split_normalized_person_name(name: str) -> tuple[str, str]:
 
 
 def likely_same_person_typo(left_name: str, right_name: str, *, overall_threshold: float = 0.88, surname_threshold: float = 0.82) -> float | None:
+    if normalize_person_name(left_name) == normalize_person_name(right_name):
+        return None
     left_first, left_remainder = split_normalized_person_name(left_name)
     right_first, right_remainder = split_normalized_person_name(right_name)
     if not left_first or left_first != right_first:
@@ -2571,6 +2596,40 @@ def pf_numbers_for_records(records: Iterable[DailyRecord]) -> str:
         }
     )
     return ", ".join(pf_numbers)
+
+
+def build_signin_hours_mismatch_warnings(
+    records: Iterable[DailyRecord],
+    settings: AppSettings,
+    profile: FormattingProfile,
+) -> list[SheetParseWarning]:
+    if not settings.signin_hours_check_enabled or not profile.signin_hours_check_enabled:
+        return []
+    tolerance = profile.signin_hours_mismatch_tolerance
+    if tolerance is None:
+        tolerance = 0.01
+    warnings: list[SheetParseWarning] = []
+    for record in records:
+        entered_present = record.signin_entered_st is not None or record.signin_entered_ot is not None
+        if not entered_present or record.signin_derived_hours is None:
+            continue
+        entered_total = round((record.signin_entered_st or 0.0) + (record.signin_entered_ot or 0.0), 2)
+        if abs(entered_total - record.signin_derived_hours) <= tolerance:
+            continue
+        lunch_note = " after a 0.5h noon lunch deduction" if record.signin_lunch_deducted else ""
+        warnings.append(
+            SheetParseWarning(
+                source_file=record.source_file,
+                source_sheet=record.source_sheet,
+                work_date=record.work_date.isoformat(),
+                issue="Sign-in Hours Mismatch",
+                details=(
+                    f"{record.employee} ({record.source_ranges}) has {fmt_hours(entered_total)} entered hours "
+                    f"but TIME IN/TIME OUT imply {fmt_hours(record.signin_derived_hours)} hours{lunch_note}."
+                ),
+            )
+        )
+    return warnings
 
 
 def format_email_address_display(email: str, suppressed: bool = False) -> tuple[str, bool]:
@@ -2981,17 +3040,29 @@ def _parse_excel_time_fraction(value: object) -> float | None:
     return None
 
 
-def _derive_signin_regular_hours(time_in: object, time_out: object) -> float:
+def _signin_shift_crosses_noon(start: float, end: float) -> bool:
+    normalized_end = end
+    if normalized_end < start:
+        normalized_end += 24.0
+    return start < 12.0 < normalized_end
+
+
+def _calculate_signin_worked_hours(time_in: object, time_out: object) -> float | None:
     start = _parse_excel_time_fraction(time_in)
     end = _parse_excel_time_fraction(time_out)
     if start is None or end is None:
-        return 0.0
+        return None
     elapsed = end - start
     if elapsed < 0:
         elapsed += 24.0
-    if elapsed > 5.0:
+    if _signin_shift_crosses_noon(start, end):
         elapsed -= 0.5
     return round(max(elapsed, 0.0), 2)
+
+
+def _derive_signin_regular_hours(time_in: object, time_out: object) -> float:
+    derived = _calculate_signin_worked_hours(time_in, time_out)
+    return derived if derived is not None else 0.0
 
 
 def _parse_signin_sheet_date(ws, sheet_name: str) -> date | None:
@@ -3113,15 +3184,20 @@ def _process_signin_workbook(
             if not _signin_row_has_data(ws, row_idx):
                 continue
 
-            st = to_number(ws.cell(row=row_idx, column=SIGNIN_ST_COL).value)
-            ot = to_number(ws.cell(row=row_idx, column=SIGNIN_OT_COL).value)
+            time_in_value = ws.cell(row=row_idx, column=SIGNIN_TIME_IN_COL).value
+            time_out_value = ws.cell(row=row_idx, column=SIGNIN_TIME_OUT_COL).value
+            entered_st_value = ws.cell(row=row_idx, column=SIGNIN_ST_COL).value
+            entered_ot_value = ws.cell(row=row_idx, column=SIGNIN_OT_COL).value
+            st = to_number(entered_st_value)
+            ot = to_number(entered_ot_value)
+            derived_hours = _calculate_signin_worked_hours(time_in_value, time_out_value)
             if st == 0.0 and ot == 0.0:
-                st = _derive_signin_regular_hours(
-                    ws.cell(row=row_idx, column=SIGNIN_TIME_IN_COL).value,
-                    ws.cell(row=row_idx, column=SIGNIN_TIME_OUT_COL).value,
-                )
+                st = derived_hours if derived_hours is not None else 0.0
             if st == 0.0 and ot == 0.0:
                 continue
+            start = _parse_excel_time_fraction(time_in_value)
+            end = _parse_excel_time_fraction(time_out_value)
+            lunch_deducted = bool(start is not None and end is not None and _signin_shift_crosses_noon(start, end))
 
             raw_rows.append(
                 {
@@ -3136,6 +3212,10 @@ def _process_signin_workbook(
                     "source_ranges": _signin_source_range(current_name_row or row_idx, row_idx),
                     "pf_number": extract_pf_identifier(_sheet_cell_text(ws, row_idx, SIGNIN_JOB_COL)) if _sheet_cell_text(ws, row_idx, SIGNIN_JOB_COL) else "",
                     "description": _sheet_cell_text(ws, row_idx, SIGNIN_DESCRIPTION_COL),
+                    "signin_entered_st": to_number(entered_st_value) if entered_st_value not in (None, "") else None,
+                    "signin_entered_ot": to_number(entered_ot_value) if entered_ot_value not in (None, "") else None,
+                    "signin_derived_hours": derived_hours,
+                    "signin_lunch_deducted": lunch_deducted,
                     "order_index": len(raw_rows),
                 }
             )
@@ -3190,6 +3270,10 @@ def _process_signin_workbook(
                 dt=float(row["dt"]),
                 source_ranges=str(row["source_ranges"]),
                 pf_number=pf_number,
+                signin_entered_st=row.get("signin_entered_st"),  # type: ignore[arg-type]
+                signin_entered_ot=row.get("signin_entered_ot"),  # type: ignore[arg-type]
+                signin_derived_hours=row.get("signin_derived_hours"),  # type: ignore[arg-type]
+                signin_lunch_deducted=bool(row.get("signin_lunch_deducted", False)),
             )
         )
     return records, warnings, health
@@ -5711,7 +5795,6 @@ class DssToolsApp(tk.Tk):
         self.email_subject_template, self.email_body_template = load_email_templates(self.config_path)
         self.employee_groups = load_employee_groups(self.config_path)
         self.ignored_name_typos = load_ignored_name_typos(self.config_path)
-        self.job_presets = load_job_presets(self.config_path)
         self.app_settings = load_app_settings(self.config_path)
         self.filter_button_var = tk.StringVar(value="All Employees")
         self.pf_filter_button_var = tk.StringVar(value="All PFs")
@@ -6070,76 +6153,83 @@ class DssToolsApp(tk.Tk):
         self.rules_frame.columnconfigure(1, weight=1)
 
         self.profile_var = tk.StringVar(value=self.current_profile_name)
-        self.job_preset_var = tk.StringVar()
         self.st_threshold_var = tk.StringVar()
         self.ot_threshold_var = tk.StringVar()
         self.daily_st_threshold_var = tk.StringVar()
         self.max_hours_per_day_var = tk.StringVar()
+        self.signin_hours_check_profile_var = tk.BooleanVar(value=True)
+        self.signin_hours_tolerance_var = tk.StringVar()
 
-        ttk.Label(self.rules_frame, text="Job Preset").grid(row=0, column=0, sticky="w", pady=(0, 8))
-        self.job_preset_combo = ttk.Combobox(
-            self.rules_frame,
-            textvariable=self.job_preset_var,
-            values=self._job_preset_names(),
-        )
-        self.job_preset_combo.grid(row=0, column=1, sticky="ew", pady=(0, 8))
-        ttk.Button(self.rules_frame, text="Apply Job Preset", command=self._apply_job_preset).grid(row=0, column=2, padx=(8, 0), pady=(0, 8))
-        ttk.Button(self.rules_frame, text="Save Job Preset", command=self._save_job_preset).grid(row=0, column=3, padx=(8, 0), pady=(0, 8))
-        ttk.Button(self.rules_frame, text="Delete Job Preset", command=self._delete_job_preset).grid(row=0, column=4, padx=(8, 0), pady=(0, 8))
-
-        ttk.Label(self.rules_frame, text="Profile").grid(row=1, column=0, sticky="w", pady=(0, 8))
+        ttk.Label(self.rules_frame, text="Profile").grid(row=0, column=0, sticky="w", pady=(0, 8))
         self.profile_combo = ttk.Combobox(
             self.rules_frame,
             textvariable=self.profile_var,
             state="readonly",
             values=self._profile_names(),
         )
-        self.profile_combo.grid(row=1, column=1, sticky="ew", pady=(0, 8))
+        self.profile_combo.grid(row=0, column=1, sticky="ew", pady=(0, 8))
         self.profile_combo.bind("<<ComboboxSelected>>", self._on_profile_selected)
 
-        ttk.Button(self.rules_frame, text="New Profile", command=self._create_profile).grid(row=1, column=2, padx=(8, 0), pady=(0, 8))
-        ttk.Button(self.rules_frame, text="Delete Profile", command=self._delete_profile).grid(row=1, column=3, padx=(8, 0), pady=(0, 8))
+        ttk.Button(self.rules_frame, text="New Profile", command=self._create_profile).grid(row=0, column=2, padx=(8, 0), pady=(0, 8))
+        ttk.Button(self.rules_frame, text="Delete Profile", command=self._delete_profile).grid(row=0, column=3, padx=(8, 0), pady=(0, 8))
 
         daily_st_label = ttk.Label(self.rules_frame, text="Daily ST Alert")
-        daily_st_label.grid(row=2, column=0, sticky="w", pady=(0, 8))
+        daily_st_label.grid(row=1, column=0, sticky="w", pady=(0, 8))
         daily_st_entry = ttk.Entry(self.rules_frame, textvariable=self.daily_st_threshold_var)
-        daily_st_entry.grid(row=2, column=1, sticky="ew", pady=(0, 8))
+        daily_st_entry.grid(row=1, column=1, sticky="ew", pady=(0, 8))
         daily_st_help = "How many regular time hours per week an employee can work (Usually 8 or 10)."
         ToolTip(daily_st_label, daily_st_help, color_getter=self._tooltip_colours)
         ToolTip(daily_st_entry, daily_st_help, color_getter=self._tooltip_colours)
 
         weekly_st_label = ttk.Label(self.rules_frame, text="Weekly ST Alert")
-        weekly_st_label.grid(row=3, column=0, sticky="w", pady=(0, 8))
+        weekly_st_label.grid(row=2, column=0, sticky="w", pady=(0, 8))
         weekly_st_entry = ttk.Entry(self.rules_frame, textvariable=self.st_threshold_var)
-        weekly_st_entry.grid(row=3, column=1, sticky="ew", pady=(0, 8))
+        weekly_st_entry.grid(row=2, column=1, sticky="ew", pady=(0, 8))
         weekly_st_help = "How many regular time hours per week an employee can work."
         ToolTip(weekly_st_label, weekly_st_help, color_getter=self._tooltip_colours)
         ToolTip(weekly_st_entry, weekly_st_help, color_getter=self._tooltip_colours)
 
         weekly_ot_label = ttk.Label(self.rules_frame, text="Weekly OT Alert")
-        weekly_ot_label.grid(row=4, column=0, sticky="w", pady=(0, 8))
+        weekly_ot_label.grid(row=3, column=0, sticky="w", pady=(0, 8))
         weekly_ot_entry = ttk.Entry(self.rules_frame, textvariable=self.ot_threshold_var)
-        weekly_ot_entry.grid(row=4, column=1, sticky="ew", pady=(0, 8))
+        weekly_ot_entry.grid(row=3, column=1, sticky="ew", pady=(0, 8))
         weekly_ot_help = "Some sites have limits to how much OT you can work before you automatically start making DT."
         ToolTip(weekly_ot_label, weekly_ot_help, color_getter=self._tooltip_colours)
         ToolTip(weekly_ot_entry, weekly_ot_help, color_getter=self._tooltip_colours)
 
         max_hours_label = ttk.Label(self.rules_frame, text="Max Hours Per Day")
-        max_hours_label.grid(row=5, column=0, sticky="w", pady=(0, 8))
+        max_hours_label.grid(row=4, column=0, sticky="w", pady=(0, 8))
         max_hours_entry = ttk.Entry(self.rules_frame, textvariable=self.max_hours_per_day_var)
-        max_hours_entry.grid(row=5, column=1, sticky="ew", pady=(0, 8))
+        max_hours_entry.grid(row=4, column=1, sticky="ew", pady=(0, 8))
         max_hours_help = "Max hours before fatigue management per day"
         ToolTip(max_hours_label, max_hours_help, color_getter=self._tooltip_colours)
         ToolTip(max_hours_entry, max_hours_help, color_getter=self._tooltip_colours)
 
-        ttk.Button(self.rules_frame, text="Apply Rules", command=self._apply_rule_changes).grid(row=6, column=1, sticky="w", pady=(8, 0))
+        signin_hours_check = ttk.Checkbutton(
+            self.rules_frame,
+            text="Check sign-in time vs entered hours",
+            variable=self.signin_hours_check_profile_var,
+        )
+        signin_hours_check.grid(row=5, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        signin_hours_check_help = "Enable the sign-in-sheet time-vs-hours mismatch warning for this active formatting profile."
+        ToolTip(signin_hours_check, signin_hours_check_help, color_getter=self._tooltip_colours)
+
+        signin_tolerance_label = ttk.Label(self.rules_frame, text="Sign-in mismatch tolerance (hours)")
+        signin_tolerance_label.grid(row=6, column=0, sticky="w", pady=(0, 8))
+        signin_tolerance_entry = ttk.Entry(self.rules_frame, textvariable=self.signin_hours_tolerance_var)
+        signin_tolerance_entry.grid(row=6, column=1, sticky="ew", pady=(0, 8))
+        signin_tolerance_help = "Allowed difference between entered hours and time-derived hours before a warning appears."
+        ToolTip(signin_tolerance_label, signin_tolerance_help, color_getter=self._tooltip_colours)
+        ToolTip(signin_tolerance_entry, signin_tolerance_help, color_getter=self._tooltip_colours)
+
+        ttk.Button(self.rules_frame, text="Apply Rules", command=self._apply_rule_changes).grid(row=7, column=1, sticky="w", pady=(8, 0))
 
         note = (
             "Enter weekly alert thresholds for this profile. Leave a field blank to disable that alert. "
             "These rules apply to employee rows in the Summaries tables (weekly and daily, per PF and combined)."
         )
         ttk.Label(self.rules_frame, text=note, wraplength=700, justify="left").grid(
-            row=7, column=0, columnspan=5, sticky="w", pady=(12, 0)
+            row=8, column=0, columnspan=5, sticky="w", pady=(12, 0)
         )
 
         self._populate_rule_editor()
@@ -6154,6 +6244,7 @@ class DssToolsApp(tk.Tk):
         self.hash_poll_minutes_var = tk.StringVar(value=str(self.app_settings.hash_poll_minutes))
         self.auto_update_check_var = tk.BooleanVar(value=self.app_settings.auto_update_check_enabled)
         self.auto_update_download_var = tk.BooleanVar(value=self.app_settings.auto_download_updates_on_unmetered_wifi)
+        self.signin_hours_check_var = tk.BooleanVar(value=self.app_settings.signin_hours_check_enabled)
 
         ttk.Checkbutton(
             self.config_frame,
@@ -6207,12 +6298,18 @@ class DssToolsApp(tk.Tk):
             variable=self.auto_update_download_var,
         ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(0, 8))
 
+        ttk.Checkbutton(
+            self.config_frame,
+            text="Check sign-in time against entered hours",
+            variable=self.signin_hours_check_var,
+        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(0, 8))
+
         ttk.Label(self.config_frame, text=f"Application version: {APP_VERSION}").grid(
-            row=7, column=0, columnspan=2, sticky="w", pady=(0, 8)
+            row=8, column=0, columnspan=2, sticky="w", pady=(0, 8)
         )
 
         appearance = ttk.LabelFrame(self.config_frame, text="Appearance (colours)", padding=8)
-        appearance.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        appearance.grid(row=9, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         appearance.columnconfigure(1, weight=1)
         self._ui_theme_colour_vars: dict[str, tk.StringVar] = {}
         ut = self.app_settings.ui_theme
@@ -6238,11 +6335,11 @@ class DssToolsApp(tk.Tk):
         ).grid(row=len(UI_THEME_CONFIG_FIELDS) + 1, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
         ttk.Button(self.config_frame, text="Apply Settings", command=self._apply_app_settings).grid(
-            row=9, column=0, sticky="w", pady=(12, 0)
+            row=10, column=0, sticky="w", pady=(12, 0)
         )
 
         maintenance = ttk.LabelFrame(self.config_frame, text="Maintenance", padding=8)
-        maintenance.grid(row=10, column=0, columnspan=2, sticky="ew", pady=(16, 0))
+        maintenance.grid(row=11, column=0, columnspan=2, sticky="ew", pady=(16, 0))
         ttk.Button(maintenance, text="Reset All Settings to Default", command=self._reset_all_settings).grid(
             row=0, column=0, sticky="w"
         )
@@ -6257,7 +6354,7 @@ class DssToolsApp(tk.Tk):
         )
 
         diagnostics = ttk.LabelFrame(self.config_frame, text="Diagnostics", padding=8)
-        diagnostics.grid(row=11, column=0, columnspan=2, sticky="ew", pady=(16, 0))
+        diagnostics.grid(row=12, column=0, columnspan=2, sticky="ew", pady=(16, 0))
         ttk.Button(diagnostics, text="Show App Data Folder", command=self._show_app_data_folder).grid(
             row=0, column=0, sticky="w"
         )
@@ -6292,7 +6389,7 @@ class DssToolsApp(tk.Tk):
             "how the app checks GitHub for downloadable updates, and optional UI colours (tables, chrome, alerts)."
         )
         ttk.Label(self.config_frame, text=note, wraplength=700, justify="left").grid(
-            row=12, column=0, columnspan=2, sticky="w", pady=(12, 0)
+            row=13, column=0, columnspan=2, sticky="w", pady=(12, 0)
         )
 
     def _pick_ui_colour(self, var: tk.StringVar) -> None:
@@ -6323,9 +6420,6 @@ class DssToolsApp(tk.Tk):
     def _profile_names(self) -> list[str]:
         return sorted(self.formatting_profiles)
 
-    def _job_preset_names(self) -> list[str]:
-        return sorted(self.job_presets)
-
     def _active_profile(self) -> FormattingProfile:
         return self.formatting_profiles[self.current_profile_name]
 
@@ -6333,11 +6427,14 @@ class DssToolsApp(tk.Tk):
         profile = self._active_profile()
         self.profile_var.set(profile.name)
         self.profile_combo.configure(values=self._profile_names())
-        self.job_preset_combo.configure(values=self._job_preset_names())
         self.st_threshold_var.set("" if profile.st_threshold is None else fmt_hours(profile.st_threshold))
         self.ot_threshold_var.set("" if profile.ot_threshold is None else fmt_hours(profile.ot_threshold))
         self.daily_st_threshold_var.set("" if profile.daily_st_threshold is None else fmt_hours(profile.daily_st_threshold))
         self.max_hours_per_day_var.set("" if profile.max_hours_per_day is None else fmt_hours(profile.max_hours_per_day))
+        self.signin_hours_check_profile_var.set(profile.signin_hours_check_enabled)
+        self.signin_hours_tolerance_var.set(
+            "" if profile.signin_hours_mismatch_tolerance is None else fmt_hours(profile.signin_hours_mismatch_tolerance)
+        )
 
     def _on_profile_selected(self, _event=None) -> None:
         selected = self.profile_var.get()
@@ -6355,6 +6452,8 @@ class DssToolsApp(tk.Tk):
                 ot_threshold=parse_threshold_value(self.ot_threshold_var.get()),
                 daily_st_threshold=parse_threshold_value(self.daily_st_threshold_var.get()),
                 max_hours_per_day=parse_threshold_value(self.max_hours_per_day_var.get()),
+                signin_hours_check_enabled=bool(self.signin_hours_check_profile_var.get()),
+                signin_hours_mismatch_tolerance=parse_threshold_value(self.signin_hours_tolerance_var.get()),
             )
         except ValueError:
             messagebox.showerror("Formatting Rules", "Thresholds must be numbers or blank.")
@@ -6383,6 +6482,8 @@ class DssToolsApp(tk.Tk):
             ot_threshold=base.ot_threshold,
             daily_st_threshold=base.daily_st_threshold,
             max_hours_per_day=base.max_hours_per_day,
+            signin_hours_check_enabled=base.signin_hours_check_enabled,
+            signin_hours_mismatch_tolerance=base.signin_hours_mismatch_tolerance,
         )
         self.current_profile_name = name
         self._persist_profiles()
@@ -6427,11 +6528,17 @@ class DssToolsApp(tk.Tk):
         names.difference_update(self.employee_hidden_names)
         return sorted(name for name in names if name.strip())
 
+    def _current_parse_warnings(self, tracker_data: TrackerData | None = None) -> list[SheetParseWarning]:
+        source = tracker_data if tracker_data is not None else self.current_data
+        if source is None:
+            return []
+        return [
+            *source.parse_warnings,
+            *build_signin_hours_mismatch_warnings(source.daily_records, self.app_settings, self._active_profile()),
+        ]
+
     def _persist_app_settings(self) -> None:
         save_app_settings(self.config_path, self.app_settings)
-
-    def _persist_job_presets(self) -> None:
-        save_job_presets(self.config_path, self.job_presets)
 
     def _all_layout_tables(self) -> list[DataTable]:
         return [
@@ -6478,6 +6585,7 @@ class DssToolsApp(tk.Tk):
         self.hash_poll_minutes_var.set(str(self.app_settings.hash_poll_minutes))
         self.auto_update_check_var.set(self.app_settings.auto_update_check_enabled)
         self.auto_update_download_var.set(self.app_settings.auto_download_updates_on_unmetered_wifi)
+        self.signin_hours_check_var.set(self.app_settings.signin_hours_check_enabled)
         ut = self.app_settings.ui_theme
         if getattr(self, "_ui_theme_colour_vars", None):
             for _label, attr in UI_THEME_CONFIG_FIELDS:
@@ -6489,7 +6597,6 @@ class DssToolsApp(tk.Tk):
         self._refresh_filter_options()
         employee_names = self._managed_employee_names()
         self.groups_frame.set_data(employee_names, self.employee_groups, self.employee_emails, self.employee_notes, self.missing_email_suppressions)
-        self.job_preset_combo.configure(values=self._job_preset_names())
         for table in self._all_layout_tables():
             table.reset_layout()
         if self.current_data is not None:
@@ -6538,6 +6645,7 @@ class DssToolsApp(tk.Tk):
             quickload_cancel_hotkey=hotkey_norm,
             auto_update_check_enabled=bool(self.auto_update_check_var.get()),
             auto_download_updates_on_unmetered_wifi=bool(self.auto_update_download_var.get()),
+            signin_hours_check_enabled=bool(self.signin_hours_check_var.get()),
             ui_theme=ui_theme,
         )
         self.hash_poll_interval_ms = self.app_settings.hash_poll_minutes * 60 * 1000
@@ -6569,14 +6677,12 @@ class DssToolsApp(tk.Tk):
                 "email_subject_template",
                 "email_body_template",
                 "table_layouts",
-                "job_presets",
             ],
         )
         self.app_settings = AppSettings()
         self.hash_poll_interval_ms = self.app_settings.hash_poll_minutes * 60 * 1000
         self.formatting_profiles, self.current_profile_name = load_formatting_profiles(self.config_path)
         self.email_subject_template, self.email_body_template = load_email_templates(self.config_path)
-        self.job_presets = {}
         self._reload_defaults_into_ui()
         self._register_quickload_cancel_hotkey()
         self._schedule_hash_monitor()
@@ -6628,7 +6734,6 @@ class DssToolsApp(tk.Tk):
         self.missing_email_suppressions = set()
         self.employee_added_names = set()
         self.employee_hidden_names = set()
-        self.job_presets = {}
         self.app_settings = AppSettings()
         self.hash_poll_interval_ms = self.app_settings.hash_poll_minutes * 60 * 1000
         self.formatting_profiles, self.current_profile_name = load_formatting_profiles(self.config_path)
@@ -7186,38 +7291,6 @@ class DssToolsApp(tk.Tk):
             self._render_data(self.current_data)
         else:
             self.groups_frame.set_data(self._managed_employee_names(), self.employee_groups, self.employee_emails, self.employee_notes, self.missing_email_suppressions)
-
-    def _save_job_preset(self) -> None:
-        job_name = self.job_preset_var.get().strip()
-        if not job_name:
-            messagebox.showerror("Formatting Rules", "Enter a job preset name first.")
-            return
-        self.job_presets[job_name] = self.current_profile_name
-        self._persist_job_presets()
-        self.job_preset_combo.configure(values=self._job_preset_names())
-        messagebox.showinfo("Formatting Rules", f"Saved job preset '{job_name}' -> profile '{self.current_profile_name}'.")
-
-    def _apply_job_preset(self) -> None:
-        job_name = self.job_preset_var.get().strip()
-        profile_name = self.job_presets.get(job_name, "")
-        if not profile_name or profile_name not in self.formatting_profiles:
-            messagebox.showerror("Formatting Rules", "That job preset is missing or points to a deleted profile.")
-            return
-        self.current_profile_name = profile_name
-        self._populate_rule_editor()
-        self._persist_profiles()
-        self._refresh_alert_rendering()
-
-    def _delete_job_preset(self) -> None:
-        job_name = self.job_preset_var.get().strip()
-        if not job_name or job_name not in self.job_presets:
-            return
-        if not messagebox.askyesno("Delete Job Preset", f"Delete job preset '{job_name}'?"):
-            return
-        del self.job_presets[job_name]
-        self._persist_job_presets()
-        self.job_preset_var.set("")
-        self.job_preset_combo.configure(values=self._job_preset_names())
 
     def export_current_view(self) -> None:
         table = self._current_export_table()
@@ -8280,9 +8353,10 @@ class DssToolsApp(tk.Tk):
         ]
         filtered_week_totals = build_week_totals(filtered_combined_summary) if filtered_combined_summary else []
         filtered_source_files = {record.source_file for record in filtered_daily_records}
+        active_parse_warnings = self._current_parse_warnings(tracker_data)
         filtered_parse_warnings = [
             warning
-            for warning in tracker_data.parse_warnings
+            for warning in active_parse_warnings
             if warning.source_file in filtered_source_files or not filtered_daily_records
         ]
 

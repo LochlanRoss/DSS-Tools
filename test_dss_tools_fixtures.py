@@ -188,8 +188,42 @@ class DssToolsFixtures(unittest.TestCase):
             ws["O3"] = "DESCRIPTION OF WORK"
             ws["A5"] = "Lochlan Ross"
             ws["C5"] = "07:00"
-            ws["D5"] = "17:30"
+            ws["D5"] = "17:30" if index == 1 else "09:00"
             ws["E5"] = 10 if index == 1 else 2
             ws["J5"] = "" if index == 1 else "PF26005-3"
             ws["A35"] = "FOR OFFICE USE:"
+        wb.save(path)
+
+    def build_signin_mismatch_workbook(self, path: Path) -> None:
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Sheet1"
+        ws["Q1"] = "SHIFT: Day R.00"
+        ws["R1"] = "DATE:"
+        ws["S1"] = datetime(2026, 6, 10)
+        ws["A3"] = "NAME"
+        ws["C3"] = "TIME   IN"
+        ws["D3"] = "TIME OUT"
+        ws["E3"] = "REG HOURS"
+        ws["F3"] = "Hours OT"
+        ws["J3"] = "JA TECH JOB #"
+        ws["L3"] = "WORK  ORDER #"
+        ws["M3"] = "OPERATION #"
+        ws["N3"] = "JA TECH VEHICLE UNIT #"
+        ws["O3"] = "DESCRIPTION OF WORK"
+
+        ws["A5"] = "Lochlan Ross"
+        ws["C5"] = "07:00"
+        ws["D5"] = "17:30"
+        ws["E5"] = 10.5
+        ws["J5"] = "PF26005-3"
+        ws["O5"] = "Mismatch Example"
+
+        ws["A7"] = "Hayden Roddis"
+        ws["C7"] = "11:00"
+        ws["D7"] = "13:00"
+        ws["J7"] = "PF26005-3"
+        ws["O7"] = "Fallback Lunch Example"
+
+        ws["A35"] = "FOR OFFICE USE:"
         wb.save(path)

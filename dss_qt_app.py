@@ -822,7 +822,6 @@ class FormattingRulesPage(QWidget):
         super().__init__()
         self.profiles: dict[str, core.FormattingProfile] = {}
         self.current_profile_name = core.DEFAULT_PROFILE_NAME
-        self.job_presets: dict[str, str] = {}
 
         layout = QVBoxLayout(self)
         form_box = QGroupBox("Formatting Rules")
@@ -832,14 +831,15 @@ class FormattingRulesPage(QWidget):
         self.weekly_st_edit = QLineEdit()
         self.weekly_ot_edit = QLineEdit()
         self.max_hours_edit = QLineEdit()
-        self.job_preset_combo = QComboBox()
-        self.job_preset_combo.setEditable(True)
+        self.signin_hours_check_box = QCheckBox()
+        self.signin_tolerance_edit = QLineEdit()
         form.addRow("Profile", self.profile_combo)
-        form.addRow("Job Preset", self.job_preset_combo)
         form.addRow("Daily ST Alert", self.daily_st_edit)
         form.addRow("Weekly ST Alert", self.weekly_st_edit)
         form.addRow("Weekly OT Alert", self.weekly_ot_edit)
         form.addRow("Max Hours Per Day", self.max_hours_edit)
+        form.addRow("Check sign-in time vs entered hours", self.signin_hours_check_box)
+        form.addRow("Sign-in mismatch tolerance (hours)", self.signin_tolerance_edit)
         buttons = QHBoxLayout()
         self.new_button = QPushButton("New Profile")
         self.delete_button = QPushButton("Delete Profile")
@@ -848,36 +848,18 @@ class FormattingRulesPage(QWidget):
         buttons.addWidget(self.delete_button)
         buttons.addWidget(self.save_button)
 
-        presets_box = QGroupBox("Rule Presets by Job")
-        presets_layout = QVBoxLayout(presets_box)
-        self.presets_list = QListWidget()
-        preset_buttons = QHBoxLayout()
-        self.apply_preset_button = QPushButton("Apply Job Preset")
-        self.add_preset_button = QPushButton("Save Job Preset")
-        self.remove_preset_button = QPushButton("Delete Job Preset")
-        preset_buttons.addWidget(self.apply_preset_button)
-        preset_buttons.addWidget(self.add_preset_button)
-        preset_buttons.addWidget(self.remove_preset_button)
-        presets_layout.addWidget(self.presets_list, 1)
-        presets_layout.addLayout(preset_buttons)
-
         layout.addWidget(form_box)
         layout.addLayout(buttons)
-        layout.addWidget(presets_box, 1)
+        layout.addStretch(1)
 
         self.profile_combo.currentTextChanged.connect(self._profile_changed)
-        self.presets_list.currentItemChanged.connect(self._preset_selected)
         self.new_button.clicked.connect(self._new_profile)
         self.delete_button.clicked.connect(self._delete_profile)
         self.save_button.clicked.connect(self._save_profile)
-        self.apply_preset_button.clicked.connect(self._apply_preset)
-        self.add_preset_button.clicked.connect(self._add_preset)
-        self.remove_preset_button.clicked.connect(self._remove_preset)
 
-    def set_data(self, profiles: dict[str, core.FormattingProfile], current_profile_name: str, job_presets: dict[str, str]) -> None:
+    def set_data(self, profiles: dict[str, core.FormattingProfile], current_profile_name: str) -> None:
         self.profiles = dict(profiles)
         self.current_profile_name = current_profile_name
-        self.job_presets = dict(job_presets)
         self.profile_combo.blockSignals(True)
         self.profile_combo.clear()
         for name in sorted(self.profiles, key=str.casefold):
@@ -885,10 +867,9 @@ class FormattingRulesPage(QWidget):
         self.profile_combo.setCurrentText(current_profile_name)
         self.profile_combo.blockSignals(False)
         self._load_profile(self.profiles[self.current_profile_name])
-        self._refresh_presets()
 
-    def snapshot(self) -> tuple[dict[str, core.FormattingProfile], str, dict[str, str]]:
-        return dict(self.profiles), self.current_profile_name, dict(self.job_presets)
+    def snapshot(self) -> tuple[dict[str, core.FormattingProfile], str]:
+        return dict(self.profiles), self.current_profile_name
 
     def _profile_changed(self, name: str) -> None:
         if not name or name not in self.profiles:
@@ -902,6 +883,10 @@ class FormattingRulesPage(QWidget):
         self.weekly_st_edit.setText("" if profile.st_threshold is None else core.fmt_hours(profile.st_threshold))
         self.weekly_ot_edit.setText("" if profile.ot_threshold is None else core.fmt_hours(profile.ot_threshold))
         self.max_hours_edit.setText("" if profile.max_hours_per_day is None else core.fmt_hours(profile.max_hours_per_day))
+        self.signin_hours_check_box.setChecked(profile.signin_hours_check_enabled)
+        self.signin_tolerance_edit.setText(
+            "" if profile.signin_hours_mismatch_tolerance is None else core.fmt_hours(profile.signin_hours_mismatch_tolerance)
+        )
 
     def _profile_from_form(self, name: str) -> core.FormattingProfile:
         return core.FormattingProfile(
@@ -910,6 +895,8 @@ class FormattingRulesPage(QWidget):
             ot_threshold=core.parse_threshold_value(self.weekly_ot_edit.text()) if self.weekly_ot_edit.text().strip() else None,
             daily_st_threshold=core.parse_threshold_value(self.daily_st_edit.text()) if self.daily_st_edit.text().strip() else None,
             max_hours_per_day=core.parse_threshold_value(self.max_hours_edit.text()) if self.max_hours_edit.text().strip() else None,
+            signin_hours_check_enabled=self.signin_hours_check_box.isChecked(),
+            signin_hours_mismatch_tolerance=core.parse_threshold_value(self.signin_tolerance_edit.text()) if self.signin_tolerance_edit.text().strip() else None,
         )
 
     def _new_profile(self) -> None:
@@ -917,9 +904,9 @@ class FormattingRulesPage(QWidget):
         profile_name = name.strip()
         if not ok or not profile_name:
             return
-        self.profiles[profile_name] = core.FormattingProfile(profile_name, None, None, None, None)
+        self.profiles[profile_name] = core.FormattingProfile(profile_name, None, None, None, None, True, 0.01)
         self.current_profile_name = profile_name
-        self.set_data(self.profiles, self.current_profile_name, self.job_presets)
+        self.set_data(self.profiles, self.current_profile_name)
         self.changed.emit()
 
     def _delete_profile(self) -> None:
@@ -930,7 +917,7 @@ class FormattingRulesPage(QWidget):
             return
         self.profiles.pop(name, None)
         self.current_profile_name = sorted(self.profiles, key=str.casefold)[0]
-        self.set_data(self.profiles, self.current_profile_name, self.job_presets)
+        self.set_data(self.profiles, self.current_profile_name)
         self.changed.emit()
 
     def _save_profile(self) -> None:
@@ -939,55 +926,6 @@ class FormattingRulesPage(QWidget):
             return
         self.profiles[name] = self._profile_from_form(name)
         self.current_profile_name = name
-        self.changed.emit()
-
-    def _refresh_presets(self) -> None:
-        current_job = self.job_preset_combo.currentText().strip()
-        self.job_preset_combo.blockSignals(True)
-        self.job_preset_combo.clear()
-        self.job_preset_combo.addItems(sorted(self.job_presets, key=str.casefold))
-        if current_job:
-            self.job_preset_combo.setCurrentText(current_job)
-        self.job_preset_combo.blockSignals(False)
-        self.presets_list.clear()
-        for job_name, profile_name in sorted(self.job_presets.items(), key=lambda item: item[0].casefold()):
-            item = QListWidgetItem(f"{job_name} -> {profile_name}")
-            item.setData(Qt.UserRole, job_name)
-            self.presets_list.addItem(item)
-
-    def _preset_selected(self, current: QListWidgetItem | None, _previous: QListWidgetItem | None) -> None:
-        if current is None:
-            return
-        self.job_preset_combo.setCurrentText(str(current.data(Qt.UserRole)))
-
-    def _apply_preset(self) -> None:
-        job_name = self.job_preset_combo.currentText().strip()
-        profile_name = self.job_presets.get(job_name, "")
-        if not profile_name or profile_name not in self.profiles:
-            QMessageBox.critical(self, "Formatting Rules", "That job preset is missing or points to a deleted profile.")
-            return
-        self.current_profile_name = profile_name
-        self.profile_combo.setCurrentText(profile_name)
-        self._load_profile(self.profiles[profile_name])
-        self.changed.emit()
-
-    def _add_preset(self) -> None:
-        job_name = self.job_preset_combo.currentText().strip()
-        if not job_name:
-            QMessageBox.critical(self, "Formatting Rules", "Enter a job preset name first.")
-            return
-        self.job_presets[job_name] = self.profile_combo.currentText().strip() or self.current_profile_name
-        self._refresh_presets()
-        self.changed.emit()
-
-    def _remove_preset(self) -> None:
-        job_name = self.job_preset_combo.currentText().strip()
-        if not job_name or job_name not in self.job_presets:
-            return
-        if QMessageBox.question(self, "Delete Job Preset", f"Delete job preset '{job_name}'?") != QMessageBox.Yes:
-            return
-        self.job_presets.pop(job_name, None)
-        self._refresh_presets()
         self.changed.emit()
 
 
@@ -1023,6 +961,7 @@ class ConfigurationPage(QWidget):
         self.quickload_hotkey_combo.addItems(list(core.QUICKLOAD_CANCEL_HOTKEY_PRESETS))
         self.auto_update_check_box = QCheckBox()
         self.auto_update_download_box = QCheckBox()
+        self.signin_hours_check_box = QCheckBox()
         self.library_root_edit = QLineEdit()
         self.library_root_browse_button = QPushButton("Browse...")
         self.version_label = QLabel(f"Application version: {core.APP_VERSION}")
@@ -1038,6 +977,7 @@ class ConfigurationPage(QWidget):
         form.addRow("Cancel quick-load hotkey", self.quickload_hotkey_combo)
         form.addRow("Automatically check GitHub for updates on startup", self.auto_update_check_box)
         form.addRow("Automatically download updates on unmetered Wi-Fi", self.auto_update_download_box)
+        form.addRow("Check sign-in time against entered hours", self.signin_hours_check_box)
         form.addRow("DSS library root folder", library_root_row)
         form.addRow("", self.version_label)
 
@@ -1114,6 +1054,7 @@ class ConfigurationPage(QWidget):
         self.quickload_hotkey_combo.lineEdit().editingFinished.connect(self.settingsChanged.emit)
         self.auto_update_check_box.toggled.connect(self.settingsChanged.emit)
         self.auto_update_download_box.toggled.connect(self.settingsChanged.emit)
+        self.signin_hours_check_box.toggled.connect(self.settingsChanged.emit)
         self.library_root_edit.editingFinished.connect(self.settingsChanged.emit)
         for edit in self._theme_line_edits.values():
             edit.editingFinished.connect(self.settingsChanged.emit)
@@ -1166,6 +1107,7 @@ class ConfigurationPage(QWidget):
         self.quickload_hotkey_combo.setCurrentText(settings.quickload_cancel_hotkey)
         self.auto_update_check_box.setChecked(settings.auto_update_check_enabled)
         self.auto_update_download_box.setChecked(settings.auto_download_updates_on_unmetered_wifi)
+        self.signin_hours_check_box.setChecked(settings.signin_hours_check_enabled)
         self.library_root_edit.setText(settings.dss_library_root)
         for _label, attr in core.UI_THEME_CONFIG_FIELDS:
             edit = self._theme_line_edits.get(attr)
@@ -1195,6 +1137,7 @@ class ConfigurationPage(QWidget):
             quickload_cancel_hotkey=hotkey,
             auto_update_check_enabled=self.auto_update_check_box.isChecked(),
             auto_download_updates_on_unmetered_wifi=self.auto_update_download_box.isChecked(),
+            signin_hours_check_enabled=self.signin_hours_check_box.isChecked(),
             dss_library_root=self.library_root_edit.text().strip(),
             ui_theme=core.parse_ui_theme_payload(theme_payload, defaults=current.ui_theme),
         )
@@ -1306,7 +1249,6 @@ class DssQtMainWindow(QMainWindow):
         self.employee_groups = core.load_employee_groups(self.config_path)
         self.missing_email_suppressions = core.load_missing_email_suppressions(self.config_path)
         self.employee_added_names, self.employee_hidden_names = core.load_employee_name_overrides(self.config_path)
-        self.job_presets = core.load_job_presets(self.config_path)
         self.subject_template, self.body_template = core.load_email_templates(self.config_path)
         self.ignored_name_typos = core.load_ignored_name_typos(self.config_path)
         self.current_data: core.TrackerData | None = None
@@ -1503,7 +1445,7 @@ class DssQtMainWindow(QMainWindow):
     def _sync_ui_from_state(self) -> None:
         self.configuration_page.set_settings(self.app_settings)
         self.configuration_page.set_update_status(self._update_status_text)
-        self.formatting_page.set_data(self.profiles, self.current_profile_name, self.job_presets)
+        self.formatting_page.set_data(self.profiles, self.current_profile_name)
         self.email_drafts_page.set_templates(self.subject_template, self.body_template)
         self._sync_data_tabs_visibility()
         self.hash_poll_timer.setInterval(max(1, self.app_settings.hash_poll_minutes) * 60 * 1000)
@@ -1597,6 +1539,18 @@ class DssQtMainWindow(QMainWindow):
 
     def _active_profile(self) -> core.FormattingProfile:
         return self.profiles.get(self.current_profile_name, next(iter(self.profiles.values())))
+
+    def _current_parse_warnings(self) -> list[core.SheetParseWarning]:
+        if not self.current_data:
+            return []
+        return [
+            *self.current_data.parse_warnings,
+            *core.build_signin_hours_mismatch_warnings(
+                self.current_data.daily_records,
+                self.app_settings,
+                self._active_profile(),
+            ),
+        ]
 
     def _daily_records_filtered(self) -> list[core.DailyRecord]:
         if not self.current_data:
@@ -1746,6 +1700,7 @@ class DssQtMainWindow(QMainWindow):
             for item in sorted(findings, key=lambda finding: (finding.week_start, finding.employee, finding.hour_type), reverse=True)
         ])
         filtered_source_files = {record.source_file for record in filtered_records}
+        active_parse_warnings = self._current_parse_warnings()
         parse_warning_rows = [
             {
                 "source_file": warning.source_file,
@@ -1754,7 +1709,7 @@ class DssQtMainWindow(QMainWindow):
                 "issue": warning.issue,
                 "details": warning.details,
             }
-            for warning in self.current_data.parse_warnings
+            for warning in active_parse_warnings
             if warning.source_file in filtered_source_files
         ]
         self.pages["parse_warnings"].set_rows(parse_warning_rows)
@@ -1848,9 +1803,8 @@ class DssQtMainWindow(QMainWindow):
         self.refresh_views()
 
     def _formatting_changed(self) -> None:
-        self.profiles, self.current_profile_name, self.job_presets = self.formatting_page.snapshot()
+        self.profiles, self.current_profile_name = self.formatting_page.snapshot()
         core.save_formatting_profiles(self.config_path, self.profiles, self.current_profile_name)
-        core.save_job_presets(self.config_path, self.job_presets)
         self.refresh_views()
 
     def _settings_changed(self) -> None:
@@ -2276,7 +2230,6 @@ class DssQtMainWindow(QMainWindow):
         self.missing_email_suppressions = set()
         self.employee_added_names = set()
         self.employee_hidden_names = set()
-        self.job_presets = {}
         self.subject_template, self.body_template = core.load_email_templates(self.config_path)
         self.ignored_name_typos = set()
         self.status_label.setText("No DSS workbooks loaded")
@@ -2293,7 +2246,7 @@ class DssQtMainWindow(QMainWindow):
         core.save_app_settings(self.config_path, self.app_settings)
         core.save_formatting_profiles(self.config_path, self.profiles, self.current_profile_name)
         self.configuration_page.set_settings(self.app_settings)
-        self.formatting_page.set_data(self.profiles, self.current_profile_name, self.job_presets)
+        self.formatting_page.set_data(self.profiles, self.current_profile_name)
         self._sync_data_tabs_visibility()
         self.hash_poll_timer.setInterval(max(1, self.app_settings.hash_poll_minutes) * 60 * 1000)
         self._bind_shortcuts()
