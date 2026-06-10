@@ -16,11 +16,6 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('PySide6')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
-# Optional: build dist/DSSToolsUpdater.exe first so the main app can extract/copy it at update time.
-_bundled_updater = _repo / 'dist' / 'DSSToolsUpdater.exe'
-if _bundled_updater.is_file():
-    binaries = binaries + [(str(_bundled_updater), '.')]
-
 a = Analysis(
     ['dss_hours_tracker.py'],
     pathex=[],
@@ -53,7 +48,17 @@ _exe_kw = dict(
 )
 if _icon.is_file():
     _exe_kw['icon'] = str(_icon)
-exe = EXE(pyz, a.scripts, a.binaries, a.datas, [], **_exe_kw)
+exe = EXE(pyz, a.scripts, [], exclude_binaries=True, **_exe_kw)
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name='DSSTools',
+)
 
 _updater_datas: list = []
 if _icon.is_file():

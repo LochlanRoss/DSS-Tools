@@ -831,7 +831,7 @@ def ensure_app_directories() -> tuple[Path, Path]:
 
 
 def resolve_app_icon_path() -> Path | None:
-    """Bundled onefile: MEIPASS first; dev: next to this module. Optional single *.ico in repo root."""
+    """Frozen builds: bundled data first; dev: next to this module. Optional single *.ico in repo root."""
     roots: list[Path] = []
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
         roots.append(Path(sys._MEIPASS))
@@ -1400,30 +1400,6 @@ def save_employee_name_overrides(config_path: Path, added_names: set[str], hidde
     payload = read_config_payload(config_path)
     payload["employee_added_names"] = sorted(name for name in added_names if name.strip())
     payload["employee_hidden_names"] = sorted(name for name in hidden_names if name.strip())
-    config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-
-
-def load_job_presets(config_path: Path) -> dict[str, str]:
-    payload = read_config_payload(config_path)
-    raw_map = payload.get("job_presets", {})
-    if not isinstance(raw_map, dict):
-        return {}
-    presets: dict[str, str] = {}
-    for job_name, profile_name in raw_map.items():
-        job = str(job_name).strip()
-        profile = str(profile_name).strip()
-        if job and profile:
-            presets[job] = profile
-    return presets
-
-
-def save_job_presets(config_path: Path, job_presets: dict[str, str]) -> None:
-    payload = read_config_payload(config_path)
-    payload["job_presets"] = {
-        job: profile
-        for job, profile in sorted(job_presets.items(), key=lambda item: item[0].lower())
-        if job.strip() and profile.strip()
-    }
     config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
@@ -7007,7 +6983,7 @@ class DssToolsApp(tk.Tk):
             messagebox.showinfo("Update Download", f"The installer is ready at:\n{destination}")
 
     def _updater_exe_for_handoff(self) -> Path | None:
-        """Resolve ``DSSToolsUpdater.exe``: install dir, materialized from the frozen bundle, or None."""
+        """Resolve ``DSSToolsUpdater.exe`` from the installed app dir, or from a bundled fallback when present."""
         if os.name != "nt":
             return None
         sibling = Path(sys.executable).resolve().parent / UPDATER_EXE_NAME

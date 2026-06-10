@@ -109,7 +109,7 @@ The app uses grouped navigation with two tab rows:
 - Multi-file loads prefer **newer files first** (by filesystem modified time); the parser can emit an early partial preview while older workbooks are still loading
 - Same-file updates are skipped when the **DSS semantic hash** (dated sheets and `K25:AZ36` only) is unchanged; per-sheet digests allow **partial refresh** when only some dated sheets change
 - Parsed DSS data is cached on disk for up to 7 days
-- Optional **GitHub release** update check; automatic download on unmetered Wi‑Fi; **Check for Updates** can download on other networks when you confirm; after download, **Install now** launches **`DSSToolsUpdater.exe`** from **`%TEMP%`** (staged from the install or embedded copy) so the old **`Program Files`** tree can be removed safely. The helper opens a **compact window** with a **percentage progress bar** (**0–50%** uninstall, **50–100%** install—estimated from elapsed time because Inno is silent), then **silent Inno uninstall** (same product id), clears **`%LOCALAPPDATA%\DSSTools`** **cache**, **updates**, logs, and diagnostic JSON (not **`dss_hours_tracker_config.json`**), runs **`DSSToolsSetup.exe`** with **`/VERYSILENT`** (reusing the previous install directory via **`UsePreviousAppDir`**), and starts **DSS Tools** when finished—if silent install fails, it offers the **full wizard**. Current frozen builds **embed** the helper; Inno also ships it beside **`DSSTools.exe`**. Very old builds may still use a hidden PowerShell handoff and **`update_handoff.log`**.
+- Optional **GitHub release** update check; automatic download on unmetered Wi‑Fi; **Check for Updates** can download on other networks when you confirm; after download, **Install now** launches **`DSSToolsUpdater.exe`** from **`%TEMP%`** (staged from the installed sidecar, or a legacy bundled fallback when present) so the old **`Program Files`** tree can be removed safely. The helper opens a **compact window** with a **percentage progress bar** (**0–50%** uninstall, **50–100%** install—estimated from elapsed time because Inno is silent), then **silent Inno uninstall** (same product id), clears **`%LOCALAPPDATA%\DSSTools`** **cache**, **updates**, logs, and diagnostic JSON (not **`dss_hours_tracker_config.json`**), runs **`DSSToolsSetup.exe`** with **`/VERYSILENT`** (reusing the previous install directory via **`UsePreviousAppDir`**), and starts **DSS Tools** when finished—if silent install fails, it offers the **full wizard**. Very old builds may still use a hidden PowerShell handoff and **`update_handoff.log`**.
 - Loaded DSS files are checked periodically in the background for changes
 - Revision sheets such as `R1` / `rev 2` override the non-revised sheet for the same date
 - Conditional highlighting uses saved job-specific formatting profiles
@@ -284,7 +284,7 @@ The workflow **`.github/workflows/release-windows.yml`** runs on:
 - **Push of a version tag** matching **`MAJOR.MINOR.PATCH`** (for example `0.2.0`) or the same with a leading **`v`** (`v0.2.0`), or  
 - **Manual run** (“Run workflow”) with an **existing** tag name to rebuild and re-upload assets for that tag.
 
-It builds **`dist/DSSTools.exe`** with PyInstaller (bundles `pywin32`), embeds the tag’s numeric version via **`dss_app_version.txt`**, compiles **`installer/DSSTools.iss`** with **Inno Setup** into **`dist/DSSToolsSetup.exe`** (click-through wizard, Start-menu entry, uninstaller in **Settings → Apps**), writes **`checksums.txt`** for the **setup** program’s SHA-256 (for the app’s optional download verification), and publishes **`DSSToolsSetup.exe`** + **`checksums.txt`** on the **GitHub Release** (`softprops/action-gh-release`). The raw PyInstaller `.exe` is not attached to the release so the in-app updater picks the installer asset.
+It builds **`dist/DSSTools/DSSTools.exe`** with PyInstaller `onedir` (bundles `pywin32` and `PySide6` beside the EXE), builds a separate **`dist/DSSToolsUpdater.exe`** sidecar, embeds the tag’s numeric version via **`dss_app_version.txt`**, compiles **`installer/DSSTools.iss`** with **Inno Setup** into **`dist/DSSToolsSetup.exe`** (click-through wizard, Start-menu entry, uninstaller in **Settings → Apps**), writes **`checksums.txt`** for the **setup** program’s SHA-256 (for the app’s optional download verification), and publishes **`DSSToolsSetup.exe`** + **`checksums.txt`** on the **GitHub Release** (`softprops/action-gh-release`). The raw PyInstaller build output is not attached to the release so the in-app updater picks the installer asset.
 
 **Repository settings:** **Settings → Actions → General → Workflow permissions** → enable **Read and write permissions** (and allow GitHub Actions to create and approve pull requests if your org defaults to read-only), so `GITHUB_TOKEN` can attach release assets.
 
@@ -301,16 +301,24 @@ git push origin 0.2.0
 
 0. **Icon:** The repo ships **`DSS-Tools Icon.png`** and generated **`dss_tools.ico`** at the root. **PyInstaller** embeds that ICO into **`DSSTools.exe`** (`--icon`); the **Inno wizard** still uses **`SetupIconFile`**. Start-menu and desktop shortcuts use **`DSSTools.exe`** as **`IconFilename`** so the shell shows the **same** embedded resource the taskbar uses (a correct loose **`dss_tools.ico`** alone cannot fix a bad embedded icon). To refresh the ICO after editing the PNG: `pip install pillow` then `python tools/ensure_dss_tools_ico.py --force`. Without sources, the script falls back to **`tools/default_dss_tools.ico`** (generic blue tile).
 
-1. **One-file app** (same flags as CI; version from tag in CI is simulated here with `dss_app_version.txt`):
+1. **Updater sidecar** (`onefile`, same as CI):
 
 ```powershell
 Set-Content -NoNewline dss_app_version.txt "0.1.0"
-$args = @("--noconsole", "--onefile", "--name", "DSSTools", "--collect-all", "pywin32", "--add-data", "dss_app_version.txt;.")
+$updaterArgs = @("--noconsole", "--onefile", "--name", "DSSToolsUpdater", "--uac-admin", "--collect-all", "tkinter")
+if (Test-Path -LiteralPath "dss_tools.ico") { $updaterArgs += @("--icon", "dss_tools.ico", "--add-data", "dss_tools.ico;.") }
+pyinstaller @updaterArgs dss_tools_updater.py
+```
+
+2. **Main app folder** (`onedir`, same flags as CI; version from tag in CI is simulated here with `dss_app_version.txt`):
+
+```powershell
+$args = @("--noconsole", "--onedir", "--name", "DSSTools", "--collect-all", "pywin32", "--collect-all", "PySide6", "--hidden-import", "dss_tools_updater", "--add-data", "dss_app_version.txt;.")
 if (Test-Path -LiteralPath "dss_tools.ico") { $args += @("--icon", "dss_tools.ico", "--add-data", "dss_tools.ico;.") }
 pyinstaller @args dss_hours_tracker.py
 ```
 
-2. **Installer** (requires [Inno Setup 6](https://jrsoftware.org/isdl.php) installed):
+3. **Installer** (requires [Inno Setup 6](https://jrsoftware.org/isdl.php) installed):
 
 ```powershell
 & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DMyAppVersion=0.1.0 installer\DSSTools.iss

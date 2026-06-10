@@ -1,4 +1,4 @@
-# Build a single-file Windows .exe with PyInstaller and publish GitHub Release assets.
+# Build a Windows installer from a PyInstaller onedir app and publish GitHub Release assets.
 #
 # Trigger A — recommended: push an annotated version tag (MAJOR.MINOR.PATCH, optional leading v):
 #   git tag -a 0.2.0 -m "Release 0.2.0"
@@ -101,7 +101,7 @@ jobs:
       - name: Run fast unit tests
         run: python -m unittest test_dss_tools test_dss_tools_updater -q
 
-      - name: PyInstaller (one file)
+      - name: PyInstaller (updater onefile, main app onedir)
         shell: pwsh
         run: |
           $root = $env:GITHUB_WORKSPACE
@@ -115,18 +115,19 @@ jobs:
           $upExe = Join-Path $root "dist\DSSToolsUpdater.exe"
           if (-not (Test-Path -LiteralPath $upExe)) { throw "DSSToolsUpdater.exe was not produced." }
           $args = @(
-            "--noconsole", "--onefile", "--name", "DSSTools",
+            "--noconsole", "--onedir", "--name", "DSSTools",
             "--collect-all", "pywin32",
             "--collect-all", "PySide6",
             "--hidden-import", "dss_tools_updater",
-            "--add-data", "dss_app_version.txt;.",
-            "--add-binary", "dist\DSSToolsUpdater.exe;."
+            "--add-data", "dss_app_version.txt;."
           )
           if (-not (Test-Path -LiteralPath $ico)) {
             throw "dss_tools.ico missing; ensure step must run before PyInstaller."
           }
           $args += @("--icon", "dss_tools.ico", "--add-data", "dss_tools.ico;.")
           pyinstaller @args (Join-Path $root "dss_hours_tracker.py")
+          $mainExe = Join-Path $root "dist\DSSTools\DSSTools.exe"
+          if (-not (Test-Path -LiteralPath $mainExe)) { throw "DSSTools.exe was not produced under dist\\DSSTools." }
 
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
