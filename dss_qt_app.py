@@ -1367,6 +1367,7 @@ class DssQtMainWindow(QMainWindow):
             (self.data_tabs, TableSpec("week_totals", "Week Totals", (("week_start", "Week Start"), ("week_end", "Week End"), ("st", "Whole Crew ST"), ("ot", "Whole Crew OT"), ("dt", "Whole Crew DT"), ("total", "Whole Crew Total"), ("expanded", "Expanded Hours")))),
             (self.summary_tabs, TableSpec("daily_by_pf", "Daily by PF", (("source_file", "Source File"), ("pf_number", "PF#"), ("date", "Date"), ("employee", "Employee"), ("st", "ST"), ("ot", "OT"), ("dt", "DT"), ("total", "Total"), ("expanded", "Expanded Hours"), ("row_type", "Row Type")))),
             (self.summary_tabs, TableSpec("weekly_by_pf", "Weekly by PF", (("source_file", "Source File"), ("pf_number", "PF#"), ("week_start", "Week Start"), ("week_end", "Week End"), ("employee", "Employee"), ("st", "ST"), ("ot", "OT"), ("dt", "DT"), ("total", "Total"), ("expanded", "Expanded Hours"), ("row_type", "Row Type")))),
+            (self.summary_tabs, TableSpec("employee_daily_pf", "Summary by Employee", (("employee", "Employee"), ("week_number", "Week #"), ("date", "Date"), ("pf_number", "PF#"), ("st", "ST"), ("ot", "OT"), ("dt", "DT"), ("total", "Total")))),
             (self.summary_tabs, TableSpec("combined_daily", "Combined Summary Daily", (("date", "Date"), ("employee", "Employee"), ("st", "ST"), ("ot", "OT"), ("dt", "DT"), ("total", "Total"), ("expanded", "Expanded Hours")))),
             (self.summary_tabs, TableSpec("combined_weekly", "Combined Summary Weekly", (("week_start", "Week Start"), ("week_end", "Week End"), ("employee", "Employee"), ("st", "ST"), ("ot", "OT"), ("dt", "DT"), ("total", "Total"), ("expanded", "Expanded Hours")))),
             (self.report_tabs, TableSpec("error_report", "Error Report", (("employee", "Employee"), ("week_start", "Week Start"), ("week_end", "Week End"), ("hour_type", "Rule"), ("limit", "Limit"), ("actual_total", "Actual"), ("delta", "Delta"), ("trigger_date", "Trigger Date"), ("source_files", "Source Files"), ("reason", "Reason"), ("breakdown", "Breakdown")))),
@@ -1586,6 +1587,7 @@ class DssQtMainWindow(QMainWindow):
         weekly_summary = core.aggregate_weekly(filtered_records, combine_sources=False)
         daily_rollup = core.build_daily_rollup(daily_summary)
         weekly_rollup = core.build_weekly_rollup(weekly_summary)
+        employee_daily_pf = core.build_employee_day_pf_rows(filtered_records)
         combined_daily = core.aggregate_daily(filtered_records, combine_sources=True)
         combined_weekly = core.aggregate_weekly(filtered_records, combine_sources=True)
         week_totals = core.build_week_totals(combined_weekly)
@@ -1646,6 +1648,30 @@ class DssQtMainWindow(QMainWindow):
             }
             for row in sorted(weekly_rollup, key=lambda item: (item.week_start, item.pf_number, item.row_type == "Crew Total", item.employee), reverse=True)
         ])
+        employee_daily_rows: list[dict[str, str]] = []
+        previous_employee = ""
+        previous_date = ""
+        for row in employee_daily_pf:
+            date_text = row.work_date.strftime("%d-%b")
+            week_number = str(core.reference_week_number(row.work_date))
+            employee_text = row.employee if row.employee != previous_employee else ""
+            week_cell = week_number if row.employee != previous_employee else ""
+            date_cell = date_text if row.employee != previous_employee or date_text != previous_date else ""
+            employee_daily_rows.append(
+                {
+                    "employee": employee_text,
+                    "week_number": week_cell,
+                    "date": date_cell,
+                    "pf_number": core.display_pf_number(row.pf_number),
+                    "st": core.fmt_hours(row.st),
+                    "ot": core.fmt_hours(row.ot),
+                    "dt": core.fmt_hours(row.dt),
+                    "total": core.fmt_hours(row.total),
+                }
+            )
+            previous_employee = row.employee
+            previous_date = date_text
+        self.pages["employee_daily_pf"].set_rows(employee_daily_rows)
         self.pages["combined_daily"].set_rows([
             {
                 "date": row.work_date.isoformat(),

@@ -24,6 +24,8 @@ from dss_hours_tracker import (
     _bug_report_attachment_strings_to_try,
     build_employee_email_list_label,
     build_signin_hours_mismatch_warnings,
+    build_employee_day_pf_rows,
+    reference_week_number,
     load_employee_name_overrides,
     _is_updater_executable_path,
     binding_sequence_from_keypress_event,
@@ -268,6 +270,27 @@ class DssToolsTests(DssToolsFixtures):
         self.assertIn("10", mismatch_warnings[0].details)
         self.assertIn("noon lunch deduction", mismatch_warnings[0].details)
 
+    def test_process_workbook_bytes_parses_merged_signin_name_blocks_and_repeated_names(self) -> None:
+        with self.workspace_files("signin_merged_blocks") as path:
+            self.build_signin_merged_blocks_workbook(path)
+            records, warnings, health = process_workbook_bytes(path, path.read_bytes())
+
+        self.assertFalse(warnings)
+        self.assertFalse(health)
+        self.assertEqual(len(records), 6)
+        details = [(record.employee, record.pf_number, record.st, record.source_ranges) for record in records]
+        self.assertEqual(
+            details,
+            [
+                ("Lochlan Ross", "PF26005-3", 5.0, "Sign-in name A5; data C5:R5"),
+                ("Lochlan Ross", "PF26044-4", 5.0, "Sign-in name A5; continuation C6:R6"),
+                ("Colin Schwindt", "PF26005-3", 6.0, "Sign-in name A7; data C7:R7"),
+                ("Colin Schwindt", "PF26043-2", 2.0, "Sign-in name A7; continuation C8:R8"),
+                ("Colin Schwindt", "PF26043-3", 2.0, "Sign-in name A7; continuation C9:R9"),
+                ("Lochlan Ross", "PF26060-1", 1.0, "Sign-in name A11; data C11:R11"),
+            ],
+        )
+
     def test_build_signin_hours_mismatch_warnings_respects_settings_and_tolerance(self) -> None:
         records = [
             DailyRecord(
@@ -299,6 +322,41 @@ class DssToolsTests(DssToolsFixtures):
             signin_hours_mismatch_tolerance=0.5,
         )
         self.assertEqual(build_signin_hours_mismatch_warnings(records, AppSettings(), tolerant_profile), [])
+
+    def test_build_employee_day_pf_rows_groups_latest_week_by_employee_day_and_pf(self) -> None:
+        records = [
+            DailyRecord(Path("C:/a.xlsx"), "a.xlsx", date(2026, 6, 1), "2026-06-01", "Lochlan", 2, 0, 0, "", "PF26005-1"),
+            DailyRecord(Path("C:/a.xlsx"), "a.xlsx", date(2026, 6, 11), "2026-06-11", "Lochlan", 3, 0, 0, "", "PF26006-1"),
+            DailyRecord(Path("C:/a.xlsx"), "a.xlsx", date(2026, 6, 11), "2026-06-11", "Lochlan", 7, 0, 0, "", "PF26005-2"),
+            DailyRecord(Path("C:/b.xlsx"), "b.xlsx", date(2026, 6, 12), "2026-06-12", "Lochlan", 1, 0, 0, "", "PF26006-1"),
+            DailyRecord(Path("C:/b.xlsx"), "b.xlsx", date(2026, 6, 12), "2026-06-12", "Lochlan", 2, 0, 0, "", "PF26005-2"),
+            DailyRecord(Path("C:/b.xlsx"), "b.xlsx", date(2026, 6, 12), "2026-06-12", "Lochlan", 7, 0, 0, "", "PF26043-5"),
+            DailyRecord(Path("C:/c.xlsx"), "c.xlsx", date(2026, 6, 11), "2026-06-11", "Abey", 1, 0, 0, "", "PF26006-2"),
+            DailyRecord(Path("C:/c.xlsx"), "c.xlsx", date(2026, 6, 11), "2026-06-11", "Abey", 5, 0, 0, "", "PF26005-1"),
+            DailyRecord(Path("C:/c.xlsx"), "c.xlsx", date(2026, 6, 11), "2026-06-11", "Abey", 7, 0, 0, "", "PF26006-2"),
+        ]
+
+        rows = build_employee_day_pf_rows(records)
+
+        self.assertEqual(
+            [(row.employee, row.work_date.isoformat(), row.pf_number, row.st) for row in rows],
+            [
+                ("Abey", "2026-06-11", "PF26005-1", 5.0),
+                ("Abey", "2026-06-11", "PF26006-2", 8.0),
+                ("Lochlan", "2026-06-11", "PF26005-2", 7.0),
+                ("Lochlan", "2026-06-11", "PF26006-1", 3.0),
+                ("Lochlan", "2026-06-12", "PF26005-2", 2.0),
+                ("Lochlan", "2026-06-12", "PF26006-1", 1.0),
+                ("Lochlan", "2026-06-12", "PF26043-5", 7.0),
+            ],
+        )
+        self.assertTrue(all(row.week_start == date(2026, 6, 8) for row in rows))
+
+    def test_reference_week_number_matches_calendar_reference(self) -> None:
+        self.assertEqual(reference_week_number(date(2025, 1, 1)), 1)
+        self.assertEqual(reference_week_number(date(2025, 1, 5)), 2)
+        self.assertEqual(reference_week_number(date(2025, 6, 1)), 23)
+        self.assertEqual(reference_week_number(date(2026, 6, 8)), 24)
 
     def test_permission_message_mentions_onedrive_guidance(self) -> None:
         message = build_permission_denied_message(
@@ -824,6 +882,8 @@ class DssToolsTests(DssToolsFixtures):
         )
         self.assertIn("PF26005-3", html)
         self.assertIn("PF26044-4", html)
+        self.assertIn("<th>Week #</th>", html)
+        self.assertIn("<td>24</td>", html)
         self.assertIn("<th>PF#</th>", html)
         self.assertNotIn("Source File</th>", html)
 

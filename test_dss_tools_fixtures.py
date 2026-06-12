@@ -227,3 +227,62 @@ class DssToolsFixtures(unittest.TestCase):
 
         ws["A35"] = "FOR OFFICE USE:"
         wb.save(path)
+
+    def build_signin_merged_blocks_workbook(self, path: Path) -> None:
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "2026-06-11"
+        ws["Q1"] = "SHIFT: Day R.00"
+        ws["R1"] = "DATE:"
+        ws["S1"] = datetime(2026, 6, 11)
+        ws["A3"] = "NAME"
+        ws["C3"] = "TIME   IN"
+        ws["D3"] = "TIME OUT"
+        ws["E3"] = "REG HOURS"
+        ws["F3"] = "Hours OT"
+        ws["J3"] = "JA TECH JOB #"
+        ws["L3"] = "WORK  ORDER #"
+        ws["M3"] = "OPERATION #"
+        ws["N3"] = "JA TECH VEHICLE UNIT #"
+        ws["O3"] = "DESCRIPTION OF WORK"
+
+        ws["A5"] = "Lochlan Ross"
+        ws.merge_cells("A5:B6")
+        ws["C5"] = "07:00"
+        ws["D5"] = "12:30"
+        ws["E5"] = 5
+        ws["J5"] = "PF26005-3"
+        ws["O5"] = "Transformer Testing"
+        ws["C6"] = "12:30"
+        ws["D6"] = "17:30"
+        ws["E6"] = 5
+        ws["J6"] = "PF26044-4"
+        ws["O6"] = "Battery Load Bank"
+
+        ws["A7"] = "Colin Schwindt"
+        ws.merge_cells("A7:B9")
+        ws["C7"] = "07:00"
+        ws["D7"] = "13:30"
+        ws["E7"] = 6
+        ws["J7"] = "PF26005-3"
+        ws["O7"] = "Return Testing"
+        ws["C8"] = "13:30"
+        ws["D8"] = "15:30"
+        ws["E8"] = 2
+        ws["J8"] = "PF26043-2"
+        ws["O8"] = "Offsite Return"
+        ws["C9"] = "15:30"
+        ws["D9"] = "17:30"
+        ws["E9"] = 2
+        ws["J9"] = "PF26043-3"
+        ws["O9"] = "Oil Sampling"
+
+        ws["A11"] = "Lochlan Ross"
+        ws["C11"] = "18:00"
+        ws["D11"] = "19:00"
+        ws["E11"] = 1
+        ws["J11"] = "PF26060-1"
+        ws["O11"] = "Repeat Entry"
+
+        ws["A35"] = "FOR OFFICE USE:"
+        wb.save(path)

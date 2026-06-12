@@ -608,6 +608,22 @@ class WeekTotalRow:
 
 
 @dataclass(frozen=True)
+class EmployeeDayPfRow:
+    week_start: date
+    week_end: date
+    work_date: date
+    employee: str
+    pf_number: str
+    st: float
+    ot: float
+    dt: float
+
+    @property
+    def total(self) -> float:
+        return round(self.st + self.ot + self.dt, 2)
+
+
+@dataclass(frozen=True)
 class TrackerData:
     source_paths: list[Path]
     file_hashes: dict[Path, str]
@@ -2721,6 +2737,7 @@ def build_hours_table_html(records: list[DailyRecord]) -> str:
     for record in records:
         rows.append(
             "<tr>"
+            f"<td>{html.escape(str(reference_week_number(record.work_date)))}</td>"
             f"<td>{html.escape(record.work_date.isoformat())}</td>"
             f"<td>{html.escape(record.work_date.strftime('%A'))}</td>"
             f"<td>{html.escape(display_pf_number(record.pf_number))}</td>"
@@ -2736,11 +2753,11 @@ def build_hours_table_html(records: list[DailyRecord]) -> str:
     return (
         "<table border='1' cellspacing='0' cellpadding='4' style='border-collapse:collapse;'>"
         "<thead><tr>"
-        "<th>Date</th><th>Day</th><th>PF#</th><th>Source Sheet</th><th>ST</th><th>OT</th><th>DT</th><th>Total</th>"
+        "<th>Week #</th><th>Date</th><th>Day</th><th>PF#</th><th>Source Sheet</th><th>ST</th><th>OT</th><th>DT</th><th>Total</th>"
         "</tr></thead>"
         f"<tbody>{rows_html}</tbody>"
         "<tfoot><tr>"
-        "<th colspan='4'>Week Total</th>"
+        "<th colspan='5'>Week Total</th>"
         f"<th>{html.escape(fmt_hours(total_st))}</th>"
         f"<th>{html.escape(fmt_hours(total_ot))}</th>"
         f"<th>{html.escape(fmt_hours(total_dt))}</th>"
@@ -3129,6 +3146,64 @@ def _signin_row_has_data(ws, row_idx: int) -> bool:
     return False
 
 
+def _signin_row_has_detail_data(ws, row_idx: int) -> bool:
+    for column in range(SIGNIN_TIME_IN_COL, SIGNIN_LAST_DATA_COL + 1):
+        if ws.cell(row=row_idx, column=column).value not in (None, ""):
+            return True
+    return False
+
+
+def _collect_signin_name_blocks(ws, stop_row: int) -> list[tuple[int, int, int, str]]:
+    blocks: list[tuple[int, int, int, str]] = []
+    covered_rows: dict[int, tuple[int, int, int, str]] = {}
+    merged_ranges = getattr(getattr(ws, "merged_cells", None), "ranges", ())
+
+    for merged_range in merged_ranges:
+        if merged_range.max_row < SIGNIN_DATA_START_ROW:
+            continue
+        if not (merged_range.min_col <= SIGNIN_NAME_COL <= merged_range.max_col):
+            continue
+        name_row = merged_range.min_row
+        name_text = _sheet_cell_text(ws, name_row, SIGNIN_NAME_COL)
+        if not name_text or _signin_footer_reached(name_text):
+            continue
+        block = (name_row, merged_range.min_row, merged_range.max_row, name_text)
+        blocks.append(block)
+        for row_idx in range(merged_range.min_row, merged_range.max_row + 1):
+            covered_rows[row_idx] = block
+
+    row_idx = SIGNIN_DATA_START_ROW
+    while row_idx <= stop_row:
+        if row_idx in covered_rows:
+            row_idx = covered_rows[row_idx][2] + 1
+            continue
+        name_text = _sheet_cell_text(ws, row_idx, SIGNIN_NAME_COL)
+        if _signin_footer_reached(name_text):
+            break
+        if not name_text:
+            row_idx += 1
+            continue
+        end_row = row_idx
+        while end_row + 1 <= stop_row:
+            next_row = end_row + 1
+            if next_row in covered_rows:
+                break
+            next_name = _sheet_cell_text(ws, next_row, SIGNIN_NAME_COL)
+            if next_name:
+                break
+            if not _signin_row_has_detail_data(ws, next_row):
+                break
+            end_row = next_row
+        block = (row_idx, row_idx, end_row, name_text)
+        blocks.append(block)
+        for block_row in range(row_idx, end_row + 1):
+            covered_rows[block_row] = block
+        row_idx = end_row + 1
+
+    blocks.sort(key=lambda item: item[1])
+    return blocks
+
+
 def _sheet_value_map_from_worksheet(ws, cell_refs: Iterable[str]) -> dict[str, str]:
     values: dict[str, str] = {}
     for cell_ref in cell_refs:
@@ -3187,57 +3262,48 @@ def _process_signin_workbook(
         if restrict_to_sheet_names is not None and sheet_name not in restrict_to_sheet_names:
             continue
         ws = workbook[sheet_name]
-        current_employee: str | None = None
-        current_name_row: int | None = None
         stop_row = ws.max_row or SIGNIN_DATA_START_ROW
-        for row_idx in range(SIGNIN_DATA_START_ROW, stop_row + 1):
-            raise_if_cancelled()
-            name_text = _sheet_cell_text(ws, row_idx, SIGNIN_NAME_COL)
-            if _signin_footer_reached(name_text):
-                break
-            if name_text:
-                current_employee = name_text
-                current_name_row = row_idx
-            elif not current_employee:
-                continue
-            if not _signin_row_has_data(ws, row_idx):
-                continue
+        for name_row, block_start, block_end, employee in _collect_signin_name_blocks(ws, stop_row):
+            for row_idx in range(block_start, block_end + 1):
+                raise_if_cancelled()
+                if not _signin_row_has_detail_data(ws, row_idx):
+                    continue
 
-            time_in_value = ws.cell(row=row_idx, column=SIGNIN_TIME_IN_COL).value
-            time_out_value = ws.cell(row=row_idx, column=SIGNIN_TIME_OUT_COL).value
-            entered_st_value = ws.cell(row=row_idx, column=SIGNIN_ST_COL).value
-            entered_ot_value = ws.cell(row=row_idx, column=SIGNIN_OT_COL).value
-            st = to_number(entered_st_value)
-            ot = to_number(entered_ot_value)
-            derived_hours = _calculate_signin_worked_hours(time_in_value, time_out_value)
-            if st == 0.0 and ot == 0.0:
-                st = derived_hours if derived_hours is not None else 0.0
-            if st == 0.0 and ot == 0.0:
-                continue
-            start = _parse_excel_time_fraction(time_in_value)
-            end = _parse_excel_time_fraction(time_out_value)
-            lunch_deducted = bool(start is not None and end is not None and _signin_shift_crosses_noon(start, end))
+                time_in_value = ws.cell(row=row_idx, column=SIGNIN_TIME_IN_COL).value
+                time_out_value = ws.cell(row=row_idx, column=SIGNIN_TIME_OUT_COL).value
+                entered_st_value = ws.cell(row=row_idx, column=SIGNIN_ST_COL).value
+                entered_ot_value = ws.cell(row=row_idx, column=SIGNIN_OT_COL).value
+                st = to_number(entered_st_value)
+                ot = to_number(entered_ot_value)
+                derived_hours = _calculate_signin_worked_hours(time_in_value, time_out_value)
+                if st == 0.0 and ot == 0.0:
+                    st = derived_hours if derived_hours is not None else 0.0
+                if st == 0.0 and ot == 0.0:
+                    continue
+                start = _parse_excel_time_fraction(time_in_value)
+                end = _parse_excel_time_fraction(time_out_value)
+                lunch_deducted = bool(start is not None and end is not None and _signin_shift_crosses_noon(start, end))
 
-            raw_rows.append(
-                {
-                    "source_path": source_path,
-                    "source_file": source_path.name,
-                    "work_date": sheet_date,
-                    "source_sheet": sheet_name,
-                    "employee": current_employee,
-                    "st": st,
-                    "ot": ot,
-                    "dt": 0.0,
-                    "source_ranges": _signin_source_range(current_name_row or row_idx, row_idx),
-                    "pf_number": extract_pf_identifier(_sheet_cell_text(ws, row_idx, SIGNIN_JOB_COL)) if _sheet_cell_text(ws, row_idx, SIGNIN_JOB_COL) else "",
-                    "description": _sheet_cell_text(ws, row_idx, SIGNIN_DESCRIPTION_COL),
-                    "signin_entered_st": to_number(entered_st_value) if entered_st_value not in (None, "") else None,
-                    "signin_entered_ot": to_number(entered_ot_value) if entered_ot_value not in (None, "") else None,
-                    "signin_derived_hours": derived_hours,
-                    "signin_lunch_deducted": lunch_deducted,
-                    "order_index": len(raw_rows),
-                }
-            )
+                raw_rows.append(
+                    {
+                        "source_path": source_path,
+                        "source_file": source_path.name,
+                        "work_date": sheet_date,
+                        "source_sheet": sheet_name,
+                        "employee": employee,
+                        "st": st,
+                        "ot": ot,
+                        "dt": 0.0,
+                        "source_ranges": _signin_source_range(name_row, row_idx),
+                        "pf_number": extract_pf_identifier(_sheet_cell_text(ws, row_idx, SIGNIN_JOB_COL)) if _sheet_cell_text(ws, row_idx, SIGNIN_JOB_COL) else "",
+                        "description": _sheet_cell_text(ws, row_idx, SIGNIN_DESCRIPTION_COL),
+                        "signin_entered_st": to_number(entered_st_value) if entered_st_value not in (None, "") else None,
+                        "signin_entered_ot": to_number(entered_ot_value) if entered_ot_value not in (None, "") else None,
+                        "signin_derived_hours": derived_hours,
+                        "signin_lunch_deducted": lunch_deducted,
+                        "order_index": len(raw_rows),
+                    }
+                )
 
         pf_label = extract_pf_identifier(source_path.name)
         emit_progress(
@@ -3352,6 +3418,8 @@ def process_workbook_bytes(
         raise_if_cancelled()
         emit_progress(0.1, f"Opened {source_path.name}")
         if any(_is_signin_sheet(workbook[sheet_name], sheet_name) for sheet_name in workbook.sheetnames):
+            workbook.close()
+            workbook = load_workbook(io.BytesIO(workbook_bytes), data_only=True, read_only=False)
             return _process_signin_workbook(
                 source_path,
                 workbook,
@@ -4035,6 +4103,59 @@ def build_week_totals(weekly_records: list[WeeklyRecord]) -> list[WeekTotalRow]:
             WeekTotalRow(
                 week_start=week_start,
                 week_end=week_start + timedelta(days=6),
+                st=round(totals["ST"], 2),
+                ot=round(totals["OT"], 2),
+                dt=round(totals["DT"], 2),
+            )
+        )
+    return rows
+
+
+def reference_week_number(value: date) -> int:
+    jan1 = date(value.year, 1, 1)
+    days_since_sunday = (jan1.weekday() + 1) % 7
+    week1_start = jan1 - timedelta(days=days_since_sunday)
+    return ((value - week1_start).days // 7) + 1
+
+
+def build_employee_day_pf_rows(
+    records: Iterable[DailyRecord],
+    week_start: date | None = None,
+) -> list[EmployeeDayPfRow]:
+    grouped: dict[tuple[date, date, str, str], dict[str, float]] = {}
+    record_list = list(records)
+    if not record_list:
+        return []
+    target_week_start = week_start or max(monday_week_start(record.work_date) for record in record_list)
+    target_week_end = target_week_start + timedelta(days=6)
+    for record in record_list:
+        if not (target_week_start <= record.work_date <= target_week_end):
+            continue
+        key = (record.work_date, record.employee, record.pf_number, record.source_file)
+        bucket = grouped.setdefault(key, {"ST": 0.0, "OT": 0.0, "DT": 0.0})
+        bucket["ST"] += record.st
+        bucket["OT"] += record.ot
+        bucket["DT"] += record.dt
+
+    rows: list[EmployeeDayPfRow] = []
+    collapsed: dict[tuple[date, str, str], dict[str, float]] = {}
+    for (work_date, employee, pf_number, _source_file), totals in grouped.items():
+        bucket = collapsed.setdefault((work_date, employee, pf_number), {"ST": 0.0, "OT": 0.0, "DT": 0.0})
+        bucket["ST"] += totals["ST"]
+        bucket["OT"] += totals["OT"]
+        bucket["DT"] += totals["DT"]
+
+    for (work_date, employee, pf_number), totals in sorted(
+        collapsed.items(),
+        key=lambda item: (item[0][1].casefold(), item[0][0], item[0][2].casefold()),
+    ):
+        rows.append(
+            EmployeeDayPfRow(
+                week_start=target_week_start,
+                week_end=target_week_end,
+                work_date=work_date,
+                employee=employee,
+                pf_number=pf_number,
                 st=round(totals["ST"], 2),
                 ot=round(totals["OT"], 2),
                 dt=round(totals["DT"], 2),
@@ -5992,6 +6113,14 @@ class DssToolsApp(tk.Tk):
             source_file_column="source_file",
             ui_theme=self.app_settings.ui_theme,
         )
+        self.employee_daily_pf_table = DataTable(
+            self.summaries_notebook,
+            columns=["employee", "week_number", "work_date", "pf_number", "st", "ot", "dt", "total"],
+            headings=["Employee", "Week #", "Date", "PF#", "ST", "OT", "DT", "Total"],
+            table_id="employee_daily_pf",
+            config_path=self.config_path,
+            ui_theme=self.app_settings.ui_theme,
+        )
         self.combined_weekly_summary_table = DataTable(
             self.summaries_notebook,
             columns=["week_start", "week_end", "employee", "st", "ot", "dt", "total", "expanded"],
@@ -6150,6 +6279,7 @@ class DssToolsApp(tk.Tk):
         self._refresh_data_tabs()
         self.summaries_notebook.add(self.daily_by_pf_table, text="Daily by PF#")
         self.summaries_notebook.add(self.weekly_rollup_table, text="Weekly by PF#")
+        self.summaries_notebook.add(self.employee_daily_pf_table, text="Summary by Employee")
         self.summaries_notebook.add(self.combined_daily_summary_table, text="Combined Summary by Day")
         self.summaries_notebook.add(self.combined_weekly_summary_table, text="Combined Summary by Week")
         self.error_report_table.grid(row=1, column=0, sticky="nsew")
@@ -6564,6 +6694,7 @@ class DssToolsApp(tk.Tk):
             self.daily_table,
             self.weekly_rollup_table,
             self.daily_by_pf_table,
+            self.employee_daily_pf_table,
             self.combined_weekly_summary_table,
             self.combined_daily_summary_table,
             self.week_totals_table,
@@ -7392,6 +7523,7 @@ class DssToolsApp(tk.Tk):
             mapping = {
                 str(self.weekly_rollup_table): self.weekly_rollup_table,
                 str(self.daily_by_pf_table): self.daily_by_pf_table,
+                str(self.employee_daily_pf_table): self.employee_daily_pf_table,
                 str(self.combined_weekly_summary_table): self.combined_weekly_summary_table,
                 str(self.combined_daily_summary_table): self.combined_daily_summary_table,
             }
@@ -8182,6 +8314,7 @@ class DssToolsApp(tk.Tk):
         self.daily_table.set_rows([])
         self.weekly_rollup_table.set_rows([])
         self.daily_by_pf_table.set_rows([])
+        self.employee_daily_pf_table.set_rows([])
         self.combined_weekly_summary_table.set_rows([])
         self.combined_daily_summary_table.set_rows([])
         self.week_totals_table.set_rows([])
@@ -8398,6 +8531,7 @@ class DssToolsApp(tk.Tk):
         filtered_combined_daily = [
             record for record in tracker_data.combined_daily_summary if record.employee in allowed_employees
         ]
+        employee_daily_pf_rows = build_employee_day_pf_rows(filtered_daily_records)
         filtered_week_totals = build_week_totals(filtered_combined_summary) if filtered_combined_summary else []
         filtered_source_files = {record.source_file for record in filtered_daily_records}
         active_parse_warnings = self._current_parse_warnings(tracker_data)
@@ -8474,6 +8608,28 @@ class DssToolsApp(tk.Tk):
             else:
                 daily_rollup_tags.append(self._threshold_tags(record.st, record.ot, record.dt))
         self.daily_by_pf_table.set_rows(daily_rollup_rows, daily_rollup_tags)
+
+        employee_summary_rows: list[tuple[str, ...]] = []
+        previous_employee = ""
+        previous_date = ""
+        for record in employee_daily_pf_rows:
+            date_text = record.work_date.strftime("%d-%b")
+            week_number_text = str(reference_week_number(record.work_date))
+            employee_summary_rows.append(
+                (
+                    record.employee if record.employee != previous_employee else "",
+                    week_number_text if record.employee != previous_employee else "",
+                    date_text if record.employee != previous_employee or date_text != previous_date else "",
+                    display_pf_number(record.pf_number),
+                    fmt_hours(record.st),
+                    fmt_hours(record.ot),
+                    fmt_hours(record.dt),
+                    fmt_hours(record.total),
+                )
+            )
+            previous_employee = record.employee
+            previous_date = date_text
+        self.employee_daily_pf_table.set_rows(employee_summary_rows)
 
         combined_summary_rows: list[tuple[str, ...]] = []
         combined_summary_tags: list[tuple[str, ...]] = []
