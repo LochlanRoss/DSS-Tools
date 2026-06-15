@@ -62,6 +62,17 @@ TABLE_DATE_COLUMNS = {"date", "work_date", "week_start", "week_end"}
 TABLE_NUMERIC_COLUMNS = {"st", "ot", "dt", "total", "expanded", "days", "similarity", "limit", "actual_total", "delta"}
 
 
+def _configure_forced_qt_software_rendering() -> None:
+    # Keep Qt off the native GPU path so machines with flaky theme/driver combos
+    # render the same widget chrome as our known-good environments.
+    os.environ["QT_OPENGL"] = "software"
+    os.environ["QSG_RHI_BACKEND"] = "software"
+    try:
+        QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseSoftwareOpenGL, True)
+    except Exception:
+        pass
+
+
 def _build_qt_chrome_stylesheet(theme: core.UiThemeColors) -> str:
     content_bg = theme.content_chrome_background
     panel_bg = core.lighten_hex_color(content_bg, -4)
@@ -3220,6 +3231,7 @@ class DssQtMainWindow(QMainWindow):
 
 
 def launch_qt_app(initial_source: list[Path] | None = None) -> int:
+    _configure_forced_qt_software_rendering()
     app = QApplication.instance() or QApplication(sys.argv)
     app.setStyle("Fusion")
     app.setPalette(_build_forced_qt_palette(core.DEFAULT_UI_THEME))
