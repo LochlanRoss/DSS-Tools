@@ -529,7 +529,12 @@ def _run_command_with_smoothed_progress(
 
 
 def clean_transient_app_data(app_root: Path, log: CallableLog) -> None:
-    """Remove everything under *app_root* except ``dss_hours_tracker_config.json`` (user settings)."""
+    """Remove everything under *app_root* except ``dss_hours_tracker_config.json``.
+
+    That config file is the persistence boundary for user settings and long-lived user
+    decisions such as suppression state and employee merge mappings, so update cleanup
+    must preserve it whenever an upgrade path allows.
+    """
     this_exe = Path(sys.executable).resolve()
     if not app_root.is_dir():
         return

@@ -62,8 +62,29 @@ Working scratchpad: check items off when they are done.
 - [x] Add an email-missing suppression feature so intentionally missing employee emails are not highlighted or re-queried during Outlook sync.
 
 
-- Change the highlight behaviour of cells in tables to change the colour of the cell to blue when selected. Currently, there is only a small blue line that appears on the left of the cell. I would like the whole cell to change colour.
+- [x] Change the highlight behaviour of cells in tables to change the colour of the cell to blue when selected. Currently, there is only a small blue line that appears on the left of the cell. I would like the whole cell to change colour.
 
-- Make the cells highlightable and copyable. I would like to be able to copy and paste information out of these tables directly into other programs like microsoft word and emails in outlook.
+- [x] Make the cells highlightable and copyable. I would like to be able to copy and paste information out of these tables directly into other programs like microsoft word and emails in outlook.
 
-- In the reports section, when errors occur they generally cite specific cells in which the errors or suspected errors occur. Can we make it so any instance of an error report allows the user to double click the entry and open the source sheet with the excel cursor selected over the offending cells? Open it on the right worksheet, with the selection covering the offending cell.
+- [x] In the reports section, when errors occur they generally cite specific cells in which the errors or suspected errors occur. Can we make it so any instance of an error report allows the user to double click the entry and open the source sheet with the excel cursor selected over the offending cells? Open it on the right worksheet, with the selection covering the offending cell.
+
+
+- [x] The PF# extraction should include the dashed phase number if applicable.
+
+- [x] Summary by employee should have by default the most recent week, but also include an option to change to older weeks or week ranges, enable a range and have a this week button, and a last week button
+
+- [x] Add a checkbox to the warnings page and a suppression checkbox on each entry. 
+
+- [x] Add a button to refresh the emails page that will work during contact list syncing, or better yet, update the employee page each time a new email is added that is on the employee list. (plus a cooldown, no more than 1Hz)
+
+- [x] Add telemetry to contact list syncing that gives progress
+
+- [x] Add ability to suppress multiple entries at once with a button or right click
+
+- [x] Add name typo employee merge. Right click a typod name to merge with another name. If merged, always display the correct name unless calling out the typo in a report
+
+- [x] Employee list does not appear to be updating as the contact list changes. 
+
+- [x] 10 minutes in and the contact sync still displays working. Previous request for progress and telemetry would be nice. Perhaps expand the syncing outlook emails status message to include the latest synced email.
+
+- [x] Ensure contact sync doesn't wait endlessly on name typos

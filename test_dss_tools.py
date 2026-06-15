@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import json
 from datetime import date
 from pathlib import Path
 from unittest import mock
@@ -50,8 +51,11 @@ from dss_hours_tracker import (
     format_email_address_display,
     combine_sheet_hashes,
     load_ignored_name_typos,
+    load_employee_name_merges,
     pf_numbers_for_records,
     save_ignored_name_typos,
+    save_employee_name_merges,
+    resolve_employee_name_merge,
     typo_warning_key,
     format_email_subject,
     default_formatting_profiles,
@@ -201,6 +205,18 @@ class DssToolsTests(DssToolsFixtures):
 
     def test_extract_pf_identifier_falls_back_to_stem(self) -> None:
         self.assertEqual(extract_pf_identifier("Electrical Tech Maintenance.xlsx"), "Electrical Tech Maintenance")
+
+    def test_extract_pf_identifier_keeps_dashed_phase_for_legacy_dss_filename(self) -> None:
+        self.assertEqual(
+            extract_pf_identifier("PF26005-3 Ongoing DSS.xlsx"),
+            "PF26005-3",
+        )
+
+    def test_extract_pf_identifier_keeps_dashed_phase_for_pf26006_reference_filenames(self) -> None:
+        self.assertEqual(extract_pf_identifier("PF26006-1 LC 7 Replacement Ongoing DSS.xlsx"), "PF26006-1")
+        self.assertEqual(extract_pf_identifier("PF26006-2 LC 10 Replacement Ongoing DSS.xlsx"), "PF26006-2")
+        self.assertEqual(extract_pf_identifier("PF26006-3 Ground Fault Lights Ongoing DSS .xlsx"), "PF26006-3")
+        self.assertEqual(extract_pf_identifier("PF26006-4 Generator Wiring Changes.xlsx"), "PF26006-4")
 
     def test_select_preferred_dated_sheets_prefers_highest_revision(self) -> None:
         selected = select_preferred_dated_sheets(
@@ -354,6 +370,24 @@ class DssToolsTests(DssToolsFixtures):
         )
         self.assertTrue(all(row.week_start == date(2026, 6, 8) for row in rows))
 
+    def test_build_employee_day_pf_rows_supports_week_ranges(self) -> None:
+        records = [
+            DailyRecord(Path("C:/a.xlsx"), "a.xlsx", date(2026, 6, 8), "2026-06-08", "Lochlan", 2, 0, 0, "", "PF26005-1"),
+            DailyRecord(Path("C:/a.xlsx"), "a.xlsx", date(2026, 6, 12), "2026-06-12", "Lochlan", 3, 0, 0, "", "PF26006-1"),
+            DailyRecord(Path("C:/b.xlsx"), "b.xlsx", date(2026, 6, 15), "2026-06-15", "Lochlan", 4, 0, 0, "", "PF26007-1"),
+        ]
+        rows = build_employee_day_pf_rows(records, week_start=date(2026, 6, 8), week_end=date(2026, 6, 19))
+        self.assertEqual(
+            [(row.work_date.isoformat(), row.pf_number, row.st) for row in rows],
+            [
+                ("2026-06-08", "PF26005-1", 2.0),
+                ("2026-06-12", "PF26006-1", 3.0),
+                ("2026-06-15", "PF26007-1", 4.0),
+            ],
+        )
+        self.assertTrue(all(row.week_start == date(2026, 6, 8) for row in rows))
+        self.assertTrue(all(row.week_end == date(2026, 6, 19) for row in rows))
+
     def test_reference_week_number_matches_calendar_reference(self) -> None:
         self.assertEqual(reference_week_number(date(2025, 1, 1)), 1)
         self.assertEqual(reference_week_number(date(2025, 1, 5)), 2)
@@ -411,6 +445,51 @@ class DssToolsTests(DssToolsFixtures):
         pythoncom_mock.CoUninitialize.assert_called_once()
         self.assertEqual(results["Person Example"].email, "person@jatechpowersystems.com")
         self.assertEqual(names, ["Person Example"])
+
+    def test_query_outlook_emails_reports_progress(self) -> None:
+        class FakeRecipient:
+            Resolved = True
+
+            def Resolve(self) -> None:
+                return None
+
+        class FakeNamespace:
+            AddressLists = object()
+
+            def CreateRecipient(self, _employee: str) -> FakeRecipient:
+                return FakeRecipient()
+
+        class FakeOutlook:
+            def GetNamespace(self, _name: str) -> FakeNamespace:
+                return FakeNamespace()
+
+        progress_events: list[tuple[int, int, str, str]] = []
+        with (
+            mock.patch("dss_hours_tracker.pythoncom") as pythoncom_mock,
+            mock.patch("dss_hours_tracker.win32com") as win32com_mock,
+            mock.patch("dss_hours_tracker.extract_smtp_address", side_effect=["a@jatechpowersystems.com", "b@jatechpowersystems.com"]),
+            mock.patch("dss_hours_tracker.extract_resolved_display_name", side_effect=["Alice Smith", "Bob Smith"]),
+        ):
+            win32com_mock.client.Dispatch.return_value = FakeOutlook()
+            results, _names = query_outlook_emails(
+                ["Alice Smith", "Bob Smith"],
+                scan_full_address_book=False,
+                progress_callback=lambda processed, total, employee, resolution: progress_events.append(
+                    (processed, total, employee, resolution.email if resolution else "")
+                ),
+            )
+
+        pythoncom_mock.CoInitialize.assert_called_once()
+        pythoncom_mock.CoUninitialize.assert_called_once()
+        self.assertEqual(results["Alice Smith"].email, "a@jatechpowersystems.com")
+        self.assertEqual(results["Bob Smith"].email, "b@jatechpowersystems.com")
+        self.assertEqual(
+            progress_events,
+            [
+                (1, 2, "Alice Smith", "a@jatechpowersystems.com"),
+                (2, 2, "Bob Smith", "b@jatechpowersystems.com"),
+            ],
+        )
 
     def test_permission_message_mentions_onedrive_guidance(self) -> None:
         message = build_permission_denied_message(
@@ -701,7 +780,26 @@ class DssToolsTests(DssToolsFixtures):
         with self.workspace_json("missing_email_suppressions") as path:
             save_missing_email_suppressions(path, {"Alice Smith", "Bob Jones"})
             loaded = load_missing_email_suppressions(path)
-            self.assertEqual(loaded, {"Alice Smith", "Bob Jones"})
+        self.assertEqual(loaded, {"Alice Smith", "Bob Jones"})
+
+    def test_missing_email_suppressions_expire_after_retention_window(self) -> None:
+        with self.workspace_json("missing_email_suppressions_expiry") as path:
+            path.write_text(
+                json.dumps(
+                    {
+                        "missing_email_suppressions": [
+                            {"value": "Old Name", "saved_at": "2025-01-01"},
+                            {"value": "Recent Name", "saved_at": "2026-06-01"},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch("dss_hours_tracker.date") as date_mock:
+                date_mock.today.return_value = date(2026, 6, 15)
+                date_mock.fromisoformat.side_effect = date.fromisoformat
+                loaded = load_missing_email_suppressions(path)
+        self.assertEqual(loaded, {"Recent Name"})
 
     def test_table_layout_round_trip(self) -> None:
         with self.workspace_json("table_layout") as path:
@@ -882,6 +980,21 @@ class DssToolsTests(DssToolsFixtures):
             ignored = {typo_warning_key("Alic Smith", "Alice Smith")}
             save_ignored_name_typos(path, ignored)
             self.assertEqual(load_ignored_name_typos(path), ignored)
+
+    def test_ignored_name_typos_legacy_string_entries_still_load(self) -> None:
+        with self.workspace_json("ignored_typos_legacy") as path:
+            key = typo_warning_key("Alic Smith", "Alice Smith")
+            path.write_text(json.dumps({"ignored_name_typos": [key]}), encoding="utf-8")
+            self.assertEqual(load_ignored_name_typos(path), {key})
+
+    def test_employee_name_merges_round_trip_and_resolution(self) -> None:
+        with self.workspace_json("employee_merges") as path:
+            merges = {"Dave Brown": "David Brown", "Davey Brown": "Dave Brown"}
+            save_employee_name_merges(path, merges)
+            loaded = load_employee_name_merges(path)
+        self.assertEqual(loaded["Dave Brown"], "David Brown")
+        self.assertEqual(resolve_employee_name_merge("Dave Brown", loaded), "David Brown")
+        self.assertEqual(resolve_employee_name_merge("Davey Brown", loaded), "David Brown")
 
     def test_pf_numbers_for_records_and_subject_formatting(self) -> None:
         records = [

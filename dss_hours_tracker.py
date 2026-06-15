@@ -1179,6 +1179,8 @@ QUICKLOAD_CANCEL_HOTKEY_PRESETS: tuple[str, ...] = (
     "<Shift-Escape>",
 )
 
+SUPPRESSION_RETENTION_DAYS = 183
+
 
 def normalize_quickload_cancel_hotkey(raw: str) -> str:
     s = (raw or "").strip()
@@ -1369,18 +1371,88 @@ def save_employee_emails(
     config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
-def load_ignored_name_typos(config_path: Path) -> set[str]:
-    payload = read_config_payload(config_path)
-    raw_values = payload.get("ignored_name_typos", [])
+def _serialize_suppression_entries(values: Iterable[str]) -> list[dict[str, str]]:
+    saved_at = date.today().isoformat()
+    return [
+        {"value": value.strip(), "saved_at": saved_at}
+        for value in sorted({value.strip() for value in values if value.strip()})
+    ]
+
+
+def _load_suppression_values(raw_values: object) -> set[str]:
     if not isinstance(raw_values, list):
         return set()
-    return {str(value).strip() for value in raw_values if str(value).strip()}
+    results: set[str] = set()
+    today = date.today()
+    for value in raw_values:
+        if isinstance(value, dict):
+            raw_text = str(value.get("value", "")).strip()
+            raw_saved_at = str(value.get("saved_at", "")).strip()
+            if not raw_text:
+                continue
+            if raw_saved_at:
+                try:
+                    saved_at = date.fromisoformat(raw_saved_at)
+                except ValueError:
+                    saved_at = None
+                if saved_at is not None and (today - saved_at).days > SUPPRESSION_RETENTION_DAYS:
+                    continue
+            results.add(raw_text)
+            continue
+        text = str(value).strip()
+        if text:
+            results.add(text)
+    return results
+
+
+def load_ignored_name_typos(config_path: Path) -> set[str]:
+    payload = read_config_payload(config_path)
+    return _load_suppression_values(payload.get("ignored_name_typos", []))
 
 
 def save_ignored_name_typos(config_path: Path, ignored_name_typos: set[str]) -> None:
     payload = read_config_payload(config_path)
-    payload["ignored_name_typos"] = sorted(value for value in ignored_name_typos if value.strip())
+    payload["ignored_name_typos"] = _serialize_suppression_entries(ignored_name_typos)
     config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def load_employee_name_merges(config_path: Path) -> dict[str, str]:
+    payload = read_config_payload(config_path)
+    raw_map = payload.get("employee_name_merges", {})
+    if not isinstance(raw_map, dict):
+        return {}
+    merges: dict[str, str] = {}
+    for source_name, target_name in raw_map.items():
+        source = str(source_name).strip()
+        target = str(target_name).strip()
+        if source and target and source.casefold() != target.casefold():
+            merges[source] = target
+    return merges
+
+
+def save_employee_name_merges(config_path: Path, employee_name_merges: dict[str, str]) -> None:
+    payload = read_config_payload(config_path)
+    payload["employee_name_merges"] = {
+        source: target
+        for source, target in sorted(employee_name_merges.items(), key=lambda item: item[0].lower())
+        if source.strip() and target.strip() and source.strip().casefold() != target.strip().casefold()
+    }
+    config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def resolve_employee_name_merge(name: str, employee_name_merges: dict[str, str]) -> str:
+    current = str(name).strip()
+    seen: set[str] = set()
+    while current:
+        key = current.casefold()
+        if key in seen:
+            break
+        seen.add(key)
+        next_name = str(employee_name_merges.get(current, "")).strip()
+        if not next_name or next_name.casefold() == current.casefold():
+            break
+        current = next_name
+    return current or str(name).strip()
 
 
 def load_employee_groups(config_path: Path) -> dict[str, list[str]]:
@@ -1434,15 +1506,12 @@ def save_employee_notes(config_path: Path, employee_notes: dict[str, str]) -> No
 
 def load_missing_email_suppressions(config_path: Path) -> set[str]:
     payload = read_config_payload(config_path)
-    raw_values = payload.get("missing_email_suppressions", [])
-    if not isinstance(raw_values, list):
-        return set()
-    return {str(value).strip() for value in raw_values if str(value).strip()}
+    return _load_suppression_values(payload.get("missing_email_suppressions", []))
 
 
 def save_missing_email_suppressions(config_path: Path, suppressed_names: set[str]) -> None:
     payload = read_config_payload(config_path)
-    payload["missing_email_suppressions"] = sorted(name for name in suppressed_names if name.strip())
+    payload["missing_email_suppressions"] = _serialize_suppression_entries(suppressed_names)
     config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
@@ -2548,6 +2617,7 @@ def query_outlook_emails(
     employee_names: Iterable[str],
     should_cancel: Callable[[], bool] | None = None,
     scan_full_address_book: bool = False,
+    progress_callback: Callable[[int, int, str, OutlookResolution | None], None] | None = None,
 ) -> tuple[dict[str, OutlookResolution], list[str]]:
     if pythoncom is None or win32com is None:
         raise RuntimeError("Outlook lookup requires pywin32 and desktop Outlook.")
@@ -2571,7 +2641,8 @@ def query_outlook_emails(
             address_book_index, address_book_names = build_outlook_address_book_index(namespace)
         results: dict[str, OutlookResolution] = {}
         matched_display_names: set[str] = set()
-        for employee in names:
+        total_names = len(names)
+        for index, employee in enumerate(names, start=1):
             if check_cancel():
                 raise OperationCancelled("Cancelled Outlook email sync.")
             candidates = list(address_book_index.get(normalize_person_name(employee), []))
@@ -2592,6 +2663,8 @@ def query_outlook_emails(
                 results[employee] = preferred
                 if preferred.display_name.strip():
                     matched_display_names.add(preferred.display_name.strip())
+            if progress_callback is not None:
+                progress_callback(index, total_names, employee, preferred)
         names_for_typos = address_book_names if scan_full_address_book else sorted(matched_display_names, key=str.casefold)
         return results, names_for_typos
     finally:
@@ -4211,13 +4284,16 @@ def reference_week_number(value: date) -> int:
 def build_employee_day_pf_rows(
     records: Iterable[DailyRecord],
     week_start: date | None = None,
+    week_end: date | None = None,
 ) -> list[EmployeeDayPfRow]:
     grouped: dict[tuple[date, date, str, str], dict[str, float]] = {}
     record_list = list(records)
     if not record_list:
         return []
     target_week_start = week_start or max(monday_week_start(record.work_date) for record in record_list)
-    target_week_end = target_week_start + timedelta(days=6)
+    target_week_end = week_end or (target_week_start + timedelta(days=6))
+    if target_week_end < target_week_start:
+        target_week_end = target_week_start
     for record in record_list:
         if not (target_week_start <= record.work_date <= target_week_end):
             continue

@@ -79,6 +79,13 @@ Small fixes and very short edits are intentionally omitted unless they materiall
 - **Change:** Outlook sync now stores **`employee_outlook_display_names`** in config (resolved display name when SMTP is found). **`find_outlook_display_name_typos`** / **`build_outlook_name_mismatch_findings`** compare normalized DSS text to that display name (difflib floor **0.84**); ignored pairs reuse **`ignored_name_typos`** / **`typo_warning_key`**. **Error Report** adds rows with rule **“Name does not match email address book”**, **Trigger Date**, **Source Files** (workbook), day ST/OT/DT for that day+file, and narrative in **Reason** / **Daily Breakdown**. **`ErrorFinding.outlook_name_rule`** drives non-hour formatting in the Actual/Limit/Delta columns. Manual **Check Name Typos** always includes address-book mismatches when display names exist. Editing or clearing an employee email drops the cached Outlook display name for that person.
 - **Tests:** `test_dss_tools.py` (round-trip, preserve-on-email-only-save, Kolodinski vs Kolodinsky findings and typo list).
 
+### Persistence contract: suppressions and merges survive updates
+
+- **Policy:** Long-lived user decisions such as **missing-email suppressions**, **ignored name-typo pairs**, and **employee-name merges** are stored in **`dss_hours_tracker_config.json`**, not in cache files.
+- **Updater contract:** The update helper’s **`clean_transient_app_data`** preserves that config file during reinstall cleanup, so those decisions should survive normal in-app updates.
+- **Retention:** Suppression entries now carry save timestamps and are retained for roughly **6 months** before aging out. Legacy plain-string entries still load for backward compatibility.
+- **Do not regress:** Future installer / updater / “clear cache” work must continue to treat suppression and merge state as persistent configuration, not transient data.
+
 ### In-app update mini-app (silent uninstall / clean / reinstall)
 
 - **`dss_tools_updater.py`** is now a compact **Tk** window after **Install now**: waits for the main PID, runs **Inno silent uninstall** (registry `UninstallString` for the fixed `AppId`), clears **`%LOCALAPPDATA%\DSSTools`** transients (**`cache/`**, **`updates/`**, `*.log`, `diagnostic_snapshot_*.json`) while keeping **`dss_hours_tracker_config.json`**, then runs **`DSSToolsSetup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS`**. A **determinate** progress bar shows **0–50%** during uninstall and **50–100%** during install (time-smoothed while each subprocess runs; Inno does not expose byte-level progress). On silent failure, offers the **full wizard**. Launches **`DSSTools.exe`** from `InstallLocation` when done.

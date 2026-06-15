@@ -8,8 +8,9 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from fnmatch import fnmatch
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -60,6 +61,17 @@ from PySide6.QtWidgets import (
 
 TABLE_DATE_COLUMNS = {"date", "work_date", "week_start", "week_end"}
 TABLE_NUMERIC_COLUMNS = {"st", "ot", "dt", "total", "expanded", "days", "similarity", "limit", "actual_total", "delta"}
+
+
+def _configure_forced_qt_software_rendering() -> None:
+    # Keep Qt off the native GPU path so machines with flaky theme/driver combos
+    # render the same widget chrome as our known-good environments.
+    os.environ["QT_OPENGL"] = "software"
+    os.environ["QSG_RHI_BACKEND"] = "software"
+    try:
+        QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseSoftwareOpenGL, True)
+    except Exception:
+        pass
 
 
 def _build_qt_chrome_stylesheet(theme: core.UiThemeColors) -> str:
@@ -397,6 +409,10 @@ class DataTablePage(QWidget):
         button.clicked.connect(callback)
         self.top_bar.insertWidget(0, button)
         return button
+
+    def add_toolbar_widget(self, widget: QWidget) -> QWidget:
+        self.top_bar.insertWidget(0, widget)
+        return widget
 
     def set_theme(self, theme: core.UiThemeColors) -> None:
         self.model.theme = theme
@@ -797,6 +813,7 @@ class OutlookWorker(QObject):
     finished = Signal(object, object)
     failed = Signal(str)
     cancelled = Signal()
+    progressChanged = Signal(int, int, str, object)
 
     def __init__(self, employee_names: list[str]) -> None:
         super().__init__()
@@ -812,6 +829,12 @@ class OutlookWorker(QObject):
                 self.employee_names,
                 should_cancel=self.cancel_event.is_set,
                 scan_full_address_book=False,
+                progress_callback=lambda processed, total, employee, resolution: self.progressChanged.emit(
+                    int(processed),
+                    int(total),
+                    str(employee),
+                    resolution,
+                ),
             )
         except core.OperationCancelled:
             self.cancelled.emit()
@@ -1486,6 +1509,7 @@ class DssQtMainWindow(QMainWindow):
         self.employee_groups = core.load_employee_groups(self.config_path)
         self.missing_email_suppressions = core.load_missing_email_suppressions(self.config_path)
         self.employee_added_names, self.employee_hidden_names = core.load_employee_name_overrides(self.config_path)
+        self.employee_name_merges = core.load_employee_name_merges(self.config_path)
         self.subject_template, self.body_template = core.load_email_templates(self.config_path)
         self.ignored_name_typos = core.load_ignored_name_typos(self.config_path)
         self.current_data: core.TrackerData | None = None
@@ -1498,6 +1522,10 @@ class DssQtMainWindow(QMainWindow):
         self._active_load_token = -1
         self._next_outlook_token = 0
         self._active_outlook_token = -1
+        self._outlook_partial_updates: dict[str, core.OutlookResolution] = {}
+        self._outlook_last_partial_refresh = 0.0
+        self._employee_summary_week_start: date | None = None
+        self._employee_summary_week_end: date | None = None
         self._cancel_shortcut_action: QAction | None = None
         self._quickload_session = False
         self._update_check_in_progress = False
@@ -1616,6 +1644,7 @@ class DssQtMainWindow(QMainWindow):
             parent.addTab(page, spec.title)
             self.pages[spec.table_id] = page
         self.pages["error_report"].add_toolbar_button("Check Name Typos", self.check_name_typos_manually)
+        self._build_employee_summary_toolbar()
 
         self.email_drafts_page = EmailDraftsPage(theme, self.config_path)
         self.email_drafts_page.preview_table.layoutChanged.connect(self._save_table_layout)
@@ -1664,6 +1693,33 @@ class DssQtMainWindow(QMainWindow):
         self.configuration_page.checkNameTyposRequested.connect(self.check_name_typos_manually)
         self.configuration_page.showAppDataRequested.connect(self.show_app_data_folder)
 
+    def _build_employee_summary_toolbar(self) -> None:
+        page = self.pages["employee_daily_pf"]
+        self.employee_summary_range_box = QCheckBox("Range")
+        self.employee_summary_week_start_combo = QComboBox()
+        self.employee_summary_week_end_combo = QComboBox()
+        self.employee_summary_this_week_button = QPushButton("This Week")
+        self.employee_summary_last_week_button = QPushButton("Last Week")
+        self.employee_summary_week_end_combo.setEnabled(False)
+        self.employee_summary_week_start_combo.setMinimumContentsLength(20)
+        self.employee_summary_week_end_combo.setMinimumContentsLength(20)
+
+        for widget in (
+            self.employee_summary_last_week_button,
+            self.employee_summary_this_week_button,
+            self.employee_summary_week_end_combo,
+            QLabel("to"),
+            self.employee_summary_week_start_combo,
+            self.employee_summary_range_box,
+        ):
+            page.add_toolbar_widget(widget)
+
+        self.employee_summary_range_box.toggled.connect(self._employee_summary_range_toggled)
+        self.employee_summary_week_start_combo.currentIndexChanged.connect(lambda _index: self.refresh_views())
+        self.employee_summary_week_end_combo.currentIndexChanged.connect(lambda _index: self.refresh_views())
+        self.employee_summary_this_week_button.clicked.connect(self._select_employee_summary_latest_week)
+        self.employee_summary_last_week_button.clicked.connect(self._select_employee_summary_previous_week)
+
     def _bind_shortcuts(self) -> None:
         if self._cancel_shortcut_action is not None:
             self.removeAction(self._cancel_shortcut_action)
@@ -1696,9 +1752,100 @@ class DssQtMainWindow(QMainWindow):
         self.refresh_views()
         self._set_loading_state(False)
 
+    def _display_employee_name(self, employee: str) -> str:
+        return core.resolve_employee_name_merge(employee, self.employee_name_merges)
+
+    def _display_record(self, record: core.DailyRecord) -> core.DailyRecord:
+        display_name = self._display_employee_name(record.employee)
+        if display_name == record.employee:
+            return record
+        return replace(record, employee=display_name)
+
     def _managed_employee_names(self) -> list[str]:
-        discovered = set(self.current_data.employee_names if self.current_data else [])
-        return sorted((discovered | self.employee_added_names) - self.employee_hidden_names, key=str.casefold)
+        discovered = {self._display_employee_name(name) for name in (self.current_data.employee_names if self.current_data else [])}
+        added = {self._display_employee_name(name) for name in self.employee_added_names}
+        hidden = {self._display_employee_name(name) for name in self.employee_hidden_names}
+        merged_sources = {source for source in self.employee_name_merges}
+        return sorted(((discovered | added) - hidden) - merged_sources, key=str.casefold)
+
+    def _employee_summary_available_weeks(self, records: Iterable[core.DailyRecord]) -> list[date]:
+        return sorted({core.monday_week_start(record.work_date) for record in records}, reverse=True)
+
+    def _employee_summary_week_label(self, week_start: date) -> str:
+        week_end = week_start + core.timedelta(days=6)
+        return f"Week {core.reference_week_number(week_start)} | {core.format_week_label(week_start, week_end)}"
+
+    def _sync_employee_summary_week_controls(self, records: Iterable[core.DailyRecord]) -> None:
+        weeks = self._employee_summary_available_weeks(records)
+        combos = (self.employee_summary_week_start_combo, self.employee_summary_week_end_combo)
+        if not weeks:
+            for combo in combos:
+                combo.blockSignals(True)
+                combo.clear()
+                combo.blockSignals(False)
+                combo.setEnabled(False)
+            self.employee_summary_range_box.setEnabled(False)
+            self.employee_summary_this_week_button.setEnabled(False)
+            self.employee_summary_last_week_button.setEnabled(False)
+            self._employee_summary_week_start = None
+            self._employee_summary_week_end = None
+            return
+
+        valid_weeks = set(weeks)
+        if self._employee_summary_week_start not in valid_weeks:
+            self._employee_summary_week_start = weeks[0]
+        if self._employee_summary_week_end not in valid_weeks:
+            self._employee_summary_week_end = self._employee_summary_week_start
+        if self._employee_summary_week_end and self._employee_summary_week_start and self._employee_summary_week_end < self._employee_summary_week_start:
+            self._employee_summary_week_end = self._employee_summary_week_start
+
+        for combo, selected in ((self.employee_summary_week_start_combo, self._employee_summary_week_start), (self.employee_summary_week_end_combo, self._employee_summary_week_end)):
+            combo.blockSignals(True)
+            combo.clear()
+            for week_start in weeks:
+                combo.addItem(self._employee_summary_week_label(week_start), week_start.isoformat())
+            if selected is not None:
+                match_index = next((idx for idx, week_start in enumerate(weeks) if week_start == selected), 0)
+                combo.setCurrentIndex(match_index)
+            combo.blockSignals(False)
+        self.employee_summary_range_box.setEnabled(len(weeks) > 1)
+        self.employee_summary_this_week_button.setEnabled(True)
+        self.employee_summary_last_week_button.setEnabled(len(weeks) > 1)
+        self.employee_summary_week_start_combo.setEnabled(True)
+        self.employee_summary_week_end_combo.setEnabled(self.employee_summary_range_box.isChecked())
+
+    def _employee_summary_selected_weeks(self) -> tuple[date | None, date | None]:
+        start_text = self.employee_summary_week_start_combo.currentData()
+        end_text = self.employee_summary_week_end_combo.currentData()
+        start = date.fromisoformat(str(start_text)) if start_text else self._employee_summary_week_start
+        end = date.fromisoformat(str(end_text)) if end_text else self._employee_summary_week_end
+        if not self.employee_summary_range_box.isChecked():
+            end = start
+        if start and end and end < start:
+            end = start
+        self._employee_summary_week_start = start
+        self._employee_summary_week_end = end
+        return start, end
+
+    def _employee_summary_range_toggled(self, checked: bool) -> None:
+        self.employee_summary_week_end_combo.setEnabled(checked and self.employee_summary_week_end_combo.count() > 0)
+        self.refresh_views()
+
+    def _select_employee_summary_latest_week(self) -> None:
+        if self.employee_summary_week_start_combo.count() <= 0:
+            return
+        self.employee_summary_week_start_combo.setCurrentIndex(0)
+        self.employee_summary_week_end_combo.setCurrentIndex(0)
+        self.employee_summary_range_box.setChecked(False)
+        self.refresh_views()
+
+    def _select_employee_summary_previous_week(self) -> None:
+        if self.employee_summary_week_start_combo.count() <= 1:
+            return
+        self.employee_summary_week_start_combo.setCurrentIndex(1)
+        self.employee_summary_week_end_combo.setCurrentIndex(1)
+        self.employee_summary_range_box.setChecked(False)
+        self.refresh_views()
 
     def _selected_employee_values(self) -> set[str]:
         selected = set(self.employee_filter.selected_values())
@@ -1804,11 +1951,12 @@ class DssQtMainWindow(QMainWindow):
         allowed_pfs = self._selected_pf_values()
         results: list[core.DailyRecord] = []
         for record in self.current_data.daily_records:
-            if record.employee not in allowed_employees:
+            display_record = self._display_record(record)
+            if display_record.employee not in allowed_employees:
                 continue
-            if allowed_pfs and core.display_pf_number(record.pf_number) not in allowed_pfs:
+            if allowed_pfs and core.display_pf_number(display_record.pf_number) not in allowed_pfs:
                 continue
-            results.append(record)
+            results.append(display_record)
         return results
 
     def refresh_views(self) -> None:
@@ -1817,6 +1965,7 @@ class DssQtMainWindow(QMainWindow):
             page.set_theme(theme)
         self.email_drafts_page.preview_table.set_theme(theme)
         if not self.current_data:
+            self._sync_employee_summary_week_controls([])
             for page in self.pages.values():
                 page.set_rows([])
             self.email_drafts_page.preview_table.set_rows([])
@@ -1825,12 +1974,18 @@ class DssQtMainWindow(QMainWindow):
             return
 
         filtered_records = self._daily_records_filtered()
+        self._sync_employee_summary_week_controls(filtered_records)
         profile = self._active_profile()
         daily_summary = core.aggregate_daily(filtered_records, combine_sources=False)
         weekly_summary = core.aggregate_weekly(filtered_records, combine_sources=False)
         daily_rollup = core.build_daily_rollup(daily_summary)
         weekly_rollup = core.build_weekly_rollup(weekly_summary)
-        employee_daily_pf = core.build_employee_day_pf_rows(filtered_records)
+        employee_week_start, employee_week_end = self._employee_summary_selected_weeks()
+        employee_daily_pf = core.build_employee_day_pf_rows(
+            filtered_records,
+            week_start=employee_week_start,
+            week_end=employee_week_end,
+        )
         combined_daily = core.aggregate_daily(filtered_records, combine_sources=True)
         combined_weekly = core.aggregate_weekly(filtered_records, combine_sources=True)
         week_totals = core.build_week_totals(combined_weekly)
@@ -2440,8 +2595,19 @@ class DssQtMainWindow(QMainWindow):
         self._next_outlook_token += 1
         token = self._next_outlook_token
         self._active_outlook_token = token
+        self._outlook_partial_updates = {}
+        self._outlook_last_partial_refresh = 0.0
         worker = OutlookWorker(employee_names)
         self.outlook_worker = worker
+        worker.progressChanged.connect(
+            lambda processed, total, employee, resolution, current_token=token: self._on_outlook_sync_progress(
+                current_token,
+                processed,
+                total,
+                employee,
+                resolution,
+            )
+        )
         worker.finished.connect(lambda results, address_book_names, current_token=token: self._on_outlook_sync_finished(current_token, results, address_book_names))
         worker.failed.connect(lambda message, current_token=token: self._on_outlook_sync_failed(current_token, message))
         worker.cancelled.connect(lambda current_token=token: self._on_outlook_sync_cancelled(current_token))
@@ -2449,11 +2615,52 @@ class DssQtMainWindow(QMainWindow):
         self._set_loading_state(True, "Syncing Outlook emails...")
         self.outlook_thread.start()
 
+    def _flush_outlook_partial_updates(self, force: bool = False) -> None:
+        if not self._outlook_partial_updates:
+            return
+        now = time.monotonic()
+        if not force and (now - self._outlook_last_partial_refresh) < 1.0:
+            return
+        updated = False
+        for employee, resolution in list(self._outlook_partial_updates.items()):
+            if resolution.email and not self.employee_emails.get(employee, "").strip():
+                self.employee_emails[employee] = resolution.email
+                updated = True
+            if resolution.display_name.strip() and self.employee_outlook_display_names.get(employee, "") != resolution.display_name.strip():
+                self.employee_outlook_display_names[employee] = resolution.display_name.strip()
+                updated = True
+        self._outlook_partial_updates.clear()
+        self._outlook_last_partial_refresh = now
+        if updated:
+            self._refresh_employee_page()
+            self.refresh_views()
+
+    def _on_outlook_sync_progress(
+        self,
+        token: int,
+        processed: int,
+        total: int,
+        employee: str,
+        resolution: object,
+    ) -> None:
+        if token != self._active_outlook_token:
+            return
+        progress_text = f"Syncing Outlook emails... {processed}/{total}"
+        if employee:
+            if isinstance(resolution, core.OutlookResolution) and resolution.email.strip():
+                progress_text += f" | {employee} -> {resolution.email}"
+                self._outlook_partial_updates[employee] = resolution
+            else:
+                progress_text += f" | {employee}"
+        self.status_label.setText(progress_text)
+        self._flush_outlook_partial_updates()
+
     def _on_outlook_sync_finished(self, token: int, results: dict[str, core.OutlookResolution], address_book_names: list[str]) -> None:
         if token != self._active_outlook_token:
             return
         self.outlook_worker = None
         self.outlook_thread = None
+        self._flush_outlook_partial_updates(force=True)
         updated = 0
         for employee, resolution in results.items():
             if resolution.email and not self.employee_emails.get(employee, "").strip():
@@ -2462,20 +2669,20 @@ class DssQtMainWindow(QMainWindow):
                     self.employee_outlook_display_names[employee] = resolution.display_name.strip()
                 updated += 1
         core.save_employee_emails(self.config_path, self.employee_emails, self.employee_outlook_display_names)
-        warnings = []
-        if not self.app_settings.disable_name_typo_notifications:
-            unresolved = [employee for employee in self._managed_employee_names() if not self.employee_emails.get(employee, "").strip() and employee not in self.missing_email_suppressions]
-            warnings.extend(core.find_potential_name_typos(unresolved, self._managed_employee_names()))
-            warnings.extend(core.find_address_book_name_typos(unresolved, address_book_names))
         if self.load_worker is None:
             self._set_loading_state(False, f"Matched emails: {updated}")
         self._refresh_employee_page()
         self.refresh_views()
-        warnings = [
-            warning
-            for warning in warnings
-            if core.typo_warning_key(warning.employee, warning.similar_employee) not in self.ignored_name_typos
-        ]
+        warnings: list[core.NameTypoWarning] = []
+        if not self.app_settings.disable_name_typo_notifications:
+            unresolved = [employee for employee in self._managed_employee_names() if not self.employee_emails.get(employee, "").strip() and employee not in self.missing_email_suppressions]
+            warnings.extend(core.find_potential_name_typos(unresolved, self._managed_employee_names()))
+            warnings.extend(core.find_address_book_name_typos(unresolved, address_book_names))
+            warnings = [
+                warning
+                for warning in warnings
+                if core.typo_warning_key(warning.employee, warning.similar_employee) not in self.ignored_name_typos
+            ]
         missing_after = sum(
             1
             for employee in self._managed_employee_names()
@@ -2490,6 +2697,7 @@ class DssQtMainWindow(QMainWindow):
             return
         self.outlook_worker = None
         self.outlook_thread = None
+        self._outlook_partial_updates.clear()
         if self.load_worker is None:
             self._set_loading_state(False, "Outlook sync failed")
         QMessageBox.critical(self, "Outlook Email Sync", message)
@@ -2499,6 +2707,7 @@ class DssQtMainWindow(QMainWindow):
             return
         self.outlook_worker = None
         self.outlook_thread = None
+        self._outlook_partial_updates.clear()
         if self.load_worker is None:
             self._set_loading_state(False, "Outlook sync cancelled")
 
@@ -2598,6 +2807,7 @@ class DssQtMainWindow(QMainWindow):
         self.missing_email_suppressions = set()
         self.employee_added_names = set()
         self.employee_hidden_names = set()
+        self.employee_name_merges = {}
         self.subject_template, self.body_template = core.load_email_templates(self.config_path)
         self.ignored_name_typos = set()
         self.status_label.setText("No DSS workbooks loaded")
@@ -2755,6 +2965,51 @@ class DssQtMainWindow(QMainWindow):
     def _persist_ignored_name_typos(self) -> None:
         core.save_ignored_name_typos(self.config_path, self.ignored_name_typos)
 
+    def _persist_employee_name_merges(self) -> None:
+        core.save_employee_name_merges(self.config_path, self.employee_name_merges)
+
+    def _merge_employee_alias(self, source_name: str, target_name: str) -> None:
+        source = source_name.strip()
+        target = target_name.strip()
+        if not source or not target or source.casefold() == target.casefold():
+            return
+        resolved_target = core.resolve_employee_name_merge(target, self.employee_name_merges)
+        if resolved_target.casefold() == source.casefold():
+            return
+        self.employee_name_merges[source] = resolved_target
+        if not self.employee_emails.get(resolved_target, "").strip() and self.employee_emails.get(source, "").strip():
+            self.employee_emails[resolved_target] = self.employee_emails[source]
+        if not self.employee_outlook_display_names.get(resolved_target, "").strip() and self.employee_outlook_display_names.get(source, "").strip():
+            self.employee_outlook_display_names[resolved_target] = self.employee_outlook_display_names[source]
+        if not self.employee_notes.get(resolved_target, "").strip() and self.employee_notes.get(source, "").strip():
+            self.employee_notes[resolved_target] = self.employee_notes[source]
+        if source in self.missing_email_suppressions:
+            self.missing_email_suppressions.add(resolved_target)
+            self.missing_email_suppressions.discard(source)
+        for group_name, members in list(self.employee_groups.items()):
+            member_set = {self._display_employee_name(member) for member in members if member.strip()}
+            if source in member_set:
+                member_set.discard(source)
+            if resolved_target:
+                member_set.add(resolved_target)
+            self.employee_groups[group_name] = sorted(member_set, key=str.casefold)
+        self.employee_added_names = {self._display_employee_name(name) for name in self.employee_added_names if self._display_employee_name(name).strip()}
+        self.employee_hidden_names.add(source)
+        self.employee_emails.pop(source, None)
+        self.employee_outlook_display_names.pop(source, None)
+        self.employee_notes.pop(source, None)
+        self.ignored_name_typos.add(core.typo_warning_key(source, resolved_target))
+        self._persist_employee_name_merges()
+        core.save_employee_name_overrides(self.config_path, self.employee_added_names, self.employee_hidden_names)
+        core.save_employee_emails(self.config_path, self.employee_emails, self.employee_outlook_display_names)
+        core.save_employee_notes(self.config_path, self.employee_notes)
+        core.save_employee_groups(self.config_path, self.employee_groups)
+        core.save_missing_email_suppressions(self.config_path, self.missing_email_suppressions)
+        self._persist_ignored_name_typos()
+        self._refresh_filters()
+        self._refresh_employee_page()
+        self.refresh_views()
+
     def check_name_typos_manually(self) -> None:
         if self.current_data is None or not self._managed_employee_names():
             QMessageBox.information(self, "Check Name Typos", "Load DSS data first.")
@@ -2804,7 +3059,7 @@ class DssQtMainWindow(QMainWindow):
         dialog.resize(780, 420)
         layout = QVBoxLayout(dialog)
         intro = QLabel(
-            "Possible name typo(s): similar names on the DSS roster, or a roster name that does not match the Outlook address book display name (after Sync Outlook Emails). Select an entry and choose Ignore Selected to stop warning on that pair. Notifications can also be disabled in Settings > Configuration."
+            "Possible name typo(s): similar names on the DSS roster, or a roster name that does not match the Outlook address book display name (after Sync Outlook Emails). Select entries, check entries, suppress them, or merge the typo into the correct employee. Notifications can also be disabled in Settings > Configuration."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -2820,6 +3075,8 @@ class DssQtMainWindow(QMainWindow):
         for warning in typo_warnings:
             item = QListWidgetItem(f"{warning.employee} -> {warning.similar_employee} ({warning.similarity * 100:.0f}% similar)")
             item.setData(Qt.UserRole, warning)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Unchecked)
             list_widget.addItem(item)
 
         def refresh_details() -> None:
@@ -2845,21 +3102,82 @@ class DssQtMainWindow(QMainWindow):
             list_widget.setCurrentRow(0)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
-        ignore_button = QPushButton("Ignore Selected")
-        buttons.addButton(ignore_button, QDialogButtonBox.ActionRole)
+        suppress_selected_button = QPushButton("Suppress Selected")
+        suppress_checked_button = QPushButton("Suppress Checked")
+        merge_button = QPushButton("Merge Selected")
+        buttons.addButton(suppress_selected_button, QDialogButtonBox.ActionRole)
+        buttons.addButton(suppress_checked_button, QDialogButtonBox.ActionRole)
+        buttons.addButton(merge_button, QDialogButtonBox.ActionRole)
 
-        def ignore_selected() -> None:
-            selected_items = list_widget.selectedItems()
-            if not selected_items:
-                return
-            for item in selected_items:
+        def suppress_items(items: list[QListWidgetItem]) -> None:
+            if not items:
+                return False
+            for item in items:
                 warning = item.data(Qt.UserRole)
                 if isinstance(warning, core.NameTypoWarning):
                     self.ignored_name_typos.add(core.typo_warning_key(warning.employee, warning.similar_employee))
             self._persist_ignored_name_typos()
+            return True
+
+        def suppress_selected() -> None:
+            if suppress_items(list_widget.selectedItems()):
+                dialog.accept()
+
+        def suppress_checked() -> None:
+            checked_items = [
+                list_widget.item(row)
+                for row in range(list_widget.count())
+                if list_widget.item(row).checkState() == Qt.Checked
+            ]
+            if suppress_items(checked_items):
+                dialog.accept()
+
+        def merge_selected() -> None:
+            item = list_widget.currentItem()
+            if item is None:
+                return
+            warning = item.data(Qt.UserRole)
+            if not isinstance(warning, core.NameTypoWarning):
+                return
+            choices = sorted({warning.similar_employee, *self._managed_employee_names()}, key=str.casefold)
+            if warning.employee in choices:
+                choices = [choice for choice in choices if choice.casefold() != warning.employee.casefold()]
+            if not choices:
+                return
+            target_name, ok = QInputDialog.getItem(
+                dialog,
+                "Merge Employee Name",
+                f"Merge '{warning.employee}' into:",
+                choices,
+                current=choices.index(warning.similar_employee) if warning.similar_employee in choices else 0,
+                editable=False,
+            )
+            if not ok or not str(target_name).strip():
+                return
+            self._merge_employee_alias(warning.employee, str(target_name))
             dialog.accept()
 
-        ignore_button.clicked.connect(ignore_selected)
+        def open_context_menu(position: QPoint) -> None:
+            item = list_widget.itemAt(position)
+            if item is None:
+                return
+            menu = QMenu(list_widget)
+            suppress_selected_action = menu.addAction("Suppress Selected")
+            suppress_checked_action = menu.addAction("Suppress Checked")
+            merge_action = menu.addAction("Merge Selected")
+            chosen = menu.exec(list_widget.mapToGlobal(position))
+            if chosen == suppress_selected_action:
+                suppress_selected()
+            elif chosen == suppress_checked_action:
+                suppress_checked()
+            elif chosen == merge_action:
+                merge_selected()
+
+        list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
+        list_widget.customContextMenuRequested.connect(open_context_menu)
+        suppress_selected_button.clicked.connect(suppress_selected)
+        suppress_checked_button.clicked.connect(suppress_checked)
+        merge_button.clicked.connect(merge_selected)
         buttons.rejected.connect(dialog.reject)
         buttons.accepted.connect(dialog.accept)
         layout.addWidget(buttons)
@@ -3220,6 +3538,7 @@ class DssQtMainWindow(QMainWindow):
 
 
 def launch_qt_app(initial_source: list[Path] | None = None) -> int:
+    _configure_forced_qt_software_rendering()
     app = QApplication.instance() or QApplication(sys.argv)
     app.setStyle("Fusion")
     app.setPalette(_build_forced_qt_palette(core.DEFAULT_UI_THEME))

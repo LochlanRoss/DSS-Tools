@@ -270,10 +270,19 @@ This includes:
 - employee emails
 - Outlook display names (paired with saved emails for typo checks)
 - employee groups
+- missing-email suppressions
+- name-typo suppressions / ignore decisions
+- employee-name merge mappings
 - email templates
 - table layouts
 - parsed DSS cache
 - diagnostic snapshot exports
+
+Update-preserved data:
+
+- The in-app updater and installer cleanup intentionally preserve `dss_hours_tracker_config.json`.
+- That means long-lived user decisions stored in config, including suppression state and employee merge mappings, should survive updates when the upgrade path is working normally.
+- Suppression entries are retained for about 6 months before aging out.
 
 ## Packaging
 
