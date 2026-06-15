@@ -31,7 +31,7 @@ import tkinter as tk
 from tkinter import colorchooser, filedialog, font as tkfont, messagebox, simpledialog, ttk
 
 from openpyxl import Workbook, load_workbook
-from openpyxl.utils import get_column_letter
+from openpyxl.utils import get_column_letter, range_boundaries
 
 try:
     import pythoncom
@@ -113,7 +113,7 @@ CACHE_DIRNAME = "cache"
 CACHE_RETENTION_DAYS = 7
 HASH_CHECK_INTERVAL_MS = 300000
 AUTO_OUTLOOK_SYNC_DELAY_MS = 60000
-AUTO_UPDATE_CHECK_DELAY_MS = 15000
+AUTO_UPDATE_CHECK_DELAY_MS = 30000
 DEFAULT_HASH_POLL_MINUTES = 5
 PROGRESS_UI_UPDATE_INTERVAL_MS = 75
 PARTIAL_RENDER_INTERVAL_MS = 200
@@ -2547,6 +2547,7 @@ def extract_resolved_display_name(recipient) -> str:
 def query_outlook_emails(
     employee_names: Iterable[str],
     should_cancel: Callable[[], bool] | None = None,
+    scan_full_address_book: bool = False,
 ) -> tuple[dict[str, OutlookResolution], list[str]]:
     if pythoncom is None or win32com is None:
         raise RuntimeError("Outlook lookup requires pywin32 and desktop Outlook.")
@@ -2564,8 +2565,12 @@ def query_outlook_emails(
         except Exception as exc:
             raise RuntimeError("Could not open Outlook to query email addresses.") from exc
 
-        address_book_index, address_book_names = build_outlook_address_book_index(namespace)
+        address_book_index: dict[str, list[OutlookResolution]] = {}
+        address_book_names: list[str] = []
+        if scan_full_address_book:
+            address_book_index, address_book_names = build_outlook_address_book_index(namespace)
         results: dict[str, OutlookResolution] = {}
+        matched_display_names: set[str] = set()
         for employee in names:
             if check_cancel():
                 raise OperationCancelled("Cancelled Outlook email sync.")
@@ -2580,10 +2585,15 @@ def query_outlook_emails(
                 if email:
                     display_name = extract_resolved_display_name(recipient) or employee
                     candidates.append(OutlookResolution(email=email, display_name=display_name))
+                    if display_name.strip():
+                        matched_display_names.add(display_name.strip())
             preferred = choose_preferred_outlook_resolution(candidates)
             if preferred is not None:
                 results[employee] = preferred
-        return results, address_book_names
+                if preferred.display_name.strip():
+                    matched_display_names.add(preferred.display_name.strip())
+        names_for_typos = address_book_names if scan_full_address_book else sorted(matched_display_names, key=str.casefold)
+        return results, names_for_typos
     finally:
         pythoncom.CoUninitialize()
 
@@ -3384,6 +3394,54 @@ def build_source_ranges(label: str, start_row: int, name_cols: tuple[int, ...], 
     )
 
 
+_A1_RANGE_RE = re.compile(r"\b([A-Z]{1,3}\d+(?::[A-Z]{1,3}\d+)?)\b")
+
+
+def extract_a1_ranges(text: str) -> list[str]:
+    return _A1_RANGE_RE.findall(text or "")
+
+
+def parse_signin_row_range(source_ranges: str) -> tuple[int, int] | None:
+    for ref in extract_a1_ranges(source_ranges):
+        if not ref.startswith("C"):
+            continue
+        try:
+            min_col, min_row, max_col, max_row = range_boundaries(ref)
+        except ValueError:
+            continue
+        if min_col == 3:
+            return min_row, max_row
+    return None
+
+
+def selection_ranges_for_source_ranges(source_ranges: str, *, prefer_name_only: bool = False) -> list[str]:
+    refs = extract_a1_ranges(source_ranges)
+    if not refs:
+        return []
+    lowered = source_ranges.lower()
+    if "sign-in name" in lowered:
+        name_refs = [ref for ref in refs if ref.startswith("A")]
+        if prefer_name_only:
+            return name_refs[:1]
+        row_span = parse_signin_row_range(source_ranges)
+        if row_span is not None:
+            start_row, end_row = row_span
+            return [f"C{start_row}:F{end_row}"]
+        return name_refs[:1] or refs[:1]
+    if prefer_name_only:
+        for token in source_ranges.split(";"):
+            if "name" in token.lower():
+                token_refs = extract_a1_ranges(token)
+                if token_refs:
+                    return token_refs[:1]
+    for token in source_ranges.split(";"):
+        if "hours" in token.lower():
+            hour_refs = extract_a1_ranges(token)
+            if hour_refs:
+                return hour_refs
+    return refs[:1]
+
+
 def find_name_cell(ws, start_row: int, column_indexes: Iterable[int]) -> tuple[str, str] | tuple[None, None]:
     for col_idx in reversed(tuple(column_indexes)):
         for row_idx in range(start_row, start_row + 3):
@@ -3886,6 +3944,38 @@ def find_open_excel_workbook(excel_app, source_path: Path):
     if len(name_matches) == 1:
         return name_matches[0]
     return None
+
+
+def select_excel_workbook_ranges(source_path: Path, sheet_name: str, ranges: Iterable[str]) -> None:
+    if pythoncom is None or win32com is None:
+        raise RuntimeError("Excel navigation requires pywin32 and desktop Excel.")
+    wanted = [item.strip() for item in ranges if item and item.strip()]
+    if not wanted:
+        raise RuntimeError("No cell ranges were available for selection.")
+    pythoncom.CoInitialize()
+    try:
+        excel = win32com.client.Dispatch("Excel.Application")
+        workbook = find_open_excel_workbook(excel, source_path)
+        if workbook is None:
+            workbook = excel.Workbooks.Open(str(source_path))
+        worksheet = workbook.Worksheets(sheet_name)
+        worksheet.Activate()
+        excel.Visible = True
+        if len(wanted) == 1:
+            worksheet.Range(wanted[0]).Select()
+        else:
+            selected = excel.Union(*(worksheet.Range(ref) for ref in wanted))
+            selected.Select()
+        try:
+            excel.WindowState = -4143  # xlNormal
+        except Exception:
+            pass
+        try:
+            excel.ActiveWindow.ScrollRow = worksheet.Range(wanted[0]).Row
+        except Exception:
+            pass
+    finally:
+        pythoncom.CoUninitialize()
 
 
 def build_permission_denied_message(source_path: Path) -> str:
@@ -7950,7 +8040,11 @@ class DssToolsApp(tk.Tk):
 
     def _sync_outlook_emails_worker(self, employee_names: list[str], manual: bool, cancel_event: threading.Event) -> None:
         try:
-            results, address_book_names = query_outlook_emails(employee_names, should_cancel=cancel_event.is_set)
+            results, address_book_names = query_outlook_emails(
+                employee_names,
+                should_cancel=cancel_event.is_set,
+                scan_full_address_book=False,
+            )
         except OperationCancelled:
             self.after(0, lambda: self._handle_outlook_sync_cancelled(cancel_event, manual))
             return
@@ -8078,7 +8172,7 @@ class DssToolsApp(tk.Tk):
         address_book_names: list[str] = []
         if names_to_check:
             try:
-                _results, address_book_names = query_outlook_emails(names_to_check)
+                _results, address_book_names = query_outlook_emails(names_to_check, scan_full_address_book=True)
             except Exception:
                 address_book_names = []
         if names_to_check:

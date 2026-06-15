@@ -25,6 +25,8 @@ from dss_hours_tracker import (
     build_employee_email_list_label,
     build_signin_hours_mismatch_warnings,
     build_employee_day_pf_rows,
+    query_outlook_emails,
+    selection_ranges_for_source_ranges,
     reference_week_number,
     load_employee_name_overrides,
     _is_updater_executable_path,
@@ -357,6 +359,58 @@ class DssToolsTests(DssToolsFixtures):
         self.assertEqual(reference_week_number(date(2025, 1, 5)), 2)
         self.assertEqual(reference_week_number(date(2025, 6, 1)), 23)
         self.assertEqual(reference_week_number(date(2026, 6, 8)), 24)
+
+    def test_selection_ranges_for_signin_source_ranges_prefers_time_and_hours_block(self) -> None:
+        self.assertEqual(
+            selection_ranges_for_source_ranges("Sign-in name A9; continuation C10:R10"),
+            ["C10:F10"],
+        )
+        self.assertEqual(
+            selection_ranges_for_source_ranges("Sign-in name A9; continuation C10:R10", prefer_name_only=True),
+            ["A9"],
+        )
+
+    def test_selection_ranges_for_legacy_source_ranges_prefers_hours_block(self) -> None:
+        self.assertEqual(
+            selection_ranges_for_source_ranges("Left block name T25:AA27; Left block hours AC25:AE27"),
+            ["AC25:AE27"],
+        )
+        self.assertEqual(
+            selection_ranges_for_source_ranges("Left block name T25:AA27; Left block hours AC25:AE27", prefer_name_only=True),
+            ["T25:AA27"],
+        )
+
+    def test_query_outlook_emails_targeted_mode_skips_full_address_book_scan(self) -> None:
+        class FakeRecipient:
+            Resolved = True
+
+            def Resolve(self) -> None:
+                return None
+
+        class FakeNamespace:
+            AddressLists = object()
+
+            def CreateRecipient(self, _employee: str) -> FakeRecipient:
+                return FakeRecipient()
+
+        class FakeOutlook:
+            def GetNamespace(self, _name: str) -> FakeNamespace:
+                return FakeNamespace()
+
+        with (
+            mock.patch("dss_hours_tracker.pythoncom") as pythoncom_mock,
+            mock.patch("dss_hours_tracker.win32com") as win32com_mock,
+            mock.patch("dss_hours_tracker.build_outlook_address_book_index", side_effect=AssertionError("full scan should not run")),
+            mock.patch("dss_hours_tracker.extract_smtp_address", return_value="person@jatechpowersystems.com"),
+            mock.patch("dss_hours_tracker.extract_resolved_display_name", return_value="Person Example"),
+        ):
+            win32com_mock.client.Dispatch.return_value = FakeOutlook()
+            results, names = query_outlook_emails(["Person Example"], scan_full_address_book=False)
+
+        pythoncom_mock.CoInitialize.assert_called_once()
+        pythoncom_mock.CoUninitialize.assert_called_once()
+        self.assertEqual(results["Person Example"].email, "person@jatechpowersystems.com")
+        self.assertEqual(names, ["Person Example"])
 
     def test_permission_message_mentions_onedrive_guidance(self) -> None:
         message = build_permission_denied_message(

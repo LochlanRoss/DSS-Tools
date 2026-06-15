@@ -19,7 +19,7 @@ from openpyxl import Workbook
 import dss_hours_tracker as core
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, QPoint, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QAction, QColor, QDesktopServices, QIcon, QKeySequence
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QIcon, QKeySequence, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -60,6 +60,175 @@ from PySide6.QtWidgets import (
 
 TABLE_DATE_COLUMNS = {"date", "work_date", "week_start", "week_end"}
 TABLE_NUMERIC_COLUMNS = {"st", "ot", "dt", "total", "expanded", "days", "similarity", "limit", "actual_total", "delta"}
+
+
+def _build_qt_chrome_stylesheet(theme: core.UiThemeColors) -> str:
+    content_bg = theme.content_chrome_background
+    panel_bg = core.lighten_hex_color(content_bg, -4)
+    border = core.lighten_hex_color(content_bg, -36)
+    stronger_border = core.lighten_hex_color(content_bg, -64)
+    pressed_bg = core.lighten_hex_color(content_bg, -18)
+    hover_bg = core.lighten_hex_color(content_bg, -10)
+    table_bg = theme.table_background
+    table_header_bg = core.lighten_hex_color(table_bg, -18)
+    text = "#18181b"
+    muted_text = "#475569"
+    disabled_text = "#94a3b8"
+    accent = "#2563eb"
+    accent_soft = "#dbeafe"
+
+    return f"""
+        QMainWindow, QWidget {{
+            background-color: {content_bg};
+            color: {text};
+        }}
+        QLabel {{
+            color: {text};
+            background: transparent;
+        }}
+        QGroupBox {{
+            color: {text};
+            border: 1px solid {border};
+            border-radius: 6px;
+            margin-top: 10px;
+            padding-top: 10px;
+        }}
+        QGroupBox::title {{
+            subcontrol-origin: margin;
+            left: 10px;
+            padding: 0 4px;
+        }}
+        QPushButton, QToolButton, QComboBox, QLineEdit, QSpinBox, QPlainTextEdit, QTextEdit, QListWidget, QMenu, QScrollArea {{
+            background-color: {content_bg};
+            color: {text};
+            border: 1px solid {border};
+            border-radius: 6px;
+        }}
+        QPushButton, QToolButton {{
+            padding: 6px 12px;
+        }}
+        QPushButton:hover, QToolButton:hover, QComboBox:hover, QLineEdit:hover, QSpinBox:hover {{
+            background-color: {hover_bg};
+            border-color: {stronger_border};
+        }}
+        QPushButton:pressed, QToolButton:pressed {{
+            background-color: {pressed_bg};
+        }}
+        QPushButton:disabled, QToolButton:disabled, QLabel:disabled {{
+            color: {disabled_text};
+            border-color: {border};
+        }}
+        QComboBox::drop-down {{
+            border: 0;
+            width: 20px;
+        }}
+        QComboBox QAbstractItemView, QListWidget {{
+            background-color: {content_bg};
+            color: {text};
+            selection-background-color: {accent_soft};
+            selection-color: {text};
+        }}
+        QTabWidget::pane {{
+            border: 1px solid {border};
+            border-radius: 8px;
+            top: -1px;
+            background-color: {content_bg};
+        }}
+        QTabBar::tab {{
+            background-color: {panel_bg};
+            color: {muted_text};
+            border: 1px solid {border};
+            border-bottom-color: {border};
+            border-top-left-radius: 6px;
+            border-top-right-radius: 6px;
+            padding: 7px 14px;
+            margin-right: 2px;
+        }}
+        QTabBar::tab:selected {{
+            background-color: {content_bg};
+            color: {text};
+            border-color: {stronger_border};
+            border-bottom-color: {content_bg};
+        }}
+        QTabBar::tab:hover:!selected {{
+            background-color: {hover_bg};
+            color: {text};
+        }}
+        QHeaderView::section {{
+            background-color: {table_header_bg};
+            color: {text};
+            border: 1px solid {border};
+            padding: 6px;
+        }}
+        QTableView {{
+            background-color: {table_bg};
+            color: {text};
+            gridline-color: {border};
+            alternate-background-color: {table_bg};
+            border: 1px solid {border};
+        }}
+        QTableCornerButton::section {{
+            background-color: {table_header_bg};
+            border: 1px solid {border};
+        }}
+        QProgressBar {{
+            background-color: {panel_bg};
+            color: {text};
+            border: 1px solid {border};
+            border-radius: 5px;
+            text-align: center;
+        }}
+        QProgressBar::chunk {{
+            background-color: {accent};
+            border-radius: 4px;
+        }}
+        QToolTip {{
+            background-color: {theme.tooltip_background};
+            color: {theme.tooltip_foreground};
+            border: 1px solid {border};
+        }}
+    """
+
+
+def _build_forced_qt_palette(theme: core.UiThemeColors) -> QPalette:
+    palette = QPalette()
+    content_bg = QColor(theme.content_chrome_background)
+    panel_bg = QColor(core.lighten_hex_color(theme.content_chrome_background, -4))
+    table_bg = QColor(theme.table_background)
+    border = QColor(core.lighten_hex_color(theme.content_chrome_background, -36))
+    text = QColor("#18181b")
+    muted_text = QColor("#475569")
+    disabled_text = QColor("#94a3b8")
+    white = QColor("#ffffff")
+    accent = QColor("#2563eb")
+    accent_soft = QColor("#dbeafe")
+
+    palette.setColor(QPalette.Window, content_bg)
+    palette.setColor(QPalette.WindowText, text)
+    palette.setColor(QPalette.Base, white)
+    palette.setColor(QPalette.AlternateBase, table_bg)
+    palette.setColor(QPalette.ToolTipBase, QColor(theme.tooltip_background))
+    palette.setColor(QPalette.ToolTipText, QColor(theme.tooltip_foreground))
+    palette.setColor(QPalette.Text, text)
+    palette.setColor(QPalette.Button, panel_bg)
+    palette.setColor(QPalette.ButtonText, text)
+    palette.setColor(QPalette.BrightText, white)
+    palette.setColor(QPalette.Highlight, accent)
+    palette.setColor(QPalette.HighlightedText, white)
+    palette.setColor(QPalette.Light, white)
+    palette.setColor(QPalette.Midlight, border)
+    palette.setColor(QPalette.Dark, border)
+    palette.setColor(QPalette.Mid, border)
+    palette.setColor(QPalette.Shadow, QColor("#cbd5e1"))
+    palette.setColor(QPalette.Link, accent)
+    palette.setColor(QPalette.LinkVisited, QColor("#1d4ed8"))
+
+    palette.setColor(QPalette.Disabled, QPalette.WindowText, disabled_text)
+    palette.setColor(QPalette.Disabled, QPalette.Text, disabled_text)
+    palette.setColor(QPalette.Disabled, QPalette.ButtonText, disabled_text)
+    palette.setColor(QPalette.Disabled, QPalette.Highlight, accent_soft)
+    palette.setColor(QPalette.Disabled, QPalette.HighlightedText, muted_text)
+    return palette
 
 
 @dataclass(frozen=True)
@@ -168,10 +337,17 @@ class RowAccentDelegate(QStyledItemDelegate):
 class DataTablePage(QWidget):
     layoutChanged = Signal(str, list, dict, str, bool)
 
-    def __init__(self, spec: TableSpec, theme: core.UiThemeColors, config_path: Path) -> None:
+    def __init__(
+        self,
+        spec: TableSpec,
+        theme: core.UiThemeColors,
+        config_path: Path,
+        row_activate_callback: Callable[[dict[str, Any], str], None] | None = None,
+    ) -> None:
         super().__init__()
         self.spec = spec
         self.config_path = config_path
+        self._row_activate_callback = row_activate_callback
         self.columns = list(spec.columns)
         self.model = TableModel(self.columns, theme=theme)
         self.view = QTableView(self)
@@ -179,12 +355,17 @@ class DataTablePage(QWidget):
         self.view.setItemDelegate(RowAccentDelegate(self.view))
         self.view.setSortingEnabled(True)
         self.view.setAlternatingRowColors(False)
-        self.view.setSelectionBehavior(QTableView.SelectRows)
+        self.view.setSelectionBehavior(QTableView.SelectItems)
         self.view.setSelectionMode(QTableView.ExtendedSelection)
         self.view.verticalHeader().setVisible(False)
         self.view.horizontalHeader().setSectionsMovable(True)
         self.view.horizontalHeader().setStretchLastSection(False)
         self.view.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        self.view.setStyleSheet(
+            "QTableView::item:selected { background-color: #2563eb; color: white; }"
+            "QTableView::item:selected:active { background-color: #2563eb; color: white; }"
+            "QTableView::item:selected:!active { background-color: #2563eb; color: white; }"
+        )
 
         self.columns_button = QPushButton("Columns", self)
         self.columns_button.clicked.connect(self._show_columns_menu)
@@ -204,6 +385,12 @@ class DataTablePage(QWidget):
         self.view.horizontalHeader().sortIndicatorChanged.connect(self._emit_layout_change)
         self.view.horizontalHeader().sectionMoved.connect(lambda *_: self._emit_layout_change())
         self.view.horizontalHeader().sectionResized.connect(lambda *_: self._emit_layout_change())
+        self.view.doubleClicked.connect(self._on_double_clicked)
+
+        copy_action = QAction(self)
+        copy_action.setShortcut(QKeySequence.Copy)
+        copy_action.triggered.connect(self.copy_selection)
+        self.addAction(copy_action)
 
     def add_toolbar_button(self, text: str, callback: Callable[[], None]) -> QPushButton:
         button = QPushButton(text, self)
@@ -220,16 +407,35 @@ class DataTablePage(QWidget):
         self.model.set_rows(rows)
 
     def selected_rows(self) -> list[dict[str, Any]]:
-        indexes = self.view.selectionModel().selectedRows()
+        indexes = self.view.selectionModel().selectedIndexes()
         results: list[dict[str, Any]] = []
+        seen_rows: set[int] = set()
         for index in indexes:
-            row = self.model.rows[index.row()]
-            results.append(row)
+            if index.row() in seen_rows:
+                continue
+            seen_rows.add(index.row())
+            results.append(self.model.rows[index.row()])
         return results
 
     def export_rows(self) -> tuple[list[str], list[dict[str, Any]]]:
         visible_columns = self.visible_columns()
         return visible_columns, list(self.model.rows)
+
+    def copy_selection(self) -> None:
+        indexes = self.view.selectionModel().selectedIndexes()
+        if not indexes:
+            return
+        rows = sorted({index.row() for index in indexes})
+        cols = sorted({index.column() for index in indexes})
+        cell_text: list[str] = []
+        index_map = {(index.row(), index.column()): index for index in indexes}
+        for row in rows:
+            values: list[str] = []
+            for col in cols:
+                index = index_map.get((row, col))
+                values.append("" if index is None else str(index.data(Qt.DisplayRole) or ""))
+            cell_text.append("\t".join(values))
+        QApplication.clipboard().setText("\n".join(cell_text))
 
     def visible_columns(self) -> list[str]:
         columns: list[str] = []
@@ -307,6 +513,14 @@ class DataTablePage(QWidget):
             sort_column = self.columns[sort_index][0]
             descending = self.view.horizontalHeader().sortIndicatorOrder() == Qt.DescendingOrder
         self.layoutChanged.emit(self.spec.table_id, self.visible_columns(), widths, sort_column, descending)
+
+    def _on_double_clicked(self, index: QModelIndex) -> None:
+        if not index.isValid():
+            return
+        row = self.model.rows[index.row()]
+        column_key = self.columns[index.column()][0]
+        if self._row_activate_callback is not None:
+            self._row_activate_callback(row, column_key)
 
 
 class CheckListPopup(QFrame):
@@ -594,7 +808,11 @@ class OutlookWorker(QObject):
 
     def run(self) -> None:
         try:
-            results, address_book_names = core.query_outlook_emails(self.employee_names, should_cancel=self.cancel_event.is_set)
+            results, address_book_names = core.query_outlook_emails(
+                self.employee_names,
+                should_cancel=self.cancel_event.is_set,
+                scan_full_address_book=False,
+            )
         except core.OperationCancelled:
             self.cancelled.emit()
             return
@@ -1393,7 +1611,7 @@ class DssQtMainWindow(QMainWindow):
             (self.report_tabs, TableSpec("workbook_health", "Workbook Health", (("source_file", "Source File"), ("status", "Status"), ("details", "Details")))),
             (self.report_tabs, TableSpec("audit_data_trail", "Audit Data Trail", (("source_file", "Source File"), ("pf_number", "PF#"), ("date", "Date"), ("sheet", "Sheet"), ("employee", "Employee"), ("st", "ST"), ("ot", "OT"), ("dt", "DT"), ("total", "Total"), ("expanded", "Expanded Hours"), ("source_ranges", "Source Ranges"), ("audit", "Audit")))),
         ]:
-            page = DataTablePage(spec, theme, self.config_path)
+            page = DataTablePage(spec, theme, self.config_path, row_activate_callback=self._handle_table_row_activated)
             page.layoutChanged.connect(self._save_table_layout)
             parent.addTab(page, spec.title)
             self.pages[spec.table_id] = page
@@ -1546,9 +1764,15 @@ class DssQtMainWindow(QMainWindow):
         else:
             self.quickload_hint_label.setText("")
 
+    def _effective_qt_theme(self) -> core.UiThemeColors:
+        return core.DEFAULT_UI_THEME
+
     def _apply_ui_theme_chrome(self) -> None:
-        theme = self.app_settings.ui_theme
-        self.centralWidget().setStyleSheet(f"background-color: {theme.content_chrome_background};")
+        theme = self._effective_qt_theme()
+        app = QApplication.instance()
+        if app is not None:
+            app.setPalette(_build_forced_qt_palette(theme))
+        self.setStyleSheet(_build_qt_chrome_stylesheet(theme))
 
     def _sync_reports_alert_chrome(self, has_errors: bool, has_parse_warnings: bool) -> None:
         error_index = self.report_tabs.indexOf(self.pages["error_report"])
@@ -1588,9 +1812,10 @@ class DssQtMainWindow(QMainWindow):
         return results
 
     def refresh_views(self) -> None:
+        theme = self._effective_qt_theme()
         for page in self.pages.values():
-            page.set_theme(self.app_settings.ui_theme)
-        self.email_drafts_page.preview_table.set_theme(self.app_settings.ui_theme)
+            page.set_theme(theme)
+        self.email_drafts_page.preview_table.set_theme(theme)
         if not self.current_data:
             for page in self.pages.values():
                 page.set_rows([])
@@ -1744,6 +1969,7 @@ class DssQtMainWindow(QMainWindow):
                 "reason": item.reason,
                 "breakdown": item.breakdown,
                 "__tags__": ("alert",),
+                "__finding__": item,
             }
             for item in sorted(findings, key=lambda finding: (finding.week_start, finding.employee, finding.hour_type), reverse=True)
         ])
@@ -1756,6 +1982,7 @@ class DssQtMainWindow(QMainWindow):
                 "date": warning.work_date,
                 "issue": warning.issue,
                 "details": warning.details,
+                "__warning__": warning,
             }
             for warning in active_parse_warnings
             if warning.source_file in filtered_source_files
@@ -1784,6 +2011,7 @@ class DssQtMainWindow(QMainWindow):
                 "expanded": core.fmt_hours(core.expanded_hours(record.st, record.ot, record.dt)),
                 "source_ranges": record.source_ranges,
                 "audit": f"{record.source_sheet} -> {record.source_ranges}",
+                "__record__": record,
             }
             for record in sorted(filtered_records, key=lambda item: (item.work_date, item.source_sheet, item.employee), reverse=True)
         ])
@@ -2100,6 +2328,98 @@ class DssQtMainWindow(QMainWindow):
         self.loading_label.setText("")
         self._quickload_session = False
         self._set_loading_state(False, "Load cancelled")
+
+    def _resolve_source_path_by_name(self, source_display_name: str) -> Path | None:
+        if not source_display_name or self.current_data is None:
+            return None
+        for path in self.current_data.source_paths:
+            if path.name == source_display_name:
+                return path
+        return None
+
+    def _handle_table_row_activated(self, row: dict[str, Any], column_key: str) -> None:
+        finding = row.get("__finding__")
+        if isinstance(finding, core.ErrorFinding):
+            self._open_error_finding_in_excel(finding)
+            return
+        warning = row.get("__warning__")
+        if isinstance(warning, core.SheetParseWarning):
+            self._open_parse_warning_in_excel(warning)
+            return
+        record = row.get("__record__")
+        if isinstance(record, core.DailyRecord):
+            self._open_record_ranges_in_excel(record)
+            return
+        if column_key in {"source_file", "sources"}:
+            source_display = str(row.get(column_key, "")).strip()
+            if source_display:
+                self._open_displayed_source_file(source_display)
+
+    def _open_record_ranges_in_excel(self, record: core.DailyRecord, *, prefer_name_only: bool = False) -> None:
+        ranges = core.selection_ranges_for_source_ranges(record.source_ranges, prefer_name_only=prefer_name_only)
+        try:
+            core.select_excel_workbook_ranges(record.source_path, record.source_sheet, ranges)
+        except Exception as exc:
+            QMessageBox.critical(self, "Open Excel Range", str(exc))
+
+    def _open_parse_warning_in_excel(self, warning: core.SheetParseWarning) -> None:
+        source_path = self._resolve_source_path_by_name(warning.source_file)
+        if source_path is None:
+            QMessageBox.critical(self, "Open Excel Range", f"Could not find workbook:\n{warning.source_file}")
+            return
+        ranges: list[str] = []
+        if warning.issue == "Revision Indicator AZ2 Mismatch":
+            ranges = ["AZ2"]
+        elif "(" in warning.details and ")" in warning.details:
+            between = warning.details.split("(", 1)[1].split(")", 1)[0]
+            ranges = core.selection_ranges_for_source_ranges(between)
+        if not ranges:
+            self._open_displayed_source_file(warning.source_file)
+            return
+        try:
+            core.select_excel_workbook_ranges(source_path, warning.source_sheet, ranges)
+        except Exception as exc:
+            QMessageBox.critical(self, "Open Excel Range", str(exc))
+
+    def _open_error_finding_in_excel(self, finding: core.ErrorFinding) -> None:
+        if self.current_data is None:
+            return
+        source_names = {part.strip() for part in finding.source_files.split(",") if part.strip()}
+        matching_records = [
+            record
+            for record in self.current_data.daily_records
+            if record.employee == finding.employee
+            and record.work_date == finding.trigger_date
+            and (not source_names or record.source_file in source_names)
+        ]
+        if not matching_records:
+            QMessageBox.critical(
+                self,
+                "Open Excel Range",
+                f"Could not find source rows for {finding.employee} on {finding.trigger_date.isoformat()}.",
+            )
+            return
+        matching_records.sort(key=lambda record: (record.source_file.casefold(), record.source_sheet.casefold(), record.source_ranges))
+        target = matching_records[0]
+        same_sheet_records = [
+            record
+            for record in matching_records
+            if record.source_path == target.source_path and record.source_sheet == target.source_sheet
+        ]
+        ranges: list[str] = []
+        if finding.outlook_name_rule:
+            for record in same_sheet_records:
+                ranges.extend(core.selection_ranges_for_source_ranges(record.source_ranges, prefer_name_only=True))
+        else:
+            for record in same_sheet_records:
+                ranges.extend(core.selection_ranges_for_source_ranges(record.source_ranges))
+        deduped_ranges = list(dict.fromkeys(ranges))
+        if not deduped_ranges:
+            deduped_ranges = core.selection_ranges_for_source_ranges(target.source_ranges, prefer_name_only=finding.outlook_name_rule)
+        try:
+            core.select_excel_workbook_ranges(target.source_path, target.source_sheet, deduped_ranges)
+        except Exception as exc:
+            QMessageBox.critical(self, "Open Excel Range", str(exc))
 
     def save_email_templates(self) -> None:
         self.subject_template = self.email_drafts_page.subject_edit.toPlainText().strip()
@@ -2450,7 +2770,7 @@ class DssQtMainWindow(QMainWindow):
         address_book_names: list[str] = []
         if names_to_check:
             try:
-                _results, address_book_names = core.query_outlook_emails(names_to_check)
+                _results, address_book_names = core.query_outlook_emails(names_to_check, scan_full_address_book=True)
             except Exception:
                 address_book_names = []
         if names_to_check:
@@ -2901,6 +3221,8 @@ class DssQtMainWindow(QMainWindow):
 
 def launch_qt_app(initial_source: list[Path] | None = None) -> int:
     app = QApplication.instance() or QApplication(sys.argv)
+    app.setStyle("Fusion")
+    app.setPalette(_build_forced_qt_palette(core.DEFAULT_UI_THEME))
     if os.name == "nt" and getattr(sys, "frozen", False):
         core._windows_set_explicit_app_user_model_id()
     window = DssQtMainWindow(initial_source=initial_source)

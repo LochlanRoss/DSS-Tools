@@ -60,3 +60,10 @@ Working scratchpad: check items off when they are done.
 - [x] Add stricter fuzzy address-book typo detection for likely same-person spelling errors (for example `Dwayne Moffat` vs `Dwayne Moffatt`) without flagging different people who merely share a first name.
 
 - [x] Add an email-missing suppression feature so intentionally missing employee emails are not highlighted or re-queried during Outlook sync.
+
+
+- Change the highlight behaviour of cells in tables to change the colour of the cell to blue when selected. Currently, there is only a small blue line that appears on the left of the cell. I would like the whole cell to change colour.
+
+- Make the cells highlightable and copyable. I would like to be able to copy and paste information out of these tables directly into other programs like microsoft word and emails in outlook.
+
+- In the reports section, when errors occur they generally cite specific cells in which the errors or suspected errors occur. Can we make it so any instance of an error report allows the user to double click the entry and open the source sheet with the excel cursor selected over the offending cells? Open it on the right worksheet, with the selection covering the offending cell.
