@@ -48,6 +48,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSpinBox,
     QSplitter,
+    QStyledItemDelegate,
     QTabWidget,
     QTableView,
     QTextEdit,
@@ -148,6 +149,22 @@ class TableModel(QAbstractTableModel):
         self.layoutChanged.emit()
 
 
+class RowAccentDelegate(QStyledItemDelegate):
+    def paint(self, painter, option, index) -> None:  # type: ignore[override]
+        super().paint(painter, option, index)
+        row_payload = index.data(Qt.UserRole) or {}
+        tags = set(row_payload.get("__tags__", ()))
+        if "date_break" not in tags:
+            return
+        painter.save()
+        pen = painter.pen()
+        pen.setColor(QColor("#8b98a9"))
+        pen.setWidth(2)
+        painter.setPen(pen)
+        painter.drawLine(option.rect.topLeft(), option.rect.topRight())
+        painter.restore()
+
+
 class DataTablePage(QWidget):
     layoutChanged = Signal(str, list, dict, str, bool)
 
@@ -159,6 +176,7 @@ class DataTablePage(QWidget):
         self.model = TableModel(self.columns, theme=theme)
         self.view = QTableView(self)
         self.view.setModel(self.model)
+        self.view.setItemDelegate(RowAccentDelegate(self.view))
         self.view.setSortingEnabled(True)
         self.view.setAlternatingRowColors(False)
         self.view.setSelectionBehavior(QTableView.SelectRows)
@@ -293,6 +311,8 @@ class DataTablePage(QWidget):
 
 class CheckListPopup(QFrame):
     selectionChanged = Signal(list)
+    CHECKED_MARK = "\u2611"
+    UNCHECKED_MARK = "\u2610"
 
     def __init__(self, parent: QWidget, all_label: str, clear_label: str) -> None:
         super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint)
@@ -301,54 +321,52 @@ class CheckListPopup(QFrame):
         self.values: list[str] = []
         self.selected: set[str] = set()
         self.list_widget = QListWidget(self)
+        self.list_widget.setSelectionMode(QListWidget.NoSelection)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.addWidget(self.list_widget)
-        self.list_widget.itemChanged.connect(self._on_item_changed)
+        self.list_widget.itemClicked.connect(self._on_item_clicked)
+
+    def _display_text(self, label: str, checked: bool) -> str:
+        return f"{self.CHECKED_MARK if checked else self.UNCHECKED_MARK} {label}"
+
+    def _add_item(self, label: str, data: str, checked: bool) -> None:
+        item = QListWidgetItem(self._display_text(label, checked))
+        item.setFlags(Qt.ItemIsEnabled)
+        item.setData(Qt.UserRole, data)
+        item.setData(Qt.UserRole + 1, label)
+        self.list_widget.addItem(item)
+
+    def _refresh_item_labels(self) -> None:
+        all_checked = len(self.selected) == len(self.values) and len(self.values) > 0
+        for row in range(self.list_widget.count()):
+            item = self.list_widget.item(row)
+            data = str(item.data(Qt.UserRole))
+            label = str(item.data(Qt.UserRole + 1))
+            checked = all_checked if data == "__all__" else (data != "__clear__" and data in self.selected)
+            item.setText(self._display_text(label, checked))
 
     def set_values(self, values: list[str], selected: Iterable[str]) -> None:
         self.values = list(values)
         self.selected = set(selected)
-        self.list_widget.blockSignals(True)
         self.list_widget.clear()
-        for label, data, checked in [
-            (self.all_label, "__all__", len(self.selected) == len(self.values) and len(self.values) > 0),
-            (self.clear_label, "__clear__", False),
-        ]:
-            item = QListWidgetItem(label)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setData(Qt.UserRole, data)
-            item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
-            self.list_widget.addItem(item)
+        self._add_item(self.all_label, "__all__", len(self.selected) == len(self.values) and len(self.values) > 0)
+        self._add_item(self.clear_label, "__clear__", False)
         for value in self.values:
-            item = QListWidgetItem(value)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setData(Qt.UserRole, value)
-            item.setCheckState(Qt.Checked if value in self.selected else Qt.Unchecked)
-            self.list_widget.addItem(item)
-        self.list_widget.blockSignals(False)
+            self._add_item(value, value, value in self.selected)
 
-    def _on_item_changed(self, item: QListWidgetItem) -> None:
-        data = item.data(Qt.UserRole)
+    def _on_item_clicked(self, item: QListWidgetItem) -> None:
+        data = str(item.data(Qt.UserRole))
         if data == "__all__":
-            selected = item.checkState() == Qt.Checked
-            self.list_widget.blockSignals(True)
-            for row in range(2, self.list_widget.count()):
-                self.list_widget.item(row).setCheckState(Qt.Checked if selected else Qt.Unchecked)
-            self.list_widget.blockSignals(False)
+            self.selected = set(self.values)
         elif data == "__clear__":
-            self.list_widget.blockSignals(True)
-            item.setCheckState(Qt.Unchecked)
-            for row in range(2, self.list_widget.count()):
-                self.list_widget.item(row).setCheckState(Qt.Unchecked)
-            self.list_widget.blockSignals(False)
-        selected_values: list[str] = []
-        for row in range(2, self.list_widget.count()):
-            entry = self.list_widget.item(row)
-            if entry.checkState() == Qt.Checked:
-                selected_values.append(str(entry.data(Qt.UserRole)))
-        self.selected = set(selected_values)
-        self.selectionChanged.emit(selected_values)
+            self.selected.clear()
+        elif data in self.selected:
+            self.selected.remove(data)
+        else:
+            self.selected.add(data)
+        self._refresh_item_labels()
+        self.selectionChanged.emit([value for value in self.values if value in self.selected])
 
 
 class CheckListButton(QPushButton):
@@ -1656,6 +1674,7 @@ class DssQtMainWindow(QMainWindow):
             week_number = str(core.reference_week_number(row.work_date))
             employee_text = row.employee if row.employee != previous_employee else ""
             week_cell = week_number if row.employee != previous_employee else ""
+            is_date_break = row.employee != previous_employee or date_text != previous_date
             date_cell = date_text if row.employee != previous_employee or date_text != previous_date else ""
             employee_daily_rows.append(
                 {
@@ -1667,6 +1686,7 @@ class DssQtMainWindow(QMainWindow):
                     "ot": core.fmt_hours(row.ot),
                     "dt": core.fmt_hours(row.dt),
                     "total": core.fmt_hours(row.total),
+                    "__tags__": ("date_break",) if is_date_break else (),
                 }
             )
             previous_employee = row.employee
