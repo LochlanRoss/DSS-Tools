@@ -19,7 +19,7 @@ from openpyxl import Workbook
 
 import dss_hours_tracker as core
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, QPoint, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, QPoint, Qt, QTimer, QUrl, Signal, QItemSelectionModel
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QIcon, QKeySequence, QPalette
 from PySide6.QtWidgets import (
     QApplication,
@@ -282,6 +282,8 @@ class TableModel(QAbstractTableModel):
         key, _label = self.columns[index.column()]
         value = row.get(key, "")
         if role == Qt.DisplayRole:
+            if key == "suppressed":
+                return "\u2611" if bool(value) else "\u2610"
             return value
         tags = set(row.get("__tags__", ()))
         if role == Qt.BackgroundRole:
@@ -292,12 +294,16 @@ class TableModel(QAbstractTableModel):
             if "crew_total" in tags:
                 return QColor(self.theme.crew_total_background)
         if role == Qt.ForegroundRole:
+            if "suppressed" in tags:
+                return QColor("#7a8699")
             if "missing_email" in tags:
                 return QColor(core.MISSING_EMAIL_ROW_FOREGROUND)
             if "alert" in tags:
                 return QColor(self.theme.alert_row_foreground)
             if "crew_total" in tags:
                 return QColor(self.theme.crew_total_foreground)
+        if role == Qt.TextAlignmentRole and key == "suppressed":
+            return int(Qt.AlignHCenter | Qt.AlignVCenter)
         if role == Qt.TextAlignmentRole and key in TABLE_NUMERIC_COLUMNS:
             return int(Qt.AlignRight | Qt.AlignVCenter)
         if role == Qt.UserRole:
@@ -348,6 +354,7 @@ class RowAccentDelegate(QStyledItemDelegate):
 
 class DataTablePage(QWidget):
     layoutChanged = Signal(str, list, dict, str, bool)
+    selectionChanged = Signal(str, list)
 
     def __init__(
         self,
@@ -360,6 +367,7 @@ class DataTablePage(QWidget):
         self.spec = spec
         self.config_path = config_path
         self._row_activate_callback = row_activate_callback
+        self._context_menu_callback: Callable[[list[dict[str, Any]], QPoint], None] | None = None
         self.columns = list(spec.columns)
         self.model = TableModel(self.columns, theme=theme)
         self.view = QTableView(self)
@@ -398,6 +406,9 @@ class DataTablePage(QWidget):
         self.view.horizontalHeader().sectionMoved.connect(lambda *_: self._emit_layout_change())
         self.view.horizontalHeader().sectionResized.connect(lambda *_: self._emit_layout_change())
         self.view.doubleClicked.connect(self._on_double_clicked)
+        self.view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.view.customContextMenuRequested.connect(self._show_context_menu)
+        self.view.selectionModel().selectionChanged.connect(lambda *_: self._emit_selection_change())
 
         copy_action = QAction(self)
         copy_action.setShortcut(QKeySequence.Copy)
@@ -414,6 +425,9 @@ class DataTablePage(QWidget):
         self.top_bar.insertWidget(0, widget)
         return widget
 
+    def set_context_menu_callback(self, callback: Callable[[list[dict[str, Any]], QPoint], None] | None) -> None:
+        self._context_menu_callback = callback
+
     def set_theme(self, theme: core.UiThemeColors) -> None:
         self.model.theme = theme
         self.model.layoutChanged.emit()
@@ -421,6 +435,7 @@ class DataTablePage(QWidget):
     def set_rows(self, rows: list[dict[str, Any]]) -> None:
         self._current_rows = rows
         self.model.set_rows(rows)
+        self._emit_selection_change()
 
     def selected_rows(self) -> list[dict[str, Any]]:
         indexes = self.view.selectionModel().selectedIndexes()
@@ -530,6 +545,9 @@ class DataTablePage(QWidget):
             descending = self.view.horizontalHeader().sortIndicatorOrder() == Qt.DescendingOrder
         self.layoutChanged.emit(self.spec.table_id, self.visible_columns(), widths, sort_column, descending)
 
+    def _emit_selection_change(self) -> None:
+        self.selectionChanged.emit(self.spec.table_id, self.selected_rows())
+
     def _on_double_clicked(self, index: QModelIndex) -> None:
         if not index.isValid():
             return
@@ -537,6 +555,18 @@ class DataTablePage(QWidget):
         column_key = self.columns[index.column()][0]
         if self._row_activate_callback is not None:
             self._row_activate_callback(row, column_key)
+
+    def _show_context_menu(self, position: QPoint) -> None:
+        if self._context_menu_callback is None:
+            return
+        index = self.view.indexAt(position)
+        if index.isValid():
+            selected_rows = {selected.row() for selected in self.view.selectionModel().selectedIndexes()}
+            if index.row() not in selected_rows:
+                self.view.selectionModel().clearSelection()
+                self.view.selectionModel().select(index, QItemSelectionModel.Select | QItemSelectionModel.Rows)
+                self.view.setCurrentIndex(index)
+        self._context_menu_callback(self.selected_rows(), self.view.viewport().mapToGlobal(position))
 
 
 class CheckListPopup(QFrame):
@@ -1512,6 +1542,10 @@ class DssQtMainWindow(QMainWindow):
         self.employee_name_merges = core.load_employee_name_merges(self.config_path)
         self.subject_template, self.body_template = core.load_email_templates(self.config_path)
         self.ignored_name_typos = core.load_ignored_name_typos(self.config_path)
+        self.suppressed_error_findings = core.load_named_suppressions(self.config_path, "suppressed_error_findings")
+        self.suppressed_parse_warnings = core.load_named_suppressions(self.config_path, "suppressed_parse_warnings")
+        self.suppressed_workbook_health = core.load_named_suppressions(self.config_path, "suppressed_workbook_health")
+        self._cached_name_typo_warnings: list[core.NameTypoWarning] = []
         self.current_data: core.TrackerData | None = None
         self.source_paths: list[Path] = list(initial_source or [])
         self.load_worker: LoadWorker | None = None
@@ -1526,6 +1560,12 @@ class DssQtMainWindow(QMainWindow):
         self._outlook_last_partial_refresh = 0.0
         self._employee_summary_week_start: date | None = None
         self._employee_summary_week_end: date | None = None
+        self._show_suppressed_report_rows: dict[str, bool] = {
+            "error_report": False,
+            "parse_warnings": False,
+            "workbook_health": False,
+            "name_typos": False,
+        }
         self._cancel_shortcut_action: QAction | None = None
         self._quickload_session = False
         self._update_check_in_progress = False
@@ -1634,16 +1674,17 @@ class DssQtMainWindow(QMainWindow):
             (self.summary_tabs, TableSpec("employee_daily_pf", "Summary by Employee", (("employee", "Employee"), ("week_number", "Week #"), ("date", "Date"), ("pf_number", "PF#"), ("st", "ST"), ("ot", "OT"), ("dt", "DT"), ("total", "Total")))),
             (self.summary_tabs, TableSpec("combined_daily", "Combined Summary Daily", (("date", "Date"), ("employee", "Employee"), ("st", "ST"), ("ot", "OT"), ("dt", "DT"), ("total", "Total"), ("expanded", "Expanded Hours")))),
             (self.summary_tabs, TableSpec("combined_weekly", "Combined Summary Weekly", (("week_start", "Week Start"), ("week_end", "Week End"), ("employee", "Employee"), ("st", "ST"), ("ot", "OT"), ("dt", "DT"), ("total", "Total"), ("expanded", "Expanded Hours")))),
-            (self.report_tabs, TableSpec("error_report", "Error Report", (("employee", "Employee"), ("week_start", "Week Start"), ("week_end", "Week End"), ("hour_type", "Rule"), ("limit", "Limit"), ("actual_total", "Actual"), ("delta", "Delta"), ("trigger_date", "Trigger Date"), ("source_files", "Source Files"), ("reason", "Reason"), ("breakdown", "Breakdown")))),
-            (self.report_tabs, TableSpec("parse_warnings", "Sheet Parse Warnings", (("source_file", "Source File"), ("sheet", "Sheet"), ("date", "Date"), ("issue", "Issue"), ("details", "Details")))),
-            (self.report_tabs, TableSpec("workbook_health", "Workbook Health", (("source_file", "Source File"), ("status", "Status"), ("details", "Details")))),
+            (self.report_tabs, TableSpec("error_report", "Error Report", (("suppressed", "Suppressed"), ("employee", "Employee"), ("week_start", "Week Start"), ("week_end", "Week End"), ("hour_type", "Rule"), ("limit", "Limit"), ("actual_total", "Actual"), ("delta", "Delta"), ("trigger_date", "Trigger Date"), ("source_files", "Source Files"), ("reason", "Reason"), ("breakdown", "Breakdown")))),
+            (self.report_tabs, TableSpec("parse_warnings", "Sheet Parse Warnings", (("suppressed", "Suppressed"), ("source_file", "Source File"), ("sheet", "Sheet"), ("date", "Date"), ("issue", "Issue"), ("details", "Details")))),
+            (self.report_tabs, TableSpec("workbook_health", "Workbook Health", (("suppressed", "Suppressed"), ("source_file", "Source File"), ("status", "Status"), ("details", "Details")))),
+            (self.report_tabs, TableSpec("name_typos", "Name Typos", (("suppressed", "Suppressed"), ("employee", "Employee"), ("similar_employee", "Suggested Match"), ("similarity", "Similarity"), ("locations", "Locations")))),
             (self.report_tabs, TableSpec("audit_data_trail", "Audit Data Trail", (("source_file", "Source File"), ("pf_number", "PF#"), ("date", "Date"), ("sheet", "Sheet"), ("employee", "Employee"), ("st", "ST"), ("ot", "OT"), ("dt", "DT"), ("total", "Total"), ("expanded", "Expanded Hours"), ("source_ranges", "Source Ranges"), ("audit", "Audit")))),
         ]:
             page = DataTablePage(spec, theme, self.config_path, row_activate_callback=self._handle_table_row_activated)
             page.layoutChanged.connect(self._save_table_layout)
             parent.addTab(page, spec.title)
             self.pages[spec.table_id] = page
-        self.pages["error_report"].add_toolbar_button("Check Name Typos", self.check_name_typos_manually)
+        self._build_report_page_toolbars()
         self._build_employee_summary_toolbar()
 
         self.email_drafts_page = EmailDraftsPage(theme, self.config_path)
@@ -1719,6 +1760,89 @@ class DssQtMainWindow(QMainWindow):
         self.employee_summary_week_end_combo.currentIndexChanged.connect(lambda _index: self.refresh_views())
         self.employee_summary_this_week_button.clicked.connect(self._select_employee_summary_latest_week)
         self.employee_summary_last_week_button.clicked.connect(self._select_employee_summary_previous_week)
+
+    def _build_report_page_toolbars(self) -> None:
+        self._report_show_suppressed_boxes: dict[str, QCheckBox] = {}
+        self._report_action_buttons: dict[str, dict[str, QPushButton]] = {}
+        self._report_selection_rows: dict[str, list[dict[str, Any]]] = {}
+
+        for table_id in ("error_report", "parse_warnings", "workbook_health", "name_typos"):
+            page = self.pages[table_id]
+            show_box = QCheckBox("Show Suppressed")
+            show_box.setChecked(self._show_suppressed_report_rows.get(table_id, False))
+            show_box.toggled.connect(lambda checked, page_id=table_id: self._toggle_show_suppressed(page_id, checked))
+            page.add_toolbar_widget(show_box)
+            self._report_show_suppressed_boxes[table_id] = show_box
+            page.selectionChanged.connect(self._report_page_selection_changed)
+            page.set_context_menu_callback(lambda rows, global_pos, page_id=table_id: self._open_report_context_menu(page_id, rows, global_pos))
+
+        self._report_action_buttons["error_report"] = {
+            "check_typos": self.pages["error_report"].add_toolbar_button("Check Name Typos", self.check_name_typos_manually),
+            "suppress": self.pages["error_report"].add_toolbar_button("Suppress Selected", lambda: self._set_selected_rows_suppressed("error_report", True)),
+            "unsuppress": self.pages["error_report"].add_toolbar_button("Unsuppress Selected", lambda: self._set_selected_rows_suppressed("error_report", False)),
+        }
+        self._report_action_buttons["parse_warnings"] = {
+            "suppress": self.pages["parse_warnings"].add_toolbar_button("Suppress Selected", lambda: self._set_selected_rows_suppressed("parse_warnings", True)),
+            "unsuppress": self.pages["parse_warnings"].add_toolbar_button("Unsuppress Selected", lambda: self._set_selected_rows_suppressed("parse_warnings", False)),
+        }
+        self._report_action_buttons["workbook_health"] = {
+            "suppress": self.pages["workbook_health"].add_toolbar_button("Suppress Selected", lambda: self._set_selected_rows_suppressed("workbook_health", True)),
+            "unsuppress": self.pages["workbook_health"].add_toolbar_button("Unsuppress Selected", lambda: self._set_selected_rows_suppressed("workbook_health", False)),
+        }
+        self._report_action_buttons["name_typos"] = {
+            "refresh": self.pages["name_typos"].add_toolbar_button("Refresh Name Typos", self.check_name_typos_manually),
+            "merge": self.pages["name_typos"].add_toolbar_button("Merge Selected", self._merge_selected_name_typos),
+            "suppress": self.pages["name_typos"].add_toolbar_button("Suppress Selected", lambda: self._set_selected_rows_suppressed("name_typos", True)),
+            "unsuppress": self.pages["name_typos"].add_toolbar_button("Unsuppress Selected", lambda: self._set_selected_rows_suppressed("name_typos", False)),
+        }
+        self._update_report_action_states()
+
+    def _toggle_show_suppressed(self, table_id: str, checked: bool) -> None:
+        self._show_suppressed_report_rows[table_id] = checked
+        self.refresh_views()
+
+    def _report_page_selection_changed(self, table_id: str, rows: list[dict[str, Any]]) -> None:
+        self._report_selection_rows[table_id] = rows
+        self._update_report_action_states()
+
+    def _update_report_action_states(self) -> None:
+        for table_id, buttons in self._report_action_buttons.items():
+            rows = self._report_selection_rows.get(table_id, [])
+            has_rows = bool(rows)
+            has_suppressed = any(bool(row.get("suppressed")) for row in rows)
+            has_unsuppressed = any(not bool(row.get("suppressed")) for row in rows)
+            if "suppress" in buttons:
+                buttons["suppress"].setEnabled(has_unsuppressed)
+            if "unsuppress" in buttons:
+                buttons["unsuppress"].setEnabled(has_suppressed)
+            if "merge" in buttons:
+                buttons["merge"].setEnabled(bool(rows))
+
+    def _open_report_context_menu(self, table_id: str, rows: list[dict[str, Any]], global_pos: QPoint) -> None:
+        if not rows:
+            return
+        menu = QMenu(self)
+        has_suppressed = any(bool(row.get("suppressed")) for row in rows)
+        has_unsuppressed = any(not bool(row.get("suppressed")) for row in rows)
+        suppress_action = None
+        unsuppress_action = None
+        merge_action = None
+        if table_id in {"error_report", "parse_warnings", "workbook_health", "name_typos"}:
+            suppress_action = menu.addAction("Suppress Selected")
+            suppress_action.setEnabled(has_unsuppressed)
+            unsuppress_action = menu.addAction("Unsuppress Selected")
+            unsuppress_action.setEnabled(has_suppressed)
+        if table_id == "name_typos":
+            menu.addSeparator()
+            merge_action = menu.addAction("Merge Selected")
+            merge_action.setEnabled(bool(rows))
+        chosen = menu.exec(global_pos)
+        if chosen == suppress_action:
+            self._set_selected_rows_suppressed(table_id, True)
+        elif chosen == unsuppress_action:
+            self._set_selected_rows_suppressed(table_id, False)
+        elif chosen == merge_action:
+            self._merge_selected_name_typos()
 
     def _bind_shortcuts(self) -> None:
         if self._cancel_shortcut_action is not None:
@@ -1921,13 +2045,15 @@ class DssQtMainWindow(QMainWindow):
             app.setPalette(_build_forced_qt_palette(theme))
         self.setStyleSheet(_build_qt_chrome_stylesheet(theme))
 
-    def _sync_reports_alert_chrome(self, has_errors: bool, has_parse_warnings: bool) -> None:
+    def _sync_reports_alert_chrome(self, has_errors: bool, has_parse_warnings: bool, has_name_typos: bool = False) -> None:
         error_index = self.report_tabs.indexOf(self.pages["error_report"])
         parse_index = self.report_tabs.indexOf(self.pages["parse_warnings"])
+        typo_index = self.report_tabs.indexOf(self.pages["name_typos"])
         reports_index = self.group_tabs.indexOf(self.report_tabs)
         self.report_tabs.setTabText(error_index, "Error Report (!)" if has_errors else "Error Report")
         self.report_tabs.setTabText(parse_index, "Sheet Parse Warnings (!)" if has_parse_warnings else "Sheet Parse Warnings")
-        self.group_tabs.setTabText(reports_index, "Reports (!)" if (has_errors or has_parse_warnings) else "Reports")
+        self.report_tabs.setTabText(typo_index, "Name Typos (!)" if has_name_typos else "Name Typos")
+        self.group_tabs.setTabText(reports_index, "Reports (!)" if (has_errors or has_parse_warnings or has_name_typos) else "Reports")
 
     def _active_profile(self) -> core.FormattingProfile:
         return self.profiles.get(self.current_profile_name, next(iter(self.profiles.values())))
@@ -1943,6 +2069,107 @@ class DssQtMainWindow(QMainWindow):
                 self._active_profile(),
             ),
         ]
+
+    def _set_cached_name_typo_warnings(self, warnings: list[core.NameTypoWarning]) -> None:
+        deduped: list[core.NameTypoWarning] = []
+        seen_keys: set[str] = set()
+        for warning in warnings:
+            key = core.typo_warning_key(warning.employee, warning.similar_employee)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            deduped.append(warning)
+        self._cached_name_typo_warnings = deduped
+
+    def _current_name_typo_warnings(self) -> list[core.NameTypoWarning]:
+        allowed_employees = self._selected_employee_values()
+        return [
+            warning
+            for warning in self._cached_name_typo_warnings
+            if self._display_employee_name(warning.employee) in allowed_employees
+            if self._display_employee_name(warning.employee).casefold() != self._display_employee_name(warning.similar_employee).casefold()
+        ]
+
+    def _suppression_set_for_table(self, table_id: str) -> set[str]:
+        if table_id == "error_report":
+            return self.suppressed_error_findings
+        if table_id == "parse_warnings":
+            return self.suppressed_parse_warnings
+        if table_id == "workbook_health":
+            return self.suppressed_workbook_health
+        if table_id == "name_typos":
+            return self.ignored_name_typos
+        return set()
+
+    def _persist_suppression_set(self, table_id: str) -> None:
+        if table_id == "error_report":
+            core.save_named_suppressions(self.config_path, "suppressed_error_findings", self.suppressed_error_findings)
+        elif table_id == "parse_warnings":
+            core.save_named_suppressions(self.config_path, "suppressed_parse_warnings", self.suppressed_parse_warnings)
+        elif table_id == "workbook_health":
+            core.save_named_suppressions(self.config_path, "suppressed_workbook_health", self.suppressed_workbook_health)
+        elif table_id == "name_typos":
+            self._persist_ignored_name_typos()
+
+    def _suppression_key_for_row(self, table_id: str, row: dict[str, Any]) -> str:
+        key = str(row.get("__suppression_key__", "")).strip()
+        if key:
+            return key
+        if table_id == "name_typos":
+            return core.typo_warning_key(str(row.get("employee", "")), str(row.get("similar_employee", "")))
+        return ""
+
+    def _is_row_suppressed(self, table_id: str, suppression_key: str) -> bool:
+        return bool(suppression_key) and suppression_key in self._suppression_set_for_table(table_id)
+
+    def _set_selected_rows_suppressed(self, table_id: str, suppressed: bool) -> None:
+        rows = self._report_selection_rows.get(table_id, [])
+        if not rows:
+            return
+        suppressions = self._suppression_set_for_table(table_id)
+        changed = False
+        for row in rows:
+            suppression_key = self._suppression_key_for_row(table_id, row)
+            if not suppression_key:
+                continue
+            if suppressed:
+                if suppression_key not in suppressions:
+                    suppressions.add(suppression_key)
+                    changed = True
+            elif suppression_key in suppressions:
+                suppressions.discard(suppression_key)
+                changed = True
+        if not changed:
+            return
+        self._persist_suppression_set(table_id)
+        self.refresh_views()
+
+    def _merge_selected_name_typos(self) -> None:
+        rows = self._report_selection_rows.get("name_typos", [])
+        if not rows:
+            return
+        for row in rows:
+            source_name = str(row.get("employee", "")).strip()
+            target_name = str(row.get("similar_employee", "")).strip()
+            if source_name and target_name:
+                self._merge_employee_alias(source_name, target_name)
+        self.refresh_views()
+
+    def _build_name_typo_warnings(self, employee_names: list[str], daily_records: list[core.DailyRecord], address_book_names: list[str] | None = None) -> list[core.NameTypoWarning]:
+        names_to_check = [
+            employee
+            for employee in employee_names
+            if not self.employee_emails.get(employee, "").strip() and employee not in self.missing_email_suppressions
+        ]
+        warnings: list[core.NameTypoWarning] = []
+        if names_to_check:
+            warnings.extend(core.find_potential_name_typos(names_to_check, employee_names, daily_records))
+            if address_book_names:
+                warnings.extend(core.find_address_book_name_typos(names_to_check, address_book_names, daily_records))
+        else:
+            warnings.extend(core.find_similar_employee_name_pairs(employee_names, daily_records))
+        warnings.extend(core.find_outlook_display_name_typos(employee_names, self.employee_outlook_display_names, daily_records))
+        return warnings
 
     def _daily_records_filtered(self) -> list[core.DailyRecord]:
         if not self.current_data:
@@ -1970,7 +2197,7 @@ class DssQtMainWindow(QMainWindow):
                 page.set_rows([])
             self.email_drafts_page.preview_table.set_rows([])
             self.email_drafts_page.set_weeks([])
-            self._sync_reports_alert_chrome(False, False)
+            self._sync_reports_alert_chrome(False, False, False)
             return
 
         filtered_records = self._daily_records_filtered()
@@ -1990,6 +2217,7 @@ class DssQtMainWindow(QMainWindow):
         combined_weekly = core.aggregate_weekly(filtered_records, combine_sources=True)
         week_totals = core.build_week_totals(combined_weekly)
         findings = core.build_error_findings(filtered_records, profile)
+        name_typo_warnings = self._current_name_typo_warnings()
         week_starts = sorted({record.week_start for record in combined_weekly}, reverse=True)
 
         self.email_drafts_page.set_weeks(week_starts)
@@ -2110,48 +2338,100 @@ class DssQtMainWindow(QMainWindow):
             }
             for row in sorted(week_totals, key=lambda item: item.week_start, reverse=True)
         ])
-        self.pages["error_report"].set_rows([
-            {
-                "employee": item.employee,
-                "week_start": item.week_start.isoformat(),
-                "week_end": item.week_end.isoformat(),
-                "hour_type": item.hour_type,
-                "limit": core.fmt_hours(item.threshold),
-                "actual_total": core.fmt_hours(item.actual_total),
-                "delta": core.fmt_hours(item.delta),
-                "trigger_date": item.trigger_date.isoformat(),
-                "source_files": item.source_files,
-                "reason": item.reason,
-                "breakdown": item.breakdown,
-                "__tags__": ("alert",),
-                "__finding__": item,
-            }
-            for item in sorted(findings, key=lambda finding: (finding.week_start, finding.employee, finding.hour_type), reverse=True)
-        ])
+        error_rows: list[dict[str, Any]] = []
+        for item in sorted(findings, key=lambda finding: (finding.week_start, finding.employee, finding.hour_type), reverse=True):
+            suppression_key = core.error_finding_suppression_key(item)
+            suppressed = self._is_row_suppressed("error_report", suppression_key)
+            if suppressed and not self._show_suppressed_report_rows["error_report"]:
+                continue
+            tags = ["alert"]
+            if suppressed:
+                tags.append("suppressed")
+            error_rows.append(
+                {
+                    "suppressed": suppressed,
+                    "employee": item.employee,
+                    "week_start": item.week_start.isoformat(),
+                    "week_end": item.week_end.isoformat(),
+                    "hour_type": item.hour_type,
+                    "limit": core.fmt_hours(item.threshold),
+                    "actual_total": core.fmt_hours(item.actual_total),
+                    "delta": core.fmt_hours(item.delta),
+                    "trigger_date": item.trigger_date.isoformat(),
+                    "source_files": item.source_files,
+                    "reason": item.reason,
+                    "breakdown": item.breakdown,
+                    "__tags__": tuple(tags),
+                    "__finding__": item,
+                    "__suppression_key__": suppression_key,
+                }
+            )
+        self.pages["error_report"].set_rows(error_rows)
         filtered_source_files = {record.source_file for record in filtered_records}
         active_parse_warnings = self._current_parse_warnings()
-        parse_warning_rows = [
-            {
-                "source_file": warning.source_file,
-                "sheet": warning.source_sheet,
-                "date": warning.work_date,
-                "issue": warning.issue,
-                "details": warning.details,
-                "__warning__": warning,
-            }
-            for warning in active_parse_warnings
-            if warning.source_file in filtered_source_files
-        ]
+        parse_warning_rows: list[dict[str, Any]] = []
+        for warning in active_parse_warnings:
+            if warning.source_file not in filtered_source_files:
+                continue
+            suppression_key = core.sheet_parse_warning_suppression_key(warning)
+            suppressed = self._is_row_suppressed("parse_warnings", suppression_key)
+            if suppressed and not self._show_suppressed_report_rows["parse_warnings"]:
+                continue
+            tags = ("suppressed",) if suppressed else ()
+            parse_warning_rows.append(
+                {
+                    "suppressed": suppressed,
+                    "source_file": warning.source_file,
+                    "sheet": warning.source_sheet,
+                    "date": warning.work_date,
+                    "issue": warning.issue,
+                    "details": warning.details,
+                    "__warning__": warning,
+                    "__suppression_key__": suppression_key,
+                    "__tags__": tags,
+                }
+            )
         self.pages["parse_warnings"].set_rows(parse_warning_rows)
-        self.pages["workbook_health"].set_rows([
-            {
-                "source_file": item.source_file,
-                "status": item.status,
-                "details": item.details,
-            }
-            for item in self.current_data.workbook_health
-            if item.source_file in filtered_source_files
-        ])
+        workbook_health_rows: list[dict[str, Any]] = []
+        for item in self.current_data.workbook_health:
+            if item.source_file not in filtered_source_files:
+                continue
+            suppression_key = core.workbook_health_suppression_key(item)
+            suppressed = self._is_row_suppressed("workbook_health", suppression_key)
+            if suppressed and not self._show_suppressed_report_rows["workbook_health"]:
+                continue
+            tags = ("suppressed",) if suppressed else ()
+            workbook_health_rows.append(
+                {
+                    "suppressed": suppressed,
+                    "source_file": item.source_file,
+                    "status": item.status,
+                    "details": item.details,
+                    "__suppression_key__": suppression_key,
+                    "__tags__": tags,
+                }
+            )
+        self.pages["workbook_health"].set_rows(workbook_health_rows)
+        name_typo_rows: list[dict[str, Any]] = []
+        for warning in name_typo_warnings:
+            suppression_key = core.typo_warning_key(warning.employee, warning.similar_employee)
+            suppressed = self._is_row_suppressed("name_typos", suppression_key)
+            if suppressed and not self._show_suppressed_report_rows["name_typos"]:
+                continue
+            tags = ("suppressed",) if suppressed else ()
+            name_typo_rows.append(
+                {
+                    "suppressed": suppressed,
+                    "employee": warning.employee,
+                    "similar_employee": warning.similar_employee,
+                    "similarity": f"{warning.similarity * 100:.0f}%",
+                    "locations": "\n".join(warning.locations),
+                    "__warning__": warning,
+                    "__suppression_key__": suppression_key,
+                    "__tags__": tags,
+                }
+            )
+        self.pages["name_typos"].set_rows(name_typo_rows)
         self.pages["audit_data_trail"].set_rows([
             {
                 "source_file": record.source_file,
@@ -2172,7 +2452,19 @@ class DssQtMainWindow(QMainWindow):
         ])
         self._refresh_email_preview(filtered_records)
         self._refresh_filters()
-        self._sync_reports_alert_chrome(bool(findings), bool(parse_warning_rows))
+        unsuppressed_error_count = sum(1 for item in findings if not self._is_row_suppressed("error_report", core.error_finding_suppression_key(item)))
+        unsuppressed_parse_count = sum(
+            1
+            for warning in active_parse_warnings
+            if warning.source_file in filtered_source_files
+            and not self._is_row_suppressed("parse_warnings", core.sheet_parse_warning_suppression_key(warning))
+        )
+        unsuppressed_typo_count = sum(
+            1
+            for warning in name_typo_warnings
+            if not self._is_row_suppressed("name_typos", core.typo_warning_key(warning.employee, warning.similar_employee))
+        )
+        self._sync_reports_alert_chrome(bool(unsuppressed_error_count), bool(unsuppressed_parse_count), bool(unsuppressed_typo_count))
 
     def _refresh_email_preview(self, filtered_records: list[core.DailyRecord]) -> None:
         week_start = self.email_drafts_page.selected_week_start()
@@ -2435,6 +2727,7 @@ class DssQtMainWindow(QMainWindow):
         if token != self._active_load_token:
             return
         self.current_data = tracker_data
+        self._cached_name_typo_warnings = []
         self.status_label.setText(message)
         self._refresh_source_status_labels()
         self._refresh_filters()
@@ -2446,6 +2739,7 @@ class DssQtMainWindow(QMainWindow):
         if token != self._active_load_token:
             return
         self.current_data = tracker_data
+        self._cached_name_typo_warnings = []
         self.progress_bar.setValue(1000)
         self.percent_label.setText("100.0%")
         self.loading_label.setText("")
@@ -2501,6 +2795,9 @@ class DssQtMainWindow(QMainWindow):
         if isinstance(warning, core.SheetParseWarning):
             self._open_parse_warning_in_excel(warning)
             return
+        if isinstance(warning, core.NameTypoWarning):
+            self._open_name_typo_warning_in_excel(warning)
+            return
         record = row.get("__record__")
         if isinstance(record, core.DailyRecord):
             self._open_record_ranges_in_excel(record)
@@ -2535,6 +2832,36 @@ class DssQtMainWindow(QMainWindow):
             core.select_excel_workbook_ranges(source_path, warning.source_sheet, ranges)
         except Exception as exc:
             QMessageBox.critical(self, "Open Excel Range", str(exc))
+
+    def _open_name_typo_warning_in_excel(self, warning: core.NameTypoWarning) -> None:
+        if self.current_data is None:
+            return
+        target_record: core.DailyRecord | None = None
+        for location in warning.locations:
+            parts = [part.strip() for part in location.split("|")]
+            if len(parts) != 3:
+                continue
+            date_text, sheet_name, source_file = parts
+            for record in self.current_data.daily_records:
+                if (
+                    record.employee == warning.employee
+                    and record.work_date.isoformat() == date_text
+                    and record.source_sheet == sheet_name
+                    and record.source_file == source_file
+                ):
+                    target_record = record
+                    break
+            if target_record is not None:
+                break
+        if target_record is None:
+            for record in self.current_data.daily_records:
+                if record.employee == warning.employee:
+                    target_record = record
+                    break
+        if target_record is None:
+            QMessageBox.critical(self, "Open Excel Range", f"Could not find source rows for {warning.employee}.")
+            return
+        self._open_record_ranges_in_excel(target_record, prefer_name_only=True)
 
     def _open_error_finding_in_excel(self, finding: core.ErrorFinding) -> None:
         if self.current_data is None:
@@ -2675,22 +3002,23 @@ class DssQtMainWindow(QMainWindow):
         self.refresh_views()
         warnings: list[core.NameTypoWarning] = []
         if not self.app_settings.disable_name_typo_notifications:
-            unresolved = [employee for employee in self._managed_employee_names() if not self.employee_emails.get(employee, "").strip() and employee not in self.missing_email_suppressions]
-            warnings.extend(core.find_potential_name_typos(unresolved, self._managed_employee_names()))
-            warnings.extend(core.find_address_book_name_typos(unresolved, address_book_names))
-            warnings = [
-                warning
-                for warning in warnings
-                if core.typo_warning_key(warning.employee, warning.similar_employee) not in self.ignored_name_typos
-            ]
+            warnings = self._build_name_typo_warnings(self._managed_employee_names(), self.current_data.daily_records if self.current_data else [], address_book_names)
+        self._set_cached_name_typo_warnings(warnings)
+        self.refresh_views()
         missing_after = sum(
             1
             for employee in self._managed_employee_names()
             if not self.employee_emails.get(employee, "").strip() and employee not in self.missing_email_suppressions
         )
-        QMessageBox.information(self, "Outlook Email Sync", f"Matched emails: {updated}\nStill missing: {missing_after}")
-        if warnings and not self.app_settings.disable_name_typo_notifications:
-            self._show_typo_warning_dialog(warnings)
+        unsuppressed_warnings = [
+            warning
+            for warning in warnings
+            if core.typo_warning_key(warning.employee, warning.similar_employee) not in self.ignored_name_typos
+        ]
+        message = f"Matched emails: {updated}\nStill missing: {missing_after}"
+        if unsuppressed_warnings and not self.app_settings.disable_name_typo_notifications:
+            message += f"\nName typo warnings: {len(unsuppressed_warnings)} (see Reports > Name Typos)"
+        QMessageBox.information(self, "Outlook Email Sync", message)
 
     def _on_outlook_sync_failed(self, token: int, message: str) -> None:
         if token != self._active_outlook_token:
@@ -2810,6 +3138,10 @@ class DssQtMainWindow(QMainWindow):
         self.employee_name_merges = {}
         self.subject_template, self.body_template = core.load_email_templates(self.config_path)
         self.ignored_name_typos = set()
+        self.suppressed_error_findings = set()
+        self.suppressed_parse_warnings = set()
+        self.suppressed_workbook_health = set()
+        self._cached_name_typo_warnings = []
         self.status_label.setText("No DSS workbooks loaded")
         self.progress_bar.setValue(0)
         self.percent_label.setText("0.0%")
@@ -3016,172 +3348,32 @@ class DssQtMainWindow(QMainWindow):
             return
         employee_names = self._managed_employee_names()
         daily_records = self.current_data.daily_records
+        address_book_names: list[str] = []
         names_to_check = [
             employee
             for employee in employee_names
             if not self.employee_emails.get(employee, "").strip() and employee not in self.missing_email_suppressions
         ]
-        raw_warnings: list[core.NameTypoWarning] = []
-        address_book_names: list[str] = []
         if names_to_check:
             try:
                 _results, address_book_names = core.query_outlook_emails(names_to_check, scan_full_address_book=True)
             except Exception:
                 address_book_names = []
-        if names_to_check:
-            raw_warnings.extend(core.find_potential_name_typos(names_to_check, employee_names, daily_records))
-        else:
-            raw_warnings.extend(core.find_similar_employee_name_pairs(employee_names, daily_records))
-        if address_book_names:
-            raw_warnings.extend(core.find_address_book_name_typos(names_to_check, address_book_names, daily_records))
-        raw_warnings.extend(core.find_outlook_display_name_typos(employee_names, self.employee_outlook_display_names, daily_records))
-        deduped: list[core.NameTypoWarning] = []
-        seen_keys: set[str] = set()
-        for warning in raw_warnings:
-            key = core.typo_warning_key(warning.employee, warning.similar_employee)
-            if key in seen_keys:
-                continue
-            seen_keys.add(key)
-            deduped.append(warning)
-        warnings = [
+        warnings = self._build_name_typo_warnings(employee_names, daily_records, address_book_names)
+        self._set_cached_name_typo_warnings(warnings)
+        unsuppressed = [
             warning
-            for warning in deduped
+            for warning in warnings
             if core.typo_warning_key(warning.employee, warning.similar_employee) not in self.ignored_name_typos
         ]
+        self.refresh_views()
         if not warnings:
             QMessageBox.information(self, "Check Name Typos", "No likely name typos were found.")
             return
-        self._show_typo_warning_dialog(warnings)
-
-    def _show_typo_warning_dialog(self, typo_warnings: list[core.NameTypoWarning]) -> None:
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Potential Name Typos")
-        dialog.resize(780, 420)
-        layout = QVBoxLayout(dialog)
-        intro = QLabel(
-            "Possible name typo(s): similar names on the DSS roster, or a roster name that does not match the Outlook address book display name (after Sync Outlook Emails). Select entries, check entries, suppress them, or merge the typo into the correct employee. Notifications can also be disabled in Settings > Configuration."
-        )
-        intro.setWordWrap(True)
-        layout.addWidget(intro)
-        content = QHBoxLayout()
-        list_widget = QListWidget()
-        list_widget.setSelectionMode(QListWidget.ExtendedSelection)
-        details = QTextEdit()
-        details.setReadOnly(True)
-        content.addWidget(list_widget, 2)
-        content.addWidget(details, 3)
-        layout.addLayout(content, 1)
-
-        for warning in typo_warnings:
-            item = QListWidgetItem(f"{warning.employee} -> {warning.similar_employee} ({warning.similarity * 100:.0f}% similar)")
-            item.setData(Qt.UserRole, warning)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Unchecked)
-            list_widget.addItem(item)
-
-        def refresh_details() -> None:
-            item = list_widget.currentItem()
-            if item is None:
-                details.clear()
-                return
-            warning = item.data(Qt.UserRole)
-            if not isinstance(warning, core.NameTypoWarning):
-                details.clear()
-                return
-            lines = [
-                f"{warning.employee} may match {warning.similar_employee}",
-                f"Similarity: {warning.similarity * 100:.0f}%",
-                "",
-                "Locations:",
-                *(warning.locations or ["(No locations found)"]),
-            ]
-            details.setPlainText("\n".join(lines))
-
-        list_widget.currentItemChanged.connect(lambda _current, _previous: refresh_details())
-        if list_widget.count():
-            list_widget.setCurrentRow(0)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Close)
-        suppress_selected_button = QPushButton("Suppress Selected")
-        suppress_checked_button = QPushButton("Suppress Checked")
-        merge_button = QPushButton("Merge Selected")
-        buttons.addButton(suppress_selected_button, QDialogButtonBox.ActionRole)
-        buttons.addButton(suppress_checked_button, QDialogButtonBox.ActionRole)
-        buttons.addButton(merge_button, QDialogButtonBox.ActionRole)
-
-        def suppress_items(items: list[QListWidgetItem]) -> None:
-            if not items:
-                return False
-            for item in items:
-                warning = item.data(Qt.UserRole)
-                if isinstance(warning, core.NameTypoWarning):
-                    self.ignored_name_typos.add(core.typo_warning_key(warning.employee, warning.similar_employee))
-            self._persist_ignored_name_typos()
-            return True
-
-        def suppress_selected() -> None:
-            if suppress_items(list_widget.selectedItems()):
-                dialog.accept()
-
-        def suppress_checked() -> None:
-            checked_items = [
-                list_widget.item(row)
-                for row in range(list_widget.count())
-                if list_widget.item(row).checkState() == Qt.Checked
-            ]
-            if suppress_items(checked_items):
-                dialog.accept()
-
-        def merge_selected() -> None:
-            item = list_widget.currentItem()
-            if item is None:
-                return
-            warning = item.data(Qt.UserRole)
-            if not isinstance(warning, core.NameTypoWarning):
-                return
-            choices = sorted({warning.similar_employee, *self._managed_employee_names()}, key=str.casefold)
-            if warning.employee in choices:
-                choices = [choice for choice in choices if choice.casefold() != warning.employee.casefold()]
-            if not choices:
-                return
-            target_name, ok = QInputDialog.getItem(
-                dialog,
-                "Merge Employee Name",
-                f"Merge '{warning.employee}' into:",
-                choices,
-                current=choices.index(warning.similar_employee) if warning.similar_employee in choices else 0,
-                editable=False,
-            )
-            if not ok or not str(target_name).strip():
-                return
-            self._merge_employee_alias(warning.employee, str(target_name))
-            dialog.accept()
-
-        def open_context_menu(position: QPoint) -> None:
-            item = list_widget.itemAt(position)
-            if item is None:
-                return
-            menu = QMenu(list_widget)
-            suppress_selected_action = menu.addAction("Suppress Selected")
-            suppress_checked_action = menu.addAction("Suppress Checked")
-            merge_action = menu.addAction("Merge Selected")
-            chosen = menu.exec(list_widget.mapToGlobal(position))
-            if chosen == suppress_selected_action:
-                suppress_selected()
-            elif chosen == suppress_checked_action:
-                suppress_checked()
-            elif chosen == merge_action:
-                merge_selected()
-
-        list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
-        list_widget.customContextMenuRequested.connect(open_context_menu)
-        suppress_selected_button.clicked.connect(suppress_selected)
-        suppress_checked_button.clicked.connect(suppress_checked)
-        merge_button.clicked.connect(merge_selected)
-        buttons.rejected.connect(dialog.reject)
-        buttons.accepted.connect(dialog.accept)
-        layout.addWidget(buttons)
-        dialog.exec()
+        self.group_tabs.setCurrentWidget(self.report_tabs)
+        self.report_tabs.setCurrentWidget(self.pages["name_typos"])
+        if not unsuppressed:
+            QMessageBox.information(self, "Check Name Typos", "All current name typo warnings are already suppressed. Enable Show Suppressed on the Name Typos page to review them.")
 
     def show_app_data_folder(self) -> None:
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.app_root)))

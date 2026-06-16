@@ -855,6 +855,48 @@ class WorkbookHealthItem:
     details: str
 
 
+def error_finding_suppression_key(finding: ErrorFinding) -> str:
+    return json.dumps(
+        {
+            "employee": finding.employee,
+            "week_start": finding.week_start.isoformat(),
+            "week_end": finding.week_end.isoformat(),
+            "hour_type": finding.hour_type,
+            "trigger_date": finding.trigger_date.isoformat(),
+            "source_files": finding.source_files,
+            "reason": finding.reason,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def sheet_parse_warning_suppression_key(warning: SheetParseWarning) -> str:
+    return json.dumps(
+        {
+            "source_file": warning.source_file,
+            "sheet": warning.source_sheet,
+            "date": warning.work_date,
+            "issue": warning.issue,
+            "details": warning.details,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def workbook_health_suppression_key(item: WorkbookHealthItem) -> str:
+    return json.dumps(
+        {
+            "source_file": item.source_file,
+            "status": item.status,
+            "details": item.details,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
 def _app_root_primary_and_legacy(base_dir: Path) -> Path:
     primary = base_dir / APP_DIRNAME
     legacy = base_dir / LEGACY_APP_DIRNAME
@@ -1512,6 +1554,17 @@ def load_missing_email_suppressions(config_path: Path) -> set[str]:
 def save_missing_email_suppressions(config_path: Path, suppressed_names: set[str]) -> None:
     payload = read_config_payload(config_path)
     payload["missing_email_suppressions"] = _serialize_suppression_entries(suppressed_names)
+    config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def load_named_suppressions(config_path: Path, payload_key: str) -> set[str]:
+    payload = read_config_payload(config_path)
+    return _load_suppression_values(payload.get(payload_key, []))
+
+
+def save_named_suppressions(config_path: Path, payload_key: str, values: set[str]) -> None:
+    payload = read_config_payload(config_path)
+    payload[payload_key] = _serialize_suppression_entries(values)
     config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
