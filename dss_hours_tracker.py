@@ -707,6 +707,29 @@ class FilterSelection:
 class UiThemeColors:
     """Semantic UI colours (hex #RRGGBB) for tables, tooltips, and main chrome."""
 
+    window_background: str = "#e9eef5"
+    panel_background: str = "#f7fafc"
+    content_chrome_background: str = "#ffffff"
+    control_background: str = "#f8fafc"
+    control_foreground: str = "#0f172a"
+    control_border: str = "#b8c4d4"
+    control_hover_background: str = "#eef4fb"
+    control_pressed_background: str = "#dde7f2"
+    control_disabled_background: str = "#eef2f7"
+    control_disabled_foreground: str = "#8a97aa"
+    button_primary_background: str = "#245f99"
+    button_primary_foreground: str = "#ffffff"
+    button_danger_background: str = "#b44949"
+    button_danger_foreground: str = "#ffffff"
+    tab_inactive_background: str = "#e4ebf3"
+    tab_active_background: str = "#ffffff"
+    tab_inactive_foreground: str = "#475569"
+    header_background: str = "#dbe4ee"
+    header_foreground: str = "#0f172a"
+    selection_background: str = "#2f6fb0"
+    selection_foreground: str = "#ffffff"
+    date_divider: str = "#8b98a9"
+    employee_divider: str = "#5f6f84"
     alert_row_background: str = "#fde2e7"
     alert_row_foreground: str = "#9f1239"
     crew_total_background: str = "#e0f2f1"
@@ -716,21 +739,42 @@ class UiThemeColors:
     reports_outline_background: str = "#fbcfe8"
     reports_outline_foreground: str = "#be123c"
     table_background: str = "#f4f4f5"
-    content_chrome_background: str = "#ffffff"
 
 
 DEFAULT_UI_THEME = UiThemeColors()
 
 # (human label, UiThemeColors attribute name) for Configuration → Appearance.
 UI_THEME_CONFIG_FIELDS: tuple[tuple[str, str], ...] = (
-    ("Alert table row — background", "alert_row_background"),
-    ("Alert table row — text", "alert_row_foreground"),
-    ("Crew total row — background", "crew_total_background"),
-    ("Crew total row — text", "crew_total_foreground"),
-    ("Tooltip — background", "tooltip_background"),
-    ("Tooltip — text", "tooltip_foreground"),
-    ("Main content area — background", "content_chrome_background"),
-    ("Table — cell background", "table_background"),
+    ("App window - background", "window_background"),
+    ("Panel/section - background", "panel_background"),
+    ("Main content area - background", "content_chrome_background"),
+    ("Control/input - background", "control_background"),
+    ("Control/input - text", "control_foreground"),
+    ("Control/input - border", "control_border"),
+    ("Control/input - hover background", "control_hover_background"),
+    ("Control/input - pressed background", "control_pressed_background"),
+    ("Control/input - disabled background", "control_disabled_background"),
+    ("Control/input - disabled text", "control_disabled_foreground"),
+    ("Primary button - background", "button_primary_background"),
+    ("Primary button - text", "button_primary_foreground"),
+    ("Danger button - background", "button_danger_background"),
+    ("Danger button - text", "button_danger_foreground"),
+    ("Tab - inactive background", "tab_inactive_background"),
+    ("Tab - active background", "tab_active_background"),
+    ("Tab - inactive text", "tab_inactive_foreground"),
+    ("Table header - background", "header_background"),
+    ("Table header - text", "header_foreground"),
+    ("Selection - background", "selection_background"),
+    ("Selection - text", "selection_foreground"),
+    ("Employee divider - colour", "employee_divider"),
+    ("Date divider - colour", "date_divider"),
+    ("Alert table row - background", "alert_row_background"),
+    ("Alert table row - text", "alert_row_foreground"),
+    ("Crew total row - background", "crew_total_background"),
+    ("Crew total row - text", "crew_total_foreground"),
+    ("Tooltip - background", "tooltip_background"),
+    ("Tooltip - text", "tooltip_foreground"),
+    ("Table - cell background", "table_background"),
 )
 
 DSS_TABLE_TREEVIEW_STYLE = "DssTable.Treeview"
@@ -779,9 +823,9 @@ def configure_dss_table_treeview_style(master: tk.Misc, theme: UiThemeColors) ->
     """Shared Treeview style for all DataTable instances."""
     style = ttk.Style(master)
     bg = theme.table_background
-    heading_bg = lighten_hex_color(bg, -18)
-    heading_fg = "#18181b"
-    cell_fg = "#18181b"
+    heading_bg = theme.header_background
+    heading_fg = theme.header_foreground
+    cell_fg = theme.control_foreground
     try:
         style.configure(
             DSS_TABLE_TREEVIEW_STYLE,
@@ -792,8 +836,8 @@ def configure_dss_table_treeview_style(master: tk.Misc, theme: UiThemeColors) ->
         style.configure(f"{DSS_TABLE_TREEVIEW_STYLE}.Heading", background=heading_bg, foreground=heading_fg)
         style.map(
             DSS_TABLE_TREEVIEW_STYLE,
-            background=[("selected", "#bfdbfe")],
-            foreground=[("selected", "#1e3a8a")],
+            background=[("selected", theme.selection_background)],
+            foreground=[("selected", theme.selection_foreground)],
         )
     except tk.TclError:
         pass
@@ -804,6 +848,29 @@ def parse_ui_theme_payload(raw: object, defaults: UiThemeColors = DEFAULT_UI_THE
         return defaults
     kwargs: dict[str, str] = {}
     for key in (
+        "window_background",
+        "panel_background",
+        "content_chrome_background",
+        "control_background",
+        "control_foreground",
+        "control_border",
+        "control_hover_background",
+        "control_pressed_background",
+        "control_disabled_background",
+        "control_disabled_foreground",
+        "button_primary_background",
+        "button_primary_foreground",
+        "button_danger_background",
+        "button_danger_foreground",
+        "tab_inactive_background",
+        "tab_active_background",
+        "tab_inactive_foreground",
+        "header_background",
+        "header_foreground",
+        "selection_background",
+        "selection_foreground",
+        "date_divider",
+        "employee_divider",
         "alert_row_background",
         "alert_row_foreground",
         "crew_total_background",
@@ -813,7 +880,6 @@ def parse_ui_theme_payload(raw: object, defaults: UiThemeColors = DEFAULT_UI_THE
         "reports_outline_background",
         "reports_outline_foreground",
         "table_background",
-        "content_chrome_background",
     ):
         fallback = getattr(defaults, key)
         raw_val = raw.get(key)

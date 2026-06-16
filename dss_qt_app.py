@@ -75,24 +75,38 @@ def _configure_forced_qt_software_rendering() -> None:
 
 
 def _build_qt_chrome_stylesheet(theme: core.UiThemeColors) -> str:
+    window_bg = theme.window_background
+    panel_bg = theme.panel_background
     content_bg = theme.content_chrome_background
-    panel_bg = core.lighten_hex_color(content_bg, -4)
-    border = core.lighten_hex_color(content_bg, -36)
-    stronger_border = core.lighten_hex_color(content_bg, -64)
-    pressed_bg = core.lighten_hex_color(content_bg, -18)
-    hover_bg = core.lighten_hex_color(content_bg, -10)
+    control_bg = theme.control_background
+    control_fg = theme.control_foreground
+    border = theme.control_border
+    stronger_border = core.lighten_hex_color(border, -26)
+    hover_bg = theme.control_hover_background
+    pressed_bg = theme.control_pressed_background
+    disabled_bg = theme.control_disabled_background
+    disabled_text = theme.control_disabled_foreground
     table_bg = theme.table_background
-    table_header_bg = core.lighten_hex_color(table_bg, -18)
-    text = "#18181b"
-    muted_text = "#475569"
-    disabled_text = "#94a3b8"
-    accent = "#2563eb"
-    accent_soft = "#dbeafe"
+    table_header_bg = theme.header_background
+    table_header_fg = theme.header_foreground
+    text = control_fg
+    muted_text = theme.tab_inactive_foreground
+    accent = theme.button_primary_background
+    accent_text = theme.button_primary_foreground
+    danger = theme.button_danger_background
+    danger_text = theme.button_danger_foreground
+    tab_inactive_bg = theme.tab_inactive_background
+    tab_active_bg = theme.tab_active_background
+    selection_bg = theme.selection_background
+    selection_fg = theme.selection_foreground
 
     return f"""
         QMainWindow, QWidget {{
-            background-color: {content_bg};
+            background-color: {window_bg};
             color: {text};
+        }}
+        QWidget#centralwidget {{
+            background-color: {window_bg};
         }}
         QLabel {{
             color: {text};
@@ -101,23 +115,29 @@ def _build_qt_chrome_stylesheet(theme: core.UiThemeColors) -> str:
         QGroupBox {{
             color: {text};
             border: 1px solid {border};
-            border-radius: 6px;
-            margin-top: 10px;
-            padding-top: 10px;
+            border-radius: 10px;
+            margin-top: 12px;
+            padding: 10px;
+            padding-top: 14px;
+            background-color: {panel_bg};
         }}
         QGroupBox::title {{
             subcontrol-origin: margin;
-            left: 10px;
-            padding: 0 4px;
+            left: 12px;
+            padding: 0 6px;
+            color: {text};
+            background-color: {panel_bg};
         }}
         QPushButton, QToolButton, QComboBox, QLineEdit, QSpinBox, QPlainTextEdit, QTextEdit, QListWidget, QMenu, QScrollArea {{
-            background-color: {content_bg};
+            background-color: {control_bg};
             color: {text};
             border: 1px solid {border};
-            border-radius: 6px;
+            border-radius: 8px;
         }}
         QPushButton, QToolButton {{
             padding: 6px 12px;
+            background-color: {control_bg};
+            color: {text};
         }}
         QPushButton:hover, QToolButton:hover, QComboBox:hover, QLineEdit:hover, QSpinBox:hover {{
             background-color: {hover_bg};
@@ -126,41 +146,79 @@ def _build_qt_chrome_stylesheet(theme: core.UiThemeColors) -> str:
         QPushButton:pressed, QToolButton:pressed {{
             background-color: {pressed_bg};
         }}
-        QPushButton:disabled, QToolButton:disabled, QLabel:disabled {{
+        QPushButton:disabled, QToolButton:disabled, QLabel:disabled, QComboBox:disabled, QLineEdit:disabled, QSpinBox:disabled {{
             color: {disabled_text};
             border-color: {border};
+            background-color: {disabled_bg};
+        }}
+        QPushButton[text="Open DSS Workbook(s)"],
+        QPushButton[text="Quick Open"],
+        QPushButton[text="Add DSS"],
+        QPushButton[text="Quick Add"],
+        QPushButton[text="Update View"],
+        QPushButton[text="Export Current View"],
+        QPushButton[text="Apply Settings"],
+        QPushButton[text="Create Outlook Drafts"],
+        QPushButton[text="Sync Outlook Emails"],
+        QPushButton[text="Save Templates"],
+        QPushButton[text="Save Email"] {{
+            background-color: {accent};
+            color: {accent_text};
+            border-color: {accent};
+        }}
+        QPushButton[text="Open DSS Workbook(s)"]:hover,
+        QPushButton[text="Quick Open"]:hover,
+        QPushButton[text="Add DSS"]:hover,
+        QPushButton[text="Quick Add"]:hover,
+        QPushButton[text="Update View"]:hover,
+        QPushButton[text="Export Current View"]:hover,
+        QPushButton[text="Apply Settings"]:hover,
+        QPushButton[text="Create Outlook Drafts"]:hover,
+        QPushButton[text="Sync Outlook Emails"]:hover,
+        QPushButton[text="Save Templates"]:hover,
+        QPushButton[text="Save Email"]:hover {{
+            background-color: {core.lighten_hex_color(accent, 12)};
+            border-color: {core.lighten_hex_color(accent, -10)};
+        }}
+        QPushButton[text="Reset All Settings to Default"],
+        QPushButton[text="Clear Cached DSSs"],
+        QPushButton[text="Clear Stored Emails"],
+        QPushButton[text="Clear All Stored Data"] {{
+            background-color: {danger};
+            color: {danger_text};
+            border-color: {danger};
         }}
         QComboBox::drop-down {{
             border: 0;
             width: 20px;
         }}
         QComboBox QAbstractItemView, QListWidget {{
-            background-color: {content_bg};
+            background-color: {control_bg};
             color: {text};
-            selection-background-color: {accent_soft};
-            selection-color: {text};
+            selection-background-color: {selection_bg};
+            selection-color: {selection_fg};
         }}
         QTabWidget::pane {{
             border: 1px solid {border};
-            border-radius: 8px;
+            border-radius: 12px;
             top: -1px;
             background-color: {content_bg};
         }}
         QTabBar::tab {{
-            background-color: {panel_bg};
+            background-color: {tab_inactive_bg};
             color: {muted_text};
             border: 1px solid {border};
             border-bottom-color: {border};
-            border-top-left-radius: 6px;
-            border-top-right-radius: 6px;
-            padding: 7px 14px;
+            border-top-left-radius: 8px;
+            border-top-right-radius: 8px;
+            padding: 8px 14px;
             margin-right: 2px;
         }}
         QTabBar::tab:selected {{
-            background-color: {content_bg};
+            background-color: {tab_active_bg};
             color: {text};
             border-color: {stronger_border};
-            border-bottom-color: {content_bg};
+            border-bottom-color: {tab_active_bg};
         }}
         QTabBar::tab:hover:!selected {{
             background-color: {hover_bg};
@@ -168,7 +226,7 @@ def _build_qt_chrome_stylesheet(theme: core.UiThemeColors) -> str:
         }}
         QHeaderView::section {{
             background-color: {table_header_bg};
-            color: {text};
+            color: {table_header_fg};
             border: 1px solid {border};
             padding: 6px;
         }}
@@ -205,19 +263,19 @@ def _build_qt_chrome_stylesheet(theme: core.UiThemeColors) -> str:
 def _build_forced_qt_palette(theme: core.UiThemeColors) -> QPalette:
     palette = QPalette()
     content_bg = QColor(theme.content_chrome_background)
-    panel_bg = QColor(core.lighten_hex_color(theme.content_chrome_background, -4))
+    panel_bg = QColor(theme.panel_background)
     table_bg = QColor(theme.table_background)
-    border = QColor(core.lighten_hex_color(theme.content_chrome_background, -36))
-    text = QColor("#18181b")
-    muted_text = QColor("#475569")
-    disabled_text = QColor("#94a3b8")
-    white = QColor("#ffffff")
-    accent = QColor("#2563eb")
-    accent_soft = QColor("#dbeafe")
+    border = QColor(theme.control_border)
+    text = QColor(theme.control_foreground)
+    muted_text = QColor(theme.tab_inactive_foreground)
+    disabled_text = QColor(theme.control_disabled_foreground)
+    white = QColor(theme.selection_foreground)
+    accent = QColor(theme.selection_background)
+    accent_soft = QColor(theme.control_disabled_background)
 
-    palette.setColor(QPalette.Window, content_bg)
+    palette.setColor(QPalette.Window, QColor(theme.window_background))
     palette.setColor(QPalette.WindowText, text)
-    palette.setColor(QPalette.Base, white)
+    palette.setColor(QPalette.Base, QColor(theme.control_background))
     palette.setColor(QPalette.AlternateBase, table_bg)
     palette.setColor(QPalette.ToolTipBase, QColor(theme.tooltip_background))
     palette.setColor(QPalette.ToolTipText, QColor(theme.tooltip_foreground))
@@ -345,11 +403,13 @@ class RowAccentDelegate(QStyledItemDelegate):
             return
         painter.save()
         pen = painter.pen()
+        model = index.model()
+        theme = getattr(model, "theme", core.DEFAULT_UI_THEME)
         if "employee_break" in tags:
-            pen.setColor(QColor("#5f6f84"))
+            pen.setColor(QColor(theme.employee_divider))
             pen.setWidth(3)
         else:
-            pen.setColor(QColor("#8b98a9"))
+            pen.setColor(QColor(theme.date_divider))
             pen.setWidth(2)
         painter.setPen(pen)
         painter.drawLine(option.rect.topLeft(), option.rect.topRight())
@@ -385,11 +445,7 @@ class DataTablePage(QWidget):
         self.view.horizontalHeader().setSectionsMovable(True)
         self.view.horizontalHeader().setStretchLastSection(False)
         self.view.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
-        self.view.setStyleSheet(
-            "QTableView::item:selected { background-color: #2563eb; color: white; }"
-            "QTableView::item:selected:active { background-color: #2563eb; color: white; }"
-            "QTableView::item:selected:!active { background-color: #2563eb; color: white; }"
-        )
+        self._apply_selection_stylesheet(theme)
 
         self.columns_button = QPushButton("Columns", self)
         self.columns_button.clicked.connect(self._show_columns_menu)
@@ -436,7 +492,17 @@ class DataTablePage(QWidget):
 
     def set_theme(self, theme: core.UiThemeColors) -> None:
         self.model.theme = theme
+        self._apply_selection_stylesheet(theme)
         self.model.layoutChanged.emit()
+
+    def _apply_selection_stylesheet(self, theme: core.UiThemeColors) -> None:
+        selection_bg = theme.selection_background
+        selection_fg = theme.selection_foreground
+        self.view.setStyleSheet(
+            f"QTableView::item:selected {{ background-color: {selection_bg}; color: {selection_fg}; }}"
+            f"QTableView::item:selected:active {{ background-color: {selection_bg}; color: {selection_fg}; }}"
+            f"QTableView::item:selected:!active {{ background-color: {selection_bg}; color: {selection_fg}; }}"
+        )
 
     def set_rows(self, rows: list[dict[str, Any]]) -> None:
         self._current_rows = rows
@@ -2299,7 +2365,7 @@ class DssQtMainWindow(QMainWindow):
             self.quickload_hint_label.setText("")
 
     def _effective_qt_theme(self) -> core.UiThemeColors:
-        return core.DEFAULT_UI_THEME
+        return self.app_settings.ui_theme
 
     def _apply_ui_theme_chrome(self) -> None:
         theme = self._effective_qt_theme()
