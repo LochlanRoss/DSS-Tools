@@ -4441,7 +4441,7 @@ def build_employee_day_pf_rows(
     week_start: date | None = None,
     week_end: date | None = None,
 ) -> list[EmployeeDayPfRow]:
-    grouped: dict[tuple[date, date, str, str], dict[str, float]] = {}
+    grouped: dict[tuple[date, str, str, str], dict[str, float]] = {}
     record_list = list(records)
     if not record_list:
         return []
@@ -4459,21 +4459,23 @@ def build_employee_day_pf_rows(
         bucket["DT"] += record.dt
 
     rows: list[EmployeeDayPfRow] = []
-    collapsed: dict[tuple[date, str, str], dict[str, float]] = {}
+    collapsed: dict[tuple[date, date, date, str, str], dict[str, float]] = {}
     for (work_date, employee, pf_number, _source_file), totals in grouped.items():
-        bucket = collapsed.setdefault((work_date, employee, pf_number), {"ST": 0.0, "OT": 0.0, "DT": 0.0})
+        row_week_start = monday_week_start(work_date)
+        row_week_end = row_week_start + timedelta(days=6)
+        bucket = collapsed.setdefault((row_week_start, row_week_end, work_date, employee, pf_number), {"ST": 0.0, "OT": 0.0, "DT": 0.0})
         bucket["ST"] += totals["ST"]
         bucket["OT"] += totals["OT"]
         bucket["DT"] += totals["DT"]
 
-    for (work_date, employee, pf_number), totals in sorted(
+    for (row_week_start, row_week_end, work_date, employee, pf_number), totals in sorted(
         collapsed.items(),
-        key=lambda item: (item[0][1].casefold(), item[0][0], item[0][2].casefold()),
+        key=lambda item: (item[0][3].casefold(), item[0][0], item[0][2], item[0][4].casefold()),
     ):
         rows.append(
             EmployeeDayPfRow(
-                week_start=target_week_start,
-                week_end=target_week_end,
+                week_start=row_week_start,
+                week_end=row_week_end,
                 work_date=work_date,
                 employee=employee,
                 pf_number=pf_number,

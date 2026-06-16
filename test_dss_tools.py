@@ -414,8 +414,14 @@ class DssToolsTests(DssToolsFixtures):
                 ("2026-06-15", "PF26007-1", 4.0),
             ],
         )
-        self.assertTrue(all(row.week_start == date(2026, 6, 8) for row in rows))
-        self.assertTrue(all(row.week_end == date(2026, 6, 19) for row in rows))
+        self.assertEqual(
+            [(row.work_date.isoformat(), row.week_start.isoformat(), row.week_end.isoformat()) for row in rows],
+            [
+                ("2026-06-08", "2026-06-08", "2026-06-14"),
+                ("2026-06-12", "2026-06-08", "2026-06-14"),
+                ("2026-06-15", "2026-06-15", "2026-06-21"),
+            ],
+        )
 
     def test_reference_week_number_matches_calendar_reference(self) -> None:
         self.assertEqual(reference_week_number(date(2025, 1, 1)), 1)

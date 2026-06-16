@@ -406,6 +406,8 @@ class DataTablePage(QWidget):
         self._restoring_layout = False
         self._current_rows: list[dict[str, Any]] = []
         self._apply_saved_layout()
+        if self.spec.table_id not in core.load_table_layouts(self.config_path):
+            self._apply_default_hidden_columns()
         self.view.horizontalHeader().sortIndicatorChanged.connect(self._emit_layout_change)
         self.view.horizontalHeader().sectionMoved.connect(lambda *_: self._emit_layout_change())
         self.view.horizontalHeader().sectionResized.connect(lambda *_: self._emit_layout_change())
@@ -537,6 +539,11 @@ class DataTablePage(QWidget):
                     break
         self._restoring_layout = False
 
+    def _apply_default_hidden_columns(self) -> None:
+        for idx, (key, _label) in enumerate(self.columns):
+            if key == "expanded":
+                self.view.setColumnHidden(idx, True)
+
     def _emit_layout_change(self) -> None:
         if self._restoring_layout:
             return
@@ -647,6 +654,9 @@ class CheckListButton(QPushButton):
         self.clicked.connect(self._show_popup)
 
     def set_choices(self, values: Iterable[str], selected: Iterable[str] | None = None, force_single: bool = False) -> None:
+        previous_values = list(self.values)
+        previous_selected = list(self.selected)
+        was_all_selected = (not previous_values) or (len(previous_selected) == len(previous_values))
         self.values = list(values)
         self.setEnabled(bool(self.values))
         if force_single and len(self.values) == 1:
@@ -654,7 +664,10 @@ class CheckListButton(QPushButton):
             self.setEnabled(False)
         else:
             allowed = set(self.values)
-            desired = [value for value in (selected or self.selected or self.values) if value in allowed]
+            if was_all_selected:
+                desired = list(self.values)
+            else:
+                desired = [value for value in (selected or self.selected or self.values) if value in allowed]
             self.selected = desired if desired else list(self.values)
         self._update_text()
 
@@ -951,10 +964,12 @@ class NameTypoWorker(QObject):
 class EmployeesPage(QWidget):
     changed = Signal()
     syncRequested = Signal()
+    mergeRequested = Signal(str, str)
 
     def __init__(self) -> None:
         super().__init__()
         self.employee_names: list[str] = []
+        self.hidden_employee_names: set[str] = set()
         self.employee_emails: dict[str, str] = {}
         self.employee_notes: dict[str, str] = {}
         self.employee_groups: dict[str, list[str]] = {}
@@ -964,14 +979,19 @@ class EmployeesPage(QWidget):
         left = QWidget()
         left_layout = QVBoxLayout(left)
         self.employee_list = QListWidget()
+        self.employee_list.setSelectionMode(QListWidget.ExtendedSelection)
         left_buttons = QHBoxLayout()
         self.add_employee_button = QPushButton("Add Employee")
-        self.remove_employee_button = QPushButton("Remove Employee")
+        self.remove_employee_button = QPushButton("Hide Employee")
+        self.merge_employee_button = QPushButton("Merge Selected")
         self.sync_button = QPushButton("Sync Outlook Emails")
+        self.show_hidden_box = QCheckBox("Show hidden employees")
         left_buttons.addWidget(self.add_employee_button)
         left_buttons.addWidget(self.remove_employee_button)
+        left_buttons.addWidget(self.merge_employee_button)
         left_buttons.addWidget(self.sync_button)
         left_layout.addWidget(QLabel("Employees"))
+        left_layout.addWidget(self.show_hidden_box)
         left_layout.addWidget(self.employee_list, 1)
         left_layout.addLayout(left_buttons)
 
@@ -981,12 +1001,18 @@ class EmployeesPage(QWidget):
         form = QFormLayout(detail_box)
         self.employee_name_label = QLabel("")
         self.email_edit = QLineEdit()
+        self.save_email_button = QPushButton("Save Email")
         self.suppression_box = QCheckBox("Suppress missing email warnings for this employee")
         self.notes_edit = QPlainTextEdit()
         self.group_list = QListWidget()
         self.group_list.setSelectionMode(QListWidget.NoSelection)
+        email_row = QWidget()
+        email_row_layout = QHBoxLayout(email_row)
+        email_row_layout.setContentsMargins(0, 0, 0, 0)
+        email_row_layout.addWidget(self.email_edit, 1)
+        email_row_layout.addWidget(self.save_email_button)
         form.addRow("Employee", self.employee_name_label)
-        form.addRow("Email", self.email_edit)
+        form.addRow("Email", email_row)
         form.addRow("", self.suppression_box)
         form.addRow("Notes", self.notes_edit)
         form.addRow("Groups", self.group_list)
@@ -1014,44 +1040,39 @@ class EmployeesPage(QWidget):
         layout.addWidget(splitter, 1)
 
         self.employee_list.currentItemChanged.connect(self._populate_details)
+        self.employee_list.itemSelectionChanged.connect(self._update_employee_action_states)
         self.groups_list.currentItemChanged.connect(self._group_selected)
         self.add_employee_button.clicked.connect(self._add_employee)
         self.remove_employee_button.clicked.connect(self._remove_employee)
+        self.merge_employee_button.clicked.connect(self._merge_selected_employees)
         self.add_group_button.clicked.connect(self._add_group)
         self.remove_group_button.clicked.connect(self._remove_group)
         self.sync_button.clicked.connect(self.syncRequested.emit)
         self.email_edit.editingFinished.connect(self._save_current)
+        self.save_email_button.clicked.connect(self._save_current)
         self.suppression_box.toggled.connect(lambda _checked: self._save_current())
         self.notes_edit.textChanged.connect(self._save_current)
         self.group_list.itemChanged.connect(lambda _item: self._save_current())
+        self.show_hidden_box.toggled.connect(lambda _checked: self._render_employee_list(self.current_employee()))
+        self._update_employee_action_states()
 
     def set_data(
         self,
         employee_names: list[str],
+        hidden_employee_names: set[str],
         employee_emails: dict[str, str],
         employee_notes: dict[str, str],
         employee_groups: dict[str, list[str]],
         missing_email_suppressions: set[str],
     ) -> None:
         current = self.current_employee()
-        self.employee_names = list(employee_names)
+        self.employee_names = sorted(set(employee_names) | set(hidden_employee_names), key=str.casefold)
+        self.hidden_employee_names = set(hidden_employee_names)
         self.employee_emails = dict(employee_emails)
         self.employee_notes = dict(employee_notes)
         self.employee_groups = {name: list(values) for name, values in employee_groups.items()}
         self.missing_email_suppressions = set(missing_email_suppressions)
-
-        self.employee_list.blockSignals(True)
-        self.employee_list.clear()
-        for employee in self.employee_names:
-            suppressed = employee in self.missing_email_suppressions
-            label, missing = core.build_employee_email_list_label(employee, self.employee_emails.get(employee, ""), suppressed=suppressed)
-            item = QListWidgetItem(label)
-            item.setData(Qt.UserRole, employee)
-            if missing:
-                item.setBackground(QColor(core.MISSING_EMAIL_ROW_BACKGROUND))
-                item.setForeground(QColor(core.MISSING_EMAIL_ROW_FOREGROUND))
-            self.employee_list.addItem(item)
-        self.employee_list.blockSignals(False)
+        self._render_employee_list(current)
 
         self.groups_list.blockSignals(True)
         self.groups_list.clear()
@@ -1060,9 +1081,32 @@ class EmployeesPage(QWidget):
             item.setData(Qt.UserRole, group_name)
             self.groups_list.addItem(item)
         self.groups_list.blockSignals(False)
+        self._update_employee_action_states()
 
+    def _render_employee_list(self, current: str | None = None) -> None:
+        selected = set(self.selected_employees())
+        self.employee_list.blockSignals(True)
+        self.employee_list.clear()
+        for employee in self.employee_names:
+            hidden = employee in self.hidden_employee_names
+            if hidden and not self.show_hidden_box.isChecked():
+                continue
+            suppressed = employee in self.missing_email_suppressions
+            label, missing = core.build_employee_email_list_label(employee, self.employee_emails.get(employee, ""), suppressed=suppressed)
+            if hidden:
+                label = f"[Hidden] {label}"
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, employee)
+            if hidden:
+                item.setForeground(QColor("#6b7280"))
+            if missing:
+                item.setBackground(QColor(core.MISSING_EMAIL_ROW_BACKGROUND))
+                item.setForeground(QColor(core.MISSING_EMAIL_ROW_FOREGROUND))
+            self.employee_list.addItem(item)
+            if employee in selected:
+                item.setSelected(True)
+        self.employee_list.blockSignals(False)
         if current:
-            matches = self.employee_list.findItems("", Qt.MatchContains)
             for row in range(self.employee_list.count()):
                 item = self.employee_list.item(row)
                 if item.data(Qt.UserRole) == current:
@@ -1075,9 +1119,14 @@ class EmployeesPage(QWidget):
         item = self.employee_list.currentItem()
         return str(item.data(Qt.UserRole)) if item else ""
 
-    def snapshot(self) -> tuple[list[str], dict[str, str], dict[str, str], dict[str, list[str]], set[str]]:
+    def selected_employees(self) -> list[str]:
+        return [str(item.data(Qt.UserRole)) for item in self.employee_list.selectedItems()]
+
+    def snapshot(self) -> tuple[list[str], set[str], dict[str, str], dict[str, str], dict[str, list[str]], set[str]]:
+        visible = [name for name in self.employee_names if name not in self.hidden_employee_names]
         return (
-            list(self.employee_names),
+            visible,
+            set(self.hidden_employee_names),
             dict(self.employee_emails),
             dict(self.employee_notes),
             {name: list(values) for name, values in self.employee_groups.items()},
@@ -1104,6 +1153,7 @@ class EmployeesPage(QWidget):
         self.notes_edit.blockSignals(False)
         self.group_list.blockSignals(False)
         self.suppression_box.blockSignals(False)
+        self._update_employee_action_states()
 
     def _save_current(self) -> None:
         employee = self.current_employee()
@@ -1133,22 +1183,93 @@ class EmployeesPage(QWidget):
         if employee not in self.employee_names:
             self.employee_names.append(employee)
             self.employee_names.sort(key=str.casefold)
+        self.hidden_employee_names.discard(employee)
         self.changed.emit()
 
     def _remove_employee(self) -> None:
         employee = self.current_employee()
         if not employee:
             return
-        if QMessageBox.question(self, "Remove Employee", f"Hide '{employee}' from the managed roster?") != QMessageBox.Yes:
-            return
-        if employee in self.employee_names:
-            self.employee_names.remove(employee)
-        self.employee_emails.pop(employee, None)
-        self.employee_notes.pop(employee, None)
-        self.missing_email_suppressions.discard(employee)
-        for group_name, members in list(self.employee_groups.items()):
-            self.employee_groups[group_name] = [member for member in members if member != employee]
+        if employee in self.hidden_employee_names:
+            if QMessageBox.question(self, "Restore Employee", f"Restore '{employee}' to the managed roster?") != QMessageBox.Yes:
+                return
+            self.hidden_employee_names.discard(employee)
+        else:
+            if QMessageBox.question(self, "Hide Employee", f"Hide '{employee}' from the managed roster?") != QMessageBox.Yes:
+                return
+            self.hidden_employee_names.add(employee)
         self.changed.emit()
+
+    def _preferred_merge_target(self, names: list[str]) -> str:
+        with_email = [name for name in names if self.employee_emails.get(name, "").strip()]
+        if len(with_email) == 1:
+            return with_email[0]
+        if with_email:
+            names = with_email
+        current = self.current_employee()
+        if current in names:
+            return current
+        return sorted(names, key=str.casefold)[0]
+
+    def _merge_selected_employees(self) -> None:
+        selected = self.selected_employees()
+        unique = list(dict.fromkeys(selected))
+        if len(unique) != 2:
+            QMessageBox.information(self, "Merge Employees", "Select exactly two employee names to merge.")
+            return
+        default_target = self._preferred_merge_target(unique)
+        default_source = next(name for name in unique if name != default_target)
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Merge Employees")
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("Choose which name should remain after the merge."))
+        layout.addWidget(QLabel("Preference: keep the name that already has a real email address."))
+        source_combo = QComboBox()
+        target_combo = QComboBox()
+        for name in unique:
+            email = self.employee_emails.get(name, "").strip()
+            suffix = f" | {email}" if email else ""
+            source_combo.addItem(f"{name}{suffix}", name)
+            target_combo.addItem(f"{name}{suffix}", name)
+        source_combo.setCurrentIndex(source_combo.findData(default_source))
+        target_combo.setCurrentIndex(target_combo.findData(default_target))
+        form = QFormLayout()
+        form.addRow("Merge this name", source_combo)
+        form.addRow("Into this name", target_combo)
+        layout.addLayout(form)
+        preview = QLabel("")
+        preview.setWordWrap(True)
+        layout.addWidget(preview)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        layout.addWidget(buttons)
+
+        def _refresh_preview() -> None:
+            source = str(source_combo.currentData())
+            target = str(target_combo.currentData())
+            ok_button = buttons.button(QDialogButtonBox.Ok)
+            if source == target:
+                preview.setText("Choose two different names.")
+                if ok_button is not None:
+                    ok_button.setEnabled(False)
+                return
+            preview.setText(f"Merge '{source}' into '{target}'. '{target}' will remain.")
+            if ok_button is not None:
+                ok_button.setEnabled(True)
+
+        source_combo.currentIndexChanged.connect(_refresh_preview)
+        target_combo.currentIndexChanged.connect(_refresh_preview)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        _refresh_preview()
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+        source = str(source_combo.currentData())
+        target = str(target_combo.currentData())
+        if source == target:
+            return
+        self.mergeRequested.emit(source, target)
 
     def _add_group(self) -> None:
         name, ok = QInputDialog.getText(self, "Add Group", "Group name:")
@@ -1175,6 +1296,15 @@ class EmployeesPage(QWidget):
         group_name = str(item.data(Qt.UserRole))
         members = ", ".join(self.employee_groups.get(group_name, [])) or "No members."
         QMessageBox.information(self, "Group Members", f"{group_name}\n\n{members}")
+
+    def _update_employee_action_states(self) -> None:
+        selected = self.selected_employees()
+        self.merge_employee_button.setEnabled(len(set(selected)) == 2)
+        employee = self.current_employee()
+        hidden = bool(employee and employee in self.hidden_employee_names)
+        self.remove_employee_button.setEnabled(bool(employee))
+        self.remove_employee_button.setText("Restore Employee" if hidden else "Hide Employee")
+        self.save_email_button.setEnabled(bool(employee))
 
 
 class FormattingRulesPage(QWidget):
@@ -1578,9 +1708,11 @@ class EmailDraftsPage(QWidget):
         self.week_combo.blockSignals(True)
         self.week_combo.clear()
         for week_start in sorted(week_starts, reverse=True):
-            self.week_combo.addItem(week_start.isoformat(), week_start)
+            week_end = week_start + core.timedelta(days=6)
+            label = f"Week {core.reference_week_number(week_start)} | {core.format_week_label(week_start, week_end)}"
+            self.week_combo.addItem(label, week_start)
         if current is not None:
-            idx = self.week_combo.findText(current.isoformat())
+            idx = self.week_combo.findData(current)
             if idx >= 0:
                 self.week_combo.setCurrentIndex(idx)
         self.week_combo.blockSignals(False)
@@ -1795,6 +1927,7 @@ class DssQtMainWindow(QMainWindow):
         self.email_drafts_page.templatesChanged.connect(self.save_email_templates)
         self.employees_page.changed.connect(self._employees_changed)
         self.employees_page.syncRequested.connect(self.sync_outlook_emails)
+        self.employees_page.mergeRequested.connect(self._merge_employee_alias)
         self.formatting_page.changed.connect(self._formatting_changed)
         self.configuration_page.settingsChanged.connect(self._settings_changed)
         self.configuration_page.applyRequested.connect(self.apply_settings)
@@ -1815,10 +1948,13 @@ class DssQtMainWindow(QMainWindow):
         page = self.pages["employee_daily_pf"]
         self.employee_summary_range_box = QCheckBox("Range")
         self.employee_summary_week_start_combo = QComboBox()
+        self.employee_summary_to_label = QLabel("to")
         self.employee_summary_week_end_combo = QComboBox()
         self.employee_summary_this_week_button = QPushButton("This Week")
         self.employee_summary_last_week_button = QPushButton("Last Week")
         self.employee_summary_week_end_combo.setEnabled(False)
+        self.employee_summary_week_end_combo.setVisible(False)
+        self.employee_summary_to_label.setVisible(False)
         self.employee_summary_week_start_combo.setMinimumContentsLength(20)
         self.employee_summary_week_end_combo.setMinimumContentsLength(20)
 
@@ -1826,7 +1962,7 @@ class DssQtMainWindow(QMainWindow):
             self.employee_summary_last_week_button,
             self.employee_summary_this_week_button,
             self.employee_summary_week_end_combo,
-            QLabel("to"),
+            self.employee_summary_to_label,
             self.employee_summary_week_start_combo,
             self.employee_summary_range_box,
         ):
@@ -2026,6 +2162,8 @@ class DssQtMainWindow(QMainWindow):
         self.employee_summary_last_week_button.setEnabled(len(weeks) > 1)
         self.employee_summary_week_start_combo.setEnabled(True)
         self.employee_summary_week_end_combo.setEnabled(self.employee_summary_range_box.isChecked())
+        self.employee_summary_week_end_combo.setVisible(self.employee_summary_range_box.isChecked())
+        self.employee_summary_to_label.setVisible(self.employee_summary_range_box.isChecked())
 
     def _employee_summary_selected_weeks(self) -> tuple[date | None, date | None]:
         start_text = self.employee_summary_week_start_combo.currentData()
@@ -2044,6 +2182,8 @@ class DssQtMainWindow(QMainWindow):
 
     def _employee_summary_range_toggled(self, checked: bool) -> None:
         self.employee_summary_week_end_combo.setEnabled(checked and self.employee_summary_week_end_combo.count() > 0)
+        self.employee_summary_week_end_combo.setVisible(checked)
+        self.employee_summary_to_label.setVisible(checked)
         if checked and self.employee_summary_week_end is None:
             self._employee_summary_week_end = self._employee_summary_week_start
         self.refresh_views()
@@ -2064,6 +2204,8 @@ class DssQtMainWindow(QMainWindow):
         self.employee_summary_week_end_combo.blockSignals(False)
         self.employee_summary_range_box.blockSignals(False)
         self.employee_summary_week_end_combo.setEnabled(False)
+        self.employee_summary_week_end_combo.setVisible(False)
+        self.employee_summary_to_label.setVisible(False)
         self.refresh_views()
 
     def _select_employee_summary_previous_week(self) -> None:
@@ -2082,6 +2224,8 @@ class DssQtMainWindow(QMainWindow):
         self.employee_summary_week_end_combo.blockSignals(False)
         self.employee_summary_range_box.blockSignals(False)
         self.employee_summary_week_end_combo.setEnabled(False)
+        self.employee_summary_week_end_combo.setVisible(False)
+        self.employee_summary_to_label.setVisible(False)
         self.refresh_views()
 
     def _selected_employee_values(self) -> set[str]:
@@ -2114,8 +2258,14 @@ class DssQtMainWindow(QMainWindow):
         self.pf_filter.set_choices(pfs, self.pf_filter.selected_values(), force_single=True)
 
     def _refresh_employee_page(self) -> None:
+        hidden_names = {
+            self._display_employee_name(name)
+            for name in self.employee_hidden_names
+            if name not in self.employee_name_merges
+        }
         self.employees_page.set_data(
             self._managed_employee_names(),
+            hidden_names,
             self.employee_emails,
             self.employee_notes,
             self.employee_groups,
@@ -2391,13 +2541,15 @@ class DssQtMainWindow(QMainWindow):
         employee_daily_rows: list[dict[str, str]] = []
         previous_employee = ""
         previous_date = ""
+        previous_week_start: date | None = None
         for row in employee_daily_pf:
             date_text = row.work_date.strftime("%d-%b")
             week_number = str(core.reference_week_number(row.work_date))
             employee_changed = row.employee != previous_employee
+            week_changed = row.week_start != previous_week_start
             employee_text = row.employee if employee_changed else ""
-            week_cell = week_number if employee_changed else ""
-            is_date_break = employee_changed or date_text != previous_date
+            week_cell = week_number if employee_changed or week_changed else ""
+            is_date_break = employee_changed or week_changed or date_text != previous_date
             date_cell = date_text if is_date_break else ""
             tags: list[str] = []
             if is_date_break:
@@ -2419,6 +2571,7 @@ class DssQtMainWindow(QMainWindow):
             )
             previous_employee = row.employee
             previous_date = date_text
+            previous_week_start = row.week_start
         self.pages["employee_daily_pf"].set_rows(employee_daily_rows)
         self.pages["combined_daily"].set_rows([
             {
@@ -2628,11 +2781,11 @@ class DssQtMainWindow(QMainWindow):
         )
 
     def _employees_changed(self) -> None:
-        employee_names, emails, notes, groups, suppressions = self.employees_page.snapshot()
+        employee_names, hidden_names, emails, notes, groups, suppressions = self.employees_page.snapshot()
         managed = set(employee_names)
-        discovered = set(self.current_data.employee_names if self.current_data else [])
+        discovered = {self._display_employee_name(name) for name in (self.current_data.employee_names if self.current_data else [])}
         self.employee_added_names = managed - discovered
-        self.employee_hidden_names = discovered - managed
+        self.employee_hidden_names = set(hidden_names)
         self.employee_emails = emails
         self.employee_notes = notes
         self.employee_groups = groups
@@ -3431,10 +3584,10 @@ class DssQtMainWindow(QMainWindow):
     def _merge_employee_alias(self, source_name: str, target_name: str) -> None:
         source = source_name.strip()
         target = target_name.strip()
-        if not source or not target or source.casefold() == target.casefold():
+        if not source or not target or source == target:
             return
         resolved_target = core.resolve_employee_name_merge(target, self.employee_name_merges)
-        if resolved_target.casefold() == source.casefold():
+        if resolved_target == source:
             return
         self.employee_name_merges[source] = resolved_target
         if not self.employee_emails.get(resolved_target, "").strip() and self.employee_emails.get(source, "").strip():
@@ -3454,7 +3607,7 @@ class DssQtMainWindow(QMainWindow):
                 member_set.add(resolved_target)
             self.employee_groups[group_name] = sorted(member_set, key=str.casefold)
         self.employee_added_names = {self._display_employee_name(name) for name in self.employee_added_names if self._display_employee_name(name).strip()}
-        self.employee_hidden_names.add(source)
+        self.employee_hidden_names.discard(source)
         self.employee_emails.pop(source, None)
         self.employee_outlook_display_names.pop(source, None)
         self.employee_notes.pop(source, None)
