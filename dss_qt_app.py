@@ -63,6 +63,18 @@ TABLE_DATE_COLUMNS = {"date", "work_date", "week_start", "week_end"}
 TABLE_NUMERIC_COLUMNS = {"st", "ot", "dt", "total", "expanded", "days", "similarity", "limit", "actual_total", "delta"}
 
 
+def _best_contrast_text(hex_color: str) -> str:
+    normalized = core.normalize_ui_hex_color(hex_color)
+    if not normalized:
+        return "#111827"
+    body = normalized[1:]
+    r = int(body[0:2], 16)
+    g = int(body[2:4], 16)
+    b = int(body[4:6], 16)
+    luminance = (0.299 * r) + (0.587 * g) + (0.114 * b)
+    return "#111827" if luminance >= 160 else "#f8fafc"
+
+
 def _configure_forced_qt_software_rendering() -> None:
     # Keep Qt off the native GPU path so machines with flaky theme/driver combos
     # render the same widget chrome as our known-good environments.
@@ -1539,20 +1551,27 @@ class ConfigurationPage(QWidget):
         form.addRow("DSS library root folder", library_root_row)
         form.addRow("", self.version_label)
 
-        appearance = QGroupBox("Appearance")
-        appearance_layout = QGridLayout(appearance)
+        self.appearance_box = QGroupBox("Appearance")
+        self.appearance_box.setCheckable(True)
+        self.appearance_box.setChecked(False)
+        appearance_layout = QVBoxLayout(self.appearance_box)
+        self.appearance_content = QWidget()
+        appearance_grid = QGridLayout(self.appearance_content)
         self._theme_line_edits: dict[str, QLineEdit] = {}
         for row, (label, attr) in enumerate(core.UI_THEME_CONFIG_FIELDS):
-            appearance_layout.addWidget(QLabel(label), row, 0)
+            appearance_grid.addWidget(QLabel(label), row, 0)
             edit = QLineEdit()
             self._theme_line_edits[attr] = edit
             pick_button = QPushButton("Pick...")
             pick_button.clicked.connect(lambda _checked=False, key=attr: self._pick_theme_colour(key))
-            appearance_layout.addWidget(edit, row, 1)
-            appearance_layout.addWidget(pick_button, row, 2)
+            appearance_grid.addWidget(edit, row, 1)
+            appearance_grid.addWidget(pick_button, row, 2)
         self.reset_colours_button = QPushButton("Reset colours to sample defaults")
         self.reset_colours_button.clicked.connect(self._reset_theme_defaults)
-        appearance_layout.addWidget(self.reset_colours_button, len(core.UI_THEME_CONFIG_FIELDS), 0, 1, 3)
+        appearance_grid.addWidget(self.reset_colours_button, len(core.UI_THEME_CONFIG_FIELDS), 0, 1, 3)
+        appearance_layout.addWidget(self.appearance_content)
+        self.appearance_box.toggled.connect(self.appearance_content.setVisible)
+        self.appearance_content.setVisible(False)
 
         self.apply_button = QPushButton("Apply Settings")
         self.apply_button.clicked.connect(self.applyRequested.emit)
@@ -1599,7 +1618,7 @@ class ConfigurationPage(QWidget):
         diagnostics_layout.addWidget(self.update_status_label, (len(diagnostics_buttons) + 1) // 2, 0, 1, 2)
 
         layout.addWidget(settings_box)
-        layout.addWidget(appearance)
+        layout.addWidget(self.appearance_box)
         layout.addWidget(self.apply_button, 0, Qt.AlignLeft)
         layout.addWidget(maintenance)
         layout.addWidget(diagnostics)
@@ -1616,6 +1635,7 @@ class ConfigurationPage(QWidget):
         self.library_root_edit.editingFinished.connect(self.settingsChanged.emit)
         for edit in self._theme_line_edits.values():
             edit.editingFinished.connect(self.settingsChanged.emit)
+            edit.textChanged.connect(lambda _text, field=edit: self._apply_theme_edit_preview(field))
         self.library_root_browse_button.clicked.connect(self._browse_library_root)
         self.reset_button.clicked.connect(self.resetRequested.emit)
         self.clear_cache_button.clicked.connect(self.clearCacheRequested.emit)
@@ -1646,12 +1666,23 @@ class ConfigurationPage(QWidget):
             edit.setText(picked.name().lower())
             self.settingsChanged.emit()
 
+    def _apply_theme_edit_preview(self, edit: QLineEdit) -> None:
+        normalized = core.normalize_ui_hex_color(edit.text().strip())
+        if normalized is None:
+            edit.setStyleSheet("")
+            return
+        text_color = _best_contrast_text(normalized)
+        edit.setStyleSheet(
+            f"QLineEdit {{ background-color: {normalized}; color: {text_color}; border: 1px solid #94a3b8; border-radius: 6px; }}"
+        )
+
     def _reset_theme_defaults(self) -> None:
         defaults = core.DEFAULT_UI_THEME
         for _label, attr in core.UI_THEME_CONFIG_FIELDS:
             edit = self._theme_line_edits.get(attr)
             if edit is not None:
                 edit.setText(getattr(defaults, attr))
+                self._apply_theme_edit_preview(edit)
         self.settingsChanged.emit()
 
     def set_update_status(self, text: str) -> None:
@@ -1671,6 +1702,7 @@ class ConfigurationPage(QWidget):
             edit = self._theme_line_edits.get(attr)
             if edit is not None:
                 edit.setText(getattr(settings.ui_theme, attr))
+                self._apply_theme_edit_preview(edit)
 
     def snapshot(self, current: core.AppSettings) -> core.AppSettings:
         hotkey = core.normalize_quickload_cancel_hotkey(self.quickload_hotkey_combo.currentText().strip())
@@ -1708,6 +1740,7 @@ class EmailDraftsPage(QWidget):
 
     def __init__(self, theme: core.UiThemeColors, config_path: Path) -> None:
         super().__init__()
+        self._selected_week_start: date | None = None
         self.preview_table = DataTablePage(
             TableSpec(
                 "email_drafts",
@@ -1764,13 +1797,14 @@ class EmailDraftsPage(QWidget):
         self.sync_button.clicked.connect(self.syncRequested.emit)
         self.create_button.clicked.connect(self.createDraftsRequested.emit)
         self.save_templates_button.clicked.connect(self.templatesChanged.emit)
+        self.week_combo.currentIndexChanged.connect(self._remember_selected_week)
 
     def set_templates(self, subject_template: str, body_template: str) -> None:
         self.subject_edit.setPlainText(subject_template)
         self.body_edit.setPlainText(body_template)
 
     def set_weeks(self, week_starts: list[date]) -> None:
-        current = self.selected_week_start()
+        current = self._selected_week_start or self.selected_week_start()
         self.week_combo.blockSignals(True)
         self.week_combo.clear()
         for week_start in sorted(week_starts, reverse=True):
@@ -1781,11 +1815,19 @@ class EmailDraftsPage(QWidget):
             idx = self.week_combo.findData(current)
             if idx >= 0:
                 self.week_combo.setCurrentIndex(idx)
+            elif self.week_combo.count():
+                self.week_combo.setCurrentIndex(0)
+        elif self.week_combo.count():
+            self.week_combo.setCurrentIndex(0)
         self.week_combo.blockSignals(False)
+        self._remember_selected_week()
 
     def selected_week_start(self) -> date | None:
         data = self.week_combo.currentData()
         return data if isinstance(data, date) else None
+
+    def _remember_selected_week(self) -> None:
+        self._selected_week_start = self.selected_week_start()
 
 
 class DssQtMainWindow(QMainWindow):
