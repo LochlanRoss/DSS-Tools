@@ -163,9 +163,7 @@ def _build_qt_chrome_stylesheet(theme: core.UiThemeColors) -> str:
             border-color: {border};
             background-color: {disabled_bg};
         }}
-        QPushButton[text="Open DSS Workbook(s)"],
-        QPushButton[text="Quick Open"],
-        QPushButton[text="Add DSS"],
+        QPushButton[text="Add DSSs..."],
         QPushButton[text="Quick Add"],
         QPushButton[text="Update View"],
         QPushButton[text="Export Current View"],
@@ -178,9 +176,7 @@ def _build_qt_chrome_stylesheet(theme: core.UiThemeColors) -> str:
             color: {accent_text};
             border-color: {accent};
         }}
-        QPushButton[text="Open DSS Workbook(s)"]:hover,
-        QPushButton[text="Quick Open"]:hover,
-        QPushButton[text="Add DSS"]:hover,
+        QPushButton[text="Add DSSs..."]:hover,
         QPushButton[text="Quick Add"]:hover,
         QPushButton[text="Update View"]:hover,
         QPushButton[text="Export Current View"]:hover,
@@ -195,7 +191,8 @@ def _build_qt_chrome_stylesheet(theme: core.UiThemeColors) -> str:
         QPushButton[text="Reset All Settings to Default"],
         QPushButton[text="Clear Cached DSSs"],
         QPushButton[text="Clear Stored Emails"],
-        QPushButton[text="Clear All Stored Data"] {{
+        QPushButton[text="Clear All Stored Data"],
+        QPushButton[text="Clear All"] {{
             background-color: {danger};
             color: {danger_text};
             border-color: {danger};
@@ -820,37 +817,28 @@ class QuickDssPickerDialog(QDialog):
         self._populate()
 
     def _iter_candidate_paths(self) -> list[Path]:
-        candidates: list[Path] = []
-        if not self.root_folder.exists() or not self.root_folder.is_dir():
-            return candidates
-        for job_dir in sorted((path for path in self.root_folder.iterdir() if path.is_dir()), key=lambda p: p.name.casefold()):
-            try:
-                subdirs = [child for child in job_dir.iterdir() if child.is_dir() and "dss" in child.name.casefold()]
-            except OSError:
-                continue
-            for dss_dir in sorted(subdirs, key=lambda p: p.name.casefold()):
-                try:
-                    files = [child for child in dss_dir.iterdir() if child.is_file() and child.suffix.lower() == ".xlsx"]
-                except OSError:
-                    continue
-                for file_path in files:
-                    if file_path.name.startswith("~$"):
-                        continue
-                    candidates.append(file_path.resolve())
-        try:
-            candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-        except OSError:
-            candidates.sort(key=lambda p: p.name.casefold())
-        return candidates
+        return core.iter_quick_dss_candidate_paths(self.root_folder)
 
     def _format_item_label(self, path: Path) -> str:
         pf = core.extract_pf_identifier(path.name)
-        job_folder = path.parent.parent.name if path.parent.parent else ""
+        job_folder = ""
+        relative_hint = path.name
+        try:
+            relative = path.relative_to(self.root_folder)
+            parts = relative.parts
+            if len(parts) >= 4:
+                job_folder = parts[0]
+                relative_hint = " > ".join(parts)
+            else:
+                relative_hint = str(relative)
+        except ValueError:
+            job_folder = path.parents[2].name if len(path.parents) >= 3 else ""
+            relative_hint = path.name
         try:
             modified = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
         except OSError:
             modified = "Unknown"
-        return f"{pf} | {job_folder} | {path.name} | {modified}\n{path}"
+        return f"{pf} | {job_folder} | {path.name} | {modified}\n{relative_hint}"
 
     def _populate(self) -> None:
         previous = set(self.selected_file_paths()) | set(self.selected_paths)
@@ -905,11 +893,21 @@ class LoadWorker(QObject):
     failed = Signal(str)
     cancelled = Signal()
 
-    def __init__(self, source_paths: list[Path], previous_data: core.TrackerData | None, cache_dir: Path) -> None:
+    def __init__(
+        self,
+        source_paths: list[Path],
+        previous_data: core.TrackerData | None,
+        cache_dir: Path,
+        *,
+        max_parallel_parse_workers: int,
+        partial_preview_enabled: bool,
+    ) -> None:
         super().__init__()
         self.source_paths = source_paths
         self.previous_data = previous_data
         self.cache_dir = cache_dir
+        self.max_parallel_parse_workers = max_parallel_parse_workers
+        self.partial_preview_enabled = partial_preview_enabled
         self.cancel_event = threading.Event()
 
     def cancel(self) -> None:
@@ -921,9 +919,10 @@ class LoadWorker(QObject):
                 self.source_paths,
                 previous_data=self.previous_data,
                 progress_callback=lambda pct, msg: self.progressChanged.emit(float(pct), str(msg)),
-                partial_callback=lambda snapshot, msg: self.partialReady.emit(snapshot, msg),
+                partial_callback=(lambda snapshot, msg: self.partialReady.emit(snapshot, msg)) if self.partial_preview_enabled else None,
                 cache_dir=self.cache_dir,
                 should_cancel=self.cancel_event.is_set,
+                max_parallel_parse_workers=self.max_parallel_parse_workers,
             )
         except core.OperationCancelled:
             self.cancelled.emit()
@@ -1056,22 +1055,29 @@ class EmployeesPage(QWidget):
         splitter = QSplitter(self)
         left = QWidget()
         left_layout = QVBoxLayout(left)
+        roster_box = QGroupBox("Roster")
+        roster_layout = QVBoxLayout(roster_box)
         self.employee_list = QListWidget()
         self.employee_list.setSelectionMode(QListWidget.ExtendedSelection)
-        left_buttons = QHBoxLayout()
         self.add_employee_button = QPushButton("Add Employee")
         self.remove_employee_button = QPushButton("Hide Employee")
         self.merge_employee_button = QPushButton("Merge Selected")
         self.sync_button = QPushButton("Sync Outlook Emails")
         self.show_hidden_box = QCheckBox("Show hidden employees")
-        left_buttons.addWidget(self.add_employee_button)
-        left_buttons.addWidget(self.remove_employee_button)
-        left_buttons.addWidget(self.merge_employee_button)
-        left_buttons.addWidget(self.sync_button)
-        left_layout.addWidget(QLabel("Employees"))
-        left_layout.addWidget(self.show_hidden_box)
-        left_layout.addWidget(self.employee_list, 1)
-        left_layout.addLayout(left_buttons)
+        self.roster_state_label = QLabel("Manual emails, hidden employees, and merges are saved until you change them.")
+        self.roster_state_label.setWordWrap(True)
+        roster_layout.addWidget(self.show_hidden_box)
+        roster_layout.addWidget(self.employee_list, 1)
+        roster_layout.addWidget(self.roster_state_label)
+
+        roster_actions_box = QGroupBox("Roster Actions")
+        roster_actions_layout = QGridLayout(roster_actions_box)
+        roster_actions_layout.addWidget(self.add_employee_button, 0, 0)
+        roster_actions_layout.addWidget(self.remove_employee_button, 0, 1)
+        roster_actions_layout.addWidget(self.merge_employee_button, 1, 0)
+        roster_actions_layout.addWidget(self.sync_button, 1, 1)
+        left_layout.addWidget(roster_box, 1)
+        left_layout.addWidget(roster_actions_box)
 
         right = QWidget()
         right_layout = QVBoxLayout(right)
@@ -1095,7 +1101,7 @@ class EmployeesPage(QWidget):
         form.addRow("Notes", self.notes_edit)
         form.addRow("Groups", self.group_list)
 
-        group_box = QGroupBox("Groups")
+        group_box = QGroupBox("Group Membership")
         group_layout = QVBoxLayout(group_box)
         self.groups_list = QListWidget()
         group_buttons = QHBoxLayout()
@@ -1518,14 +1524,16 @@ class ConfigurationPage(QWidget):
     def __init__(self) -> None:
         super().__init__()
         layout = QVBoxLayout(self)
-
-        settings_box = QGroupBox("Configuration")
-        form = QFormLayout(settings_box)
         self.disable_typo_box = QCheckBox()
         self.show_daily_raw_box = QCheckBox()
         self.quickload_box = QCheckBox()
         self.hash_poll_spin = QSpinBox()
         self.hash_poll_spin.setRange(1, 1440)
+        self.update_check_delay_spin = QSpinBox()
+        self.update_check_delay_spin.setRange(5, 3600)
+        self.max_parallel_spin = QSpinBox()
+        self.max_parallel_spin.setRange(1, core.MAX_ALLOWED_PARALLEL_PARSE_WORKERS)
+        self.partial_preview_box = QCheckBox()
         self.quickload_hotkey_combo = QComboBox()
         self.quickload_hotkey_combo.setEditable(True)
         self.quickload_hotkey_combo.addItems(list(core.QUICKLOAD_CANCEL_HOTKEY_PRESETS))
@@ -1540,35 +1548,68 @@ class ConfigurationPage(QWidget):
         library_root_layout.setContentsMargins(0, 0, 0, 0)
         library_root_layout.addWidget(self.library_root_edit, 1)
         library_root_layout.addWidget(self.library_root_browse_button)
-        form.addRow("Disable name typo notifications", self.disable_typo_box)
-        form.addRow("Show Daily Raw tab", self.show_daily_raw_box)
-        form.addRow("Quick load last DSS set on startup", self.quickload_box)
-        form.addRow("Check source DSS(s) frequency (minutes)", self.hash_poll_spin)
-        form.addRow("Cancel quick-load hotkey", self.quickload_hotkey_combo)
-        form.addRow("Automatically check GitHub for updates on startup", self.auto_update_check_box)
-        form.addRow("Automatically download updates on unmetered Wi-Fi", self.auto_update_download_box)
-        form.addRow("Check sign-in time against entered hours", self.signin_hours_check_box)
-        form.addRow("DSS library root folder", library_root_row)
-        form.addRow("", self.version_label)
+
+        general_box = QGroupBox("General")
+        general_form = QFormLayout(general_box)
+        general_form.addRow("Show Daily Raw tab", self.show_daily_raw_box)
+        general_form.addRow("Application version", self.version_label)
+
+        loading_box = QGroupBox("Loading")
+        loading_form = QFormLayout(loading_box)
+        loading_form.addRow("Quick load last DSS set on startup", self.quickload_box)
+        loading_form.addRow("Check source DSS(s) frequency (minutes)", self.hash_poll_spin)
+        loading_form.addRow("Cancel quick-load hotkey", self.quickload_hotkey_combo)
+        loading_form.addRow("Delay before automatic update check (seconds)", self.update_check_delay_spin)
+        loading_form.addRow("Max parallel workbook parses", self.max_parallel_spin)
+        loading_form.addRow("Show partial results while loading", self.partial_preview_box)
+        loading_form.addRow("DSS library root folder", library_root_row)
+
+        warnings_box = QGroupBox("Warnings")
+        warnings_form = QFormLayout(warnings_box)
+        warnings_form.addRow("Disable name typo notifications", self.disable_typo_box)
+        warnings_form.addRow("Check sign-in time against entered hours", self.signin_hours_check_box)
+        warnings_form.addRow("Automatically check GitHub for updates on startup", self.auto_update_check_box)
+        warnings_form.addRow("Automatically download updates on unmetered Wi-Fi", self.auto_update_download_box)
+
+        self.persistence_box = QGroupBox("Persistence")
+        persistence_layout = QVBoxLayout(self.persistence_box)
+        self.persistence_summary_label = QLabel("")
+        self.persistence_summary_label.setWordWrap(True)
+        persistence_layout.addWidget(self.persistence_summary_label)
 
         self.appearance_box = QGroupBox("Appearance")
         self.appearance_box.setCheckable(True)
         self.appearance_box.setChecked(False)
         appearance_layout = QVBoxLayout(self.appearance_box)
+        preset_row = QHBoxLayout()
+        self.appearance_preset_combo = QComboBox()
+        self.appearance_preset_combo.addItems([*core.ui_theme_presets().keys(), "Custom"])
+        self.apply_preset_button = QPushButton("Apply Preset")
+        preset_row.addWidget(QLabel("Preset"))
+        preset_row.addWidget(self.appearance_preset_combo, 1)
+        preset_row.addWidget(self.apply_preset_button)
+        appearance_layout.addLayout(preset_row)
         self.appearance_content = QWidget()
-        appearance_grid = QGridLayout(self.appearance_content)
         self._theme_line_edits: dict[str, QLineEdit] = {}
-        for row, (label, attr) in enumerate(core.UI_THEME_CONFIG_FIELDS):
-            appearance_grid.addWidget(QLabel(label), row, 0)
-            edit = QLineEdit()
-            self._theme_line_edits[attr] = edit
-            pick_button = QPushButton("Pick...")
-            pick_button.clicked.connect(lambda _checked=False, key=attr: self._pick_theme_colour(key))
-            appearance_grid.addWidget(edit, row, 1)
-            appearance_grid.addWidget(pick_button, row, 2)
+        appearance_groups_layout = QVBoxLayout(self.appearance_content)
+        label_by_attr = {attr: label for label, attr in core.UI_THEME_CONFIG_FIELDS}
+        for group_title, attrs in core.UI_THEME_GROUPS:
+            group_box = QGroupBox(group_title)
+            group_grid = QGridLayout(group_box)
+            for row, attr in enumerate(attrs):
+                group_grid.addWidget(QLabel(label_by_attr.get(attr, attr)), row, 0)
+                edit = self._theme_line_edits.get(attr)
+                if edit is None:
+                    edit = QLineEdit()
+                    self._theme_line_edits[attr] = edit
+                pick_button = QPushButton("Pick...")
+                pick_button.clicked.connect(lambda _checked=False, key=attr: self._pick_theme_colour(key))
+                group_grid.addWidget(edit, row, 1)
+                group_grid.addWidget(pick_button, row, 2)
+            appearance_groups_layout.addWidget(group_box)
         self.reset_colours_button = QPushButton("Reset colours to sample defaults")
         self.reset_colours_button.clicked.connect(self._reset_theme_defaults)
-        appearance_grid.addWidget(self.reset_colours_button, len(core.UI_THEME_CONFIG_FIELDS), 0, 1, 3)
+        appearance_groups_layout.addWidget(self.reset_colours_button, 0, Qt.AlignLeft)
         appearance_layout.addWidget(self.appearance_content)
         self.appearance_box.toggled.connect(self.appearance_content.setVisible)
         self.appearance_content.setVisible(False)
@@ -1617,7 +1658,10 @@ class ConfigurationPage(QWidget):
         self.update_status_label.setWordWrap(True)
         diagnostics_layout.addWidget(self.update_status_label, (len(diagnostics_buttons) + 1) // 2, 0, 1, 2)
 
-        layout.addWidget(settings_box)
+        layout.addWidget(general_box)
+        layout.addWidget(loading_box)
+        layout.addWidget(warnings_box)
+        layout.addWidget(self.persistence_box)
         layout.addWidget(self.appearance_box)
         layout.addWidget(self.apply_button, 0, Qt.AlignLeft)
         layout.addWidget(maintenance)
@@ -1628,6 +1672,9 @@ class ConfigurationPage(QWidget):
         self.show_daily_raw_box.toggled.connect(self.settingsChanged.emit)
         self.quickload_box.toggled.connect(self.settingsChanged.emit)
         self.hash_poll_spin.valueChanged.connect(self.settingsChanged.emit)
+        self.update_check_delay_spin.valueChanged.connect(self.settingsChanged.emit)
+        self.max_parallel_spin.valueChanged.connect(self.settingsChanged.emit)
+        self.partial_preview_box.toggled.connect(self.settingsChanged.emit)
         self.quickload_hotkey_combo.lineEdit().editingFinished.connect(self.settingsChanged.emit)
         self.auto_update_check_box.toggled.connect(self.settingsChanged.emit)
         self.auto_update_download_box.toggled.connect(self.settingsChanged.emit)
@@ -1637,6 +1684,7 @@ class ConfigurationPage(QWidget):
             edit.editingFinished.connect(self.settingsChanged.emit)
             edit.textChanged.connect(lambda _text, field=edit: self._apply_theme_edit_preview(field))
         self.library_root_browse_button.clicked.connect(self._browse_library_root)
+        self.apply_preset_button.clicked.connect(self._apply_selected_preset)
         self.reset_button.clicked.connect(self.resetRequested.emit)
         self.clear_cache_button.clicked.connect(self.clearCacheRequested.emit)
         self.clear_emails_button.clicked.connect(self.clearEmailsRequested.emit)
@@ -1649,6 +1697,7 @@ class ConfigurationPage(QWidget):
         self.sync_outlook_button.clicked.connect(self.syncOutlookRequested.emit)
         self.check_name_typos_button.clicked.connect(self.checkNameTyposRequested.emit)
         self.show_app_data_button.clicked.connect(self.showAppDataRequested.emit)
+        self._refresh_persistence_summary()
 
     def _browse_library_root(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "Choose DSS Library Root Folder", self.library_root_edit.text().strip() or str(Path.home()))
@@ -1683,7 +1732,32 @@ class ConfigurationPage(QWidget):
             if edit is not None:
                 edit.setText(getattr(defaults, attr))
                 self._apply_theme_edit_preview(edit)
+        self.appearance_preset_combo.setCurrentText(core.ui_theme_preset_name(defaults))
         self.settingsChanged.emit()
+
+    def _apply_selected_preset(self) -> None:
+        preset_name = self.appearance_preset_combo.currentText().strip()
+        preset = core.ui_theme_presets().get(preset_name)
+        if preset is None:
+            return
+        for _label, attr in core.UI_THEME_CONFIG_FIELDS:
+            edit = self._theme_line_edits.get(attr)
+            if edit is not None:
+                edit.setText(getattr(preset, attr))
+                self._apply_theme_edit_preview(edit)
+        self.settingsChanged.emit()
+
+    def _refresh_persistence_summary(self) -> None:
+        self.persistence_summary_label.setText(
+            "\n".join(
+                [
+                    f"Warning suppressions are retained for {core.SUPPRESSION_RETENTION_DAYS} days and survive updates.",
+                    "Hidden employees remain saved until you restore them and survive updates.",
+                    "Employee merges remain saved until you change them and survive updates.",
+                    "Manual employee email addresses remain saved until cleared and survive updates.",
+                ]
+            )
+        )
 
     def set_update_status(self, text: str) -> None:
         self.update_status_label.setText(text)
@@ -1693,6 +1767,9 @@ class ConfigurationPage(QWidget):
         self.show_daily_raw_box.setChecked(settings.show_daily_raw_tab)
         self.quickload_box.setChecked(settings.quickload_last_sources_enabled)
         self.hash_poll_spin.setValue(settings.hash_poll_minutes)
+        self.update_check_delay_spin.setValue(settings.update_check_delay_seconds)
+        self.max_parallel_spin.setValue(settings.max_parallel_parse_workers)
+        self.partial_preview_box.setChecked(settings.partial_preview_enabled)
         self.quickload_hotkey_combo.setCurrentText(settings.quickload_cancel_hotkey)
         self.auto_update_check_box.setChecked(settings.auto_update_check_enabled)
         self.auto_update_download_box.setChecked(settings.auto_download_updates_on_unmetered_wifi)
@@ -1703,6 +1780,7 @@ class ConfigurationPage(QWidget):
             if edit is not None:
                 edit.setText(getattr(settings.ui_theme, attr))
                 self._apply_theme_edit_preview(edit)
+        self.appearance_preset_combo.setCurrentText(core.ui_theme_preset_name(settings.ui_theme))
 
     def snapshot(self, current: core.AppSettings) -> core.AppSettings:
         hotkey = core.normalize_quickload_cancel_hotkey(self.quickload_hotkey_combo.currentText().strip())
@@ -1722,6 +1800,7 @@ class ConfigurationPage(QWidget):
         return core.AppSettings(
             disable_name_typo_notifications=self.disable_typo_box.isChecked(),
             hash_poll_minutes=int(self.hash_poll_spin.value()),
+            update_check_delay_seconds=int(self.update_check_delay_spin.value()),
             show_daily_raw_tab=self.show_daily_raw_box.isChecked(),
             quickload_last_sources_enabled=self.quickload_box.isChecked(),
             quickload_cancel_hotkey=hotkey,
@@ -1729,6 +1808,8 @@ class ConfigurationPage(QWidget):
             auto_download_updates_on_unmetered_wifi=self.auto_update_download_box.isChecked(),
             signin_hours_check_enabled=self.signin_hours_check_box.isChecked(),
             dss_library_root=self.library_root_edit.text().strip(),
+            max_parallel_parse_workers=int(self.max_parallel_spin.value()),
+            partial_preview_enabled=self.partial_preview_box.isChecked(),
             ui_theme=core.parse_ui_theme_payload(theme_payload, defaults=current.ui_theme),
         )
 
@@ -1859,6 +1940,7 @@ class DssQtMainWindow(QMainWindow):
         self.suppressed_parse_warnings = core.load_named_suppressions(self.config_path, "suppressed_parse_warnings")
         self.suppressed_workbook_health = core.load_named_suppressions(self.config_path, "suppressed_workbook_health")
         self._cached_name_typo_warnings: list[core.NameTypoWarning] = []
+        self._cached_name_typo_key: str | None = None
         self.current_data: core.TrackerData | None = None
         self.source_paths: list[Path] = list(initial_source or [])
         self.load_worker: LoadWorker | None = None
@@ -1878,10 +1960,7 @@ class DssQtMainWindow(QMainWindow):
         self._employee_summary_week_start: date | None = None
         self._employee_summary_week_end: date | None = None
         self._show_suppressed_report_rows: dict[str, bool] = {
-            "error_report": False,
-            "parse_warnings": False,
-            "workbook_health": False,
-            "name_typos": False,
+            "data_review": False,
         }
         self._cancel_shortcut_action: QAction | None = None
         self._quickload_session = False
@@ -1910,7 +1989,7 @@ class DssQtMainWindow(QMainWindow):
                 self._quickload_session = True
                 self.source_paths = last_paths
                 QTimer.singleShot(0, self.reload_data)
-        QTimer.singleShot(core.AUTO_UPDATE_CHECK_DELAY_MS, self._auto_check_for_updates)
+        QTimer.singleShot(max(5, self.app_settings.update_check_delay_seconds) * 1000, self._auto_check_for_updates)
 
     def _build_ui(self) -> None:
         self.setWindowTitle(core.DISPLAY_APP_NAME)
@@ -1918,10 +1997,7 @@ class DssQtMainWindow(QMainWindow):
         root = QWidget()
         root_layout = QVBoxLayout(root)
 
-        toolbar = QHBoxLayout()
-        self.open_button = QPushButton("Open DSS Workbook(s)")
-        self.quick_open_button = QPushButton("Quick Open")
-        self.add_button = QPushButton("Add DSS")
+        self.add_button = QPushButton("Add DSSs...")
         self.quick_add_button = QPushButton("Quick Add")
         self.remove_button = QPushButton("Remove DSS(s)")
         self.update_button = QPushButton("Update View")
@@ -1935,25 +2011,39 @@ class DssQtMainWindow(QMainWindow):
         self.percent_label = QLabel("0.0%")
         self.cancel_button = QPushButton("Cancel")
         self.cancel_button.setEnabled(False)
+        controls_box = QGroupBox("Workbook Controls")
+        controls_layout = QHBoxLayout(controls_box)
         for widget in (
-            self.open_button,
-            self.quick_open_button,
             self.add_button,
             self.quick_add_button,
             self.remove_button,
             self.update_button,
             self.export_button,
-            QLabel("Filter"),
-            self.employee_filter,
-            QLabel("PF"),
-            self.pf_filter,
         ):
-            if isinstance(widget, QWidget):
-                toolbar.addWidget(widget)
-        toolbar.addStretch(1)
-        toolbar.addWidget(self.source_label, 1)
-        toolbar.addWidget(self.loading_label)
-        root_layout.addLayout(toolbar)
+            controls_layout.addWidget(widget)
+        controls_layout.addStretch(1)
+
+        filters_box = QGroupBox("Filters")
+        filters_layout = QHBoxLayout(filters_box)
+        filters_layout.addWidget(QLabel("Employee"))
+        filters_layout.addWidget(self.employee_filter)
+        filters_layout.addWidget(QLabel("PF"))
+        filters_layout.addWidget(self.pf_filter)
+        filters_layout.addStretch(1)
+
+        load_box = QGroupBox("Load Status")
+        load_layout = QHBoxLayout(load_box)
+        load_layout.addWidget(self.source_label, 1)
+        load_layout.addWidget(self.loading_label)
+        load_layout.addWidget(self.percent_label)
+        load_layout.addWidget(self.progress_bar, 2)
+        load_layout.addWidget(self.cancel_button)
+
+        top_groups = QVBoxLayout()
+        top_groups.addWidget(controls_box)
+        top_groups.addWidget(filters_box)
+        top_groups.addWidget(load_box)
+        root_layout.addLayout(top_groups)
 
         status_row = QHBoxLayout()
         self.status_label = QLabel("Load a DSS workbook to view daily and weekly labour summaries.")
@@ -1962,10 +2052,29 @@ class DssQtMainWindow(QMainWindow):
         self.quickload_hint_label.setWordWrap(True)
         status_row.addWidget(self.status_label, 1)
         status_row.addWidget(self.quickload_hint_label)
-        status_row.addWidget(self.percent_label)
-        status_row.addWidget(self.progress_bar)
-        status_row.addWidget(self.cancel_button)
         root_layout.addLayout(status_row)
+
+        overview_box = QGroupBox("Overview")
+        overview_layout = QHBoxLayout(overview_box)
+        self.loaded_files_summary_label = QLabel("Files: 0")
+        self.loaded_employees_summary_label = QLabel("Employees: 0")
+        self.loaded_pfs_summary_label = QLabel("PFs: 0")
+        self.review_summary_label = QLabel("Review: 0")
+        self.suppression_summary_label = QLabel("Suppressed: 0")
+        self.hidden_summary_label = QLabel("Hidden: 0")
+        self.merge_summary_label = QLabel("Merges: 0")
+        for widget in (
+            self.loaded_files_summary_label,
+            self.loaded_employees_summary_label,
+            self.loaded_pfs_summary_label,
+            self.review_summary_label,
+            self.suppression_summary_label,
+            self.hidden_summary_label,
+            self.merge_summary_label,
+        ):
+            overview_layout.addWidget(widget)
+        overview_layout.addStretch(1)
+        root_layout.addWidget(overview_box)
 
         self.group_tabs = QTabWidget()
         root_layout.addWidget(self.group_tabs, 1)
@@ -1991,15 +2100,17 @@ class DssQtMainWindow(QMainWindow):
             (self.summary_tabs, TableSpec("employee_daily_pf", "Summary by Employee", (("employee", "Employee"), ("week_number", "Week #"), ("date", "Date"), ("pf_number", "PF#"), ("st", "ST"), ("ot", "OT"), ("dt", "DT"), ("total", "Total")))),
             (self.summary_tabs, TableSpec("combined_daily", "Combined Summary Daily", (("date", "Date"), ("employee", "Employee"), ("st", "ST"), ("ot", "OT"), ("dt", "DT"), ("total", "Total"), ("expanded", "Expanded Hours")))),
             (self.summary_tabs, TableSpec("combined_weekly", "Combined Summary Weekly", (("week_start", "Week Start"), ("week_end", "Week End"), ("employee", "Employee"), ("st", "ST"), ("ot", "OT"), ("dt", "DT"), ("total", "Total"), ("expanded", "Expanded Hours")))),
-            (self.report_tabs, TableSpec("error_report", "Error Report", (("suppressed", "Suppressed"), ("employee", "Employee"), ("week_start", "Week Start"), ("week_end", "Week End"), ("hour_type", "Rule"), ("limit", "Limit"), ("actual_total", "Actual"), ("delta", "Delta"), ("trigger_date", "Trigger Date"), ("source_files", "Source Files"), ("reason", "Reason"), ("breakdown", "Breakdown")))),
-            (self.report_tabs, TableSpec("parse_warnings", "Sheet Parse Warnings", (("suppressed", "Suppressed"), ("source_file", "Source File"), ("sheet", "Sheet"), ("date", "Date"), ("issue", "Issue"), ("details", "Details")))),
-            (self.report_tabs, TableSpec("workbook_health", "Workbook Health", (("suppressed", "Suppressed"), ("source_file", "Source File"), ("status", "Status"), ("details", "Details")))),
-            (self.report_tabs, TableSpec("name_typos", "Name Typos", (("suppressed", "Suppressed"), ("employee", "Employee"), ("similar_employee", "Suggested Match"), ("similarity", "Similarity"), ("locations", "Locations")))),
+            (self.report_tabs, TableSpec("data_review", "Data Review", (("suppressed", "Suppressed"), ("category", "Category"), ("employee", "Employee"), ("source_file", "Source File"), ("sheet", "Sheet"), ("date", "Date"), ("summary", "Summary"), ("details", "Details")))),
+            (None, TableSpec("error_report", "Error Report", (("suppressed", "Suppressed"), ("employee", "Employee"), ("week_start", "Week Start"), ("week_end", "Week End"), ("hour_type", "Rule"), ("limit", "Limit"), ("actual_total", "Actual"), ("delta", "Delta"), ("trigger_date", "Trigger Date"), ("source_files", "Source Files"), ("reason", "Reason"), ("breakdown", "Breakdown")))),
+            (None, TableSpec("parse_warnings", "Sheet Parse Warnings", (("suppressed", "Suppressed"), ("source_file", "Source File"), ("sheet", "Sheet"), ("date", "Date"), ("issue", "Issue"), ("details", "Details")))),
+            (None, TableSpec("workbook_health", "Workbook Health", (("suppressed", "Suppressed"), ("source_file", "Source File"), ("status", "Status"), ("details", "Details")))),
+            (None, TableSpec("name_typos", "Name Typos", (("suppressed", "Suppressed"), ("employee", "Employee"), ("similar_employee", "Suggested Match"), ("similarity", "Similarity"), ("locations", "Locations")))),
             (self.report_tabs, TableSpec("audit_data_trail", "Audit Data Trail", (("source_file", "Source File"), ("pf_number", "PF#"), ("date", "Date"), ("sheet", "Sheet"), ("employee", "Employee"), ("st", "ST"), ("ot", "OT"), ("dt", "DT"), ("total", "Total"), ("expanded", "Expanded Hours"), ("source_ranges", "Source Ranges"), ("audit", "Audit")))),
         ]:
             page = DataTablePage(spec, theme, self.config_path, row_activate_callback=self._handle_table_row_activated)
             page.layoutChanged.connect(self._save_table_layout)
-            parent.addTab(page, spec.title)
+            if parent is not None:
+                parent.addTab(page, spec.title)
             self.pages[spec.table_id] = page
         self._build_report_page_toolbars()
         self._build_employee_summary_toolbar()
@@ -2019,8 +2130,6 @@ class DssQtMainWindow(QMainWindow):
         self.settings_tabs.addTab(self.employees_page, "Employees")
         self.settings_tabs.addTab(self.formatting_page, "Formatting Rules")
 
-        self.open_button.clicked.connect(self.open_dss_files)
-        self.quick_open_button.clicked.connect(self.quick_open_dss_files)
         self.add_button.clicked.connect(self.add_dss_files)
         self.quick_add_button.clicked.connect(self.quick_add_dss_files)
         self.remove_button.clicked.connect(self.remove_dss_files)
@@ -2051,6 +2160,10 @@ class DssQtMainWindow(QMainWindow):
         self.configuration_page.syncOutlookRequested.connect(self.sync_outlook_emails)
         self.configuration_page.checkNameTyposRequested.connect(self.check_name_typos_manually)
         self.configuration_page.showAppDataRequested.connect(self.show_app_data_folder)
+        self.group_tabs.currentChanged.connect(lambda _index: self._refresh_export_button_state())
+        self.data_tabs.currentChanged.connect(lambda _index: self._refresh_export_button_state())
+        self.summary_tabs.currentChanged.connect(lambda _index: self._refresh_export_button_state())
+        self.report_tabs.currentChanged.connect(lambda _index: self._refresh_export_button_state())
 
     def _build_employee_summary_toolbar(self) -> None:
         page = self.pages["employee_daily_pf"]
@@ -2087,7 +2200,7 @@ class DssQtMainWindow(QMainWindow):
         self._report_action_buttons: dict[str, dict[str, QPushButton]] = {}
         self._report_selection_rows: dict[str, list[dict[str, Any]]] = {}
 
-        for table_id in ("error_report", "parse_warnings", "workbook_health", "name_typos"):
+        for table_id in ("data_review",):
             page = self.pages[table_id]
             show_box = QCheckBox("Show Suppressed")
             show_box.setChecked(self._show_suppressed_report_rows.get(table_id, False))
@@ -2097,24 +2210,11 @@ class DssQtMainWindow(QMainWindow):
             page.selectionChanged.connect(self._report_page_selection_changed)
             page.set_context_menu_callback(lambda rows, global_pos, page_id=table_id: self._open_report_context_menu(page_id, rows, global_pos))
 
-        self._report_action_buttons["error_report"] = {
-            "check_typos": self.pages["error_report"].add_toolbar_button("Check Name Typos", self.check_name_typos_manually),
-            "suppress": self.pages["error_report"].add_toolbar_button("Suppress Selected", lambda: self._set_selected_rows_suppressed("error_report", True)),
-            "unsuppress": self.pages["error_report"].add_toolbar_button("Unsuppress Selected", lambda: self._set_selected_rows_suppressed("error_report", False)),
-        }
-        self._report_action_buttons["parse_warnings"] = {
-            "suppress": self.pages["parse_warnings"].add_toolbar_button("Suppress Selected", lambda: self._set_selected_rows_suppressed("parse_warnings", True)),
-            "unsuppress": self.pages["parse_warnings"].add_toolbar_button("Unsuppress Selected", lambda: self._set_selected_rows_suppressed("parse_warnings", False)),
-        }
-        self._report_action_buttons["workbook_health"] = {
-            "suppress": self.pages["workbook_health"].add_toolbar_button("Suppress Selected", lambda: self._set_selected_rows_suppressed("workbook_health", True)),
-            "unsuppress": self.pages["workbook_health"].add_toolbar_button("Unsuppress Selected", lambda: self._set_selected_rows_suppressed("workbook_health", False)),
-        }
-        self._report_action_buttons["name_typos"] = {
-            "refresh": self.pages["name_typos"].add_toolbar_button("Refresh Name Typos", self.check_name_typos_manually),
-            "merge": self.pages["name_typos"].add_toolbar_button("Merge Selected", self._merge_selected_name_typos),
-            "suppress": self.pages["name_typos"].add_toolbar_button("Suppress Selected", lambda: self._set_selected_rows_suppressed("name_typos", True)),
-            "unsuppress": self.pages["name_typos"].add_toolbar_button("Unsuppress Selected", lambda: self._set_selected_rows_suppressed("name_typos", False)),
+        self._report_action_buttons["data_review"] = {
+            "refresh": self.pages["data_review"].add_toolbar_button("Refresh Name Typos", self.check_name_typos_manually),
+            "merge": self.pages["data_review"].add_toolbar_button("Merge Selected", self._merge_selected_name_typos),
+            "suppress": self.pages["data_review"].add_toolbar_button("Suppress Selected", lambda: self._set_selected_rows_suppressed("data_review", True)),
+            "unsuppress": self.pages["data_review"].add_toolbar_button("Unsuppress Selected", lambda: self._set_selected_rows_suppressed("data_review", False)),
         }
         self._update_report_action_states()
 
@@ -2132,12 +2232,13 @@ class DssQtMainWindow(QMainWindow):
             has_rows = bool(rows)
             has_suppressed = any(bool(row.get("suppressed")) for row in rows)
             has_unsuppressed = any(not bool(row.get("suppressed")) for row in rows)
+            has_typo_rows = any(self._report_row_table_id(table_id, row) == "name_typos" for row in rows)
             if "suppress" in buttons:
                 buttons["suppress"].setEnabled(has_unsuppressed)
             if "unsuppress" in buttons:
                 buttons["unsuppress"].setEnabled(has_suppressed)
             if "merge" in buttons:
-                buttons["merge"].setEnabled(bool(rows))
+                buttons["merge"].setEnabled(has_typo_rows)
 
     def _open_report_context_menu(self, table_id: str, rows: list[dict[str, Any]], global_pos: QPoint) -> None:
         if not rows:
@@ -2145,18 +2246,19 @@ class DssQtMainWindow(QMainWindow):
         menu = QMenu(self)
         has_suppressed = any(bool(row.get("suppressed")) for row in rows)
         has_unsuppressed = any(not bool(row.get("suppressed")) for row in rows)
+        has_typo_rows = any(self._report_row_table_id(table_id, row) == "name_typos" for row in rows)
         suppress_action = None
         unsuppress_action = None
         merge_action = None
-        if table_id in {"error_report", "parse_warnings", "workbook_health", "name_typos"}:
+        if table_id == "data_review":
             suppress_action = menu.addAction("Suppress Selected")
             suppress_action.setEnabled(has_unsuppressed)
             unsuppress_action = menu.addAction("Unsuppress Selected")
             unsuppress_action.setEnabled(has_suppressed)
-        if table_id == "name_typos":
+        if has_typo_rows:
             menu.addSeparator()
             merge_action = menu.addAction("Merge Selected")
-            merge_action.setEnabled(bool(rows))
+            merge_action.setEnabled(True)
         chosen = menu.exec(global_pos)
         if chosen == suppress_action:
             self._set_selected_rows_suppressed(table_id, True)
@@ -2194,7 +2296,9 @@ class DssQtMainWindow(QMainWindow):
         self._refresh_source_status_labels()
         self._refresh_quickload_hint_label()
         self._apply_ui_theme_chrome()
+        self._refresh_overview_labels()
         self.refresh_views()
+        self._refresh_export_button_state()
         self._set_loading_state(False)
 
     def _display_employee_name(self, employee: str) -> str:
@@ -2416,15 +2520,59 @@ class DssQtMainWindow(QMainWindow):
             app.setPalette(_build_forced_qt_palette(theme))
         self.setStyleSheet(_build_qt_chrome_stylesheet(theme))
 
-    def _sync_reports_alert_chrome(self, has_errors: bool, has_parse_warnings: bool, has_name_typos: bool = False) -> None:
-        error_index = self.report_tabs.indexOf(self.pages["error_report"])
-        parse_index = self.report_tabs.indexOf(self.pages["parse_warnings"])
-        typo_index = self.report_tabs.indexOf(self.pages["name_typos"])
+    def _sync_reports_alert_chrome(self, has_errors: bool, has_parse_warnings: bool, has_name_typos: bool = False, has_workbook_health: bool = False) -> None:
+        review_index = self.report_tabs.indexOf(self.pages["data_review"])
         reports_index = self.group_tabs.indexOf(self.report_tabs)
-        self.report_tabs.setTabText(error_index, "Error Report (!)" if has_errors else "Error Report")
-        self.report_tabs.setTabText(parse_index, "Sheet Parse Warnings (!)" if has_parse_warnings else "Sheet Parse Warnings")
-        self.report_tabs.setTabText(typo_index, "Name Typos (!)" if has_name_typos else "Name Typos")
-        self.group_tabs.setTabText(reports_index, "Reports (!)" if (has_errors or has_parse_warnings or has_name_typos) else "Reports")
+        has_review_items = has_errors or has_parse_warnings or has_name_typos or has_workbook_health
+        self.report_tabs.setTabText(review_index, "Data Review (!)" if has_review_items else "Data Review")
+        self.group_tabs.setTabText(reports_index, "Reports (!)" if has_review_items else "Reports")
+
+    def _invalidate_name_typo_cache(self) -> None:
+        self._cached_name_typo_warnings = []
+        self._cached_name_typo_key = None
+
+    def _current_name_typo_cache_key(self) -> str | None:
+        if self.current_data is None:
+            return None
+        payload = {
+            "file_hashes": sorted((str(path), digest) for path, digest in self.current_data.file_hashes.items()),
+            "employees": sorted(self._managed_employee_names(), key=str.casefold),
+            "employee_emails": sorted((name, email.strip()) for name, email in self.employee_emails.items() if name.strip()),
+            "missing_email_suppressions": sorted(self.missing_email_suppressions, key=str.casefold),
+            "employee_outlook_display_names": sorted((name, value.strip()) for name, value in self.employee_outlook_display_names.items() if name.strip()),
+        }
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+    def _refresh_overview_labels(self) -> None:
+        if self.current_data is None:
+            loaded_files = 0
+            employees = 0
+            pf_count = 0
+            unsuppressed_review = 0
+        else:
+            loaded_files = len(self.current_data.source_paths)
+            employees = len(self._managed_employee_names())
+            pf_count = len({core.display_pf_number(record.pf_number) for record in self.current_data.daily_records if core.display_pf_number(record.pf_number)})
+            unsuppressed_review = (
+                sum(1 for item in core.find_error_findings(self.current_data.daily_records, self._active_profile()) if not self._is_row_suppressed("error_report", core.error_finding_suppression_key(item)))
+                + sum(1 for warning in self._current_parse_warnings() if not self._is_row_suppressed("parse_warnings", core.sheet_parse_warning_suppression_key(warning)))
+                + sum(1 for item in self.current_data.workbook_health if not self._is_row_suppressed("workbook_health", core.workbook_health_suppression_key(item)))
+                + sum(1 for warning in self._current_name_typo_warnings() if not self._is_row_suppressed("name_typos", core.typo_warning_key(warning.employee, warning.similar_employee)))
+            )
+        suppressed_total = (
+            len(self.suppressed_error_findings)
+            + len(self.suppressed_parse_warnings)
+            + len(self.suppressed_workbook_health)
+            + len(self.ignored_name_typos)
+            + len(self.missing_email_suppressions)
+        )
+        self.loaded_files_summary_label.setText(f"Files: {loaded_files}")
+        self.loaded_employees_summary_label.setText(f"Employees: {employees}")
+        self.loaded_pfs_summary_label.setText(f"PFs: {pf_count}")
+        self.review_summary_label.setText(f"Review: {unsuppressed_review}")
+        self.suppression_summary_label.setText(f"Suppressed: {suppressed_total}")
+        self.hidden_summary_label.setText(f"Hidden: {len(self.employee_hidden_names)}")
+        self.merge_summary_label.setText(f"Merges: {len(self.employee_name_merges)}")
 
     def _active_profile(self) -> core.FormattingProfile:
         return self.profiles.get(self.current_profile_name, next(iter(self.profiles.values())))
@@ -2451,6 +2599,7 @@ class DssQtMainWindow(QMainWindow):
             seen_keys.add(key)
             deduped.append(warning)
         self._cached_name_typo_warnings = deduped
+        self._cached_name_typo_key = self._current_name_typo_cache_key()
 
     def _current_name_typo_warnings(self) -> list[core.NameTypoWarning]:
         allowed_employees = self._selected_employee_values()
@@ -2472,6 +2621,10 @@ class DssQtMainWindow(QMainWindow):
             return self.ignored_name_typos
         return set()
 
+    def _report_row_table_id(self, table_id: str, row: dict[str, Any]) -> str:
+        review_table_id = str(row.get("__review_table_id__", "")).strip()
+        return review_table_id or table_id
+
     def _persist_suppression_set(self, table_id: str) -> None:
         if table_id == "error_report":
             core.save_named_suppressions(self.config_path, "suppressed_error_findings", self.suppressed_error_findings)
@@ -2483,6 +2636,7 @@ class DssQtMainWindow(QMainWindow):
             self._persist_ignored_name_typos()
 
     def _suppression_key_for_row(self, table_id: str, row: dict[str, Any]) -> str:
+        table_id = self._report_row_table_id(table_id, row)
         key = str(row.get("__suppression_key__", "")).strip()
         if key:
             return key
@@ -2497,10 +2651,11 @@ class DssQtMainWindow(QMainWindow):
         rows = self._report_selection_rows.get(table_id, [])
         if not rows:
             return
-        suppressions = self._suppression_set_for_table(table_id)
         changed = False
         for row in rows:
-            suppression_key = self._suppression_key_for_row(table_id, row)
+            row_table_id = self._report_row_table_id(table_id, row)
+            suppressions = self._suppression_set_for_table(row_table_id)
+            suppression_key = self._suppression_key_for_row(row_table_id, row)
             if not suppression_key:
                 continue
             if suppressed:
@@ -2512,11 +2667,16 @@ class DssQtMainWindow(QMainWindow):
                 changed = True
         if not changed:
             return
-        self._persist_suppression_set(table_id)
+        for changed_table_id in {self._report_row_table_id(table_id, row) for row in rows}:
+            self._persist_suppression_set(changed_table_id)
         self.refresh_views()
 
     def _merge_selected_name_typos(self) -> None:
-        rows = self._report_selection_rows.get("name_typos", [])
+        rows = [
+            row
+            for row in self._report_selection_rows.get("data_review", [])
+            if self._report_row_table_id("data_review", row) == "name_typos"
+        ]
         if not rows:
             return
         for row in rows:
@@ -2720,31 +2880,47 @@ class DssQtMainWindow(QMainWindow):
             for row in sorted(week_totals, key=lambda item: item.week_start, reverse=True)
         ])
         error_rows: list[dict[str, Any]] = []
+        data_review_rows: list[dict[str, Any]] = []
         for item in sorted(findings, key=lambda finding: (finding.week_start, finding.employee, finding.hour_type), reverse=True):
             suppression_key = core.error_finding_suppression_key(item)
             suppressed = self._is_row_suppressed("error_report", suppression_key)
-            if suppressed and not self._show_suppressed_report_rows["error_report"]:
+            if suppressed and not self._show_suppressed_report_rows["data_review"]:
                 continue
             tags = ["alert"]
             if suppressed:
                 tags.append("suppressed")
-            error_rows.append(
+            row = {
+                "suppressed": suppressed,
+                "employee": item.employee,
+                "week_start": item.week_start.isoformat(),
+                "week_end": item.week_end.isoformat(),
+                "hour_type": item.hour_type,
+                "limit": core.fmt_hours(item.threshold),
+                "actual_total": core.fmt_hours(item.actual_total),
+                "delta": core.fmt_hours(item.delta),
+                "trigger_date": item.trigger_date.isoformat(),
+                "source_files": item.source_files,
+                "reason": item.reason,
+                "breakdown": item.breakdown,
+                "__tags__": tuple(tags),
+                "__finding__": item,
+                "__suppression_key__": suppression_key,
+            }
+            error_rows.append(row)
+            data_review_rows.append(
                 {
                     "suppressed": suppressed,
+                    "category": "Hour Count Error",
                     "employee": item.employee,
-                    "week_start": item.week_start.isoformat(),
-                    "week_end": item.week_end.isoformat(),
-                    "hour_type": item.hour_type,
-                    "limit": core.fmt_hours(item.threshold),
-                    "actual_total": core.fmt_hours(item.actual_total),
-                    "delta": core.fmt_hours(item.delta),
-                    "trigger_date": item.trigger_date.isoformat(),
-                    "source_files": item.source_files,
-                    "reason": item.reason,
-                    "breakdown": item.breakdown,
+                    "source_file": item.source_files,
+                    "sheet": "",
+                    "date": item.trigger_date.isoformat(),
+                    "summary": f"{item.hour_type}: {core.fmt_hours(item.actual_total)} vs {core.fmt_hours(item.threshold)}",
+                    "details": item.reason,
                     "__tags__": tuple(tags),
                     "__finding__": item,
                     "__suppression_key__": suppression_key,
+                    "__review_table_id__": "error_report",
                 }
             )
         self.pages["error_report"].set_rows(error_rows)
@@ -2756,20 +2932,35 @@ class DssQtMainWindow(QMainWindow):
                 continue
             suppression_key = core.sheet_parse_warning_suppression_key(warning)
             suppressed = self._is_row_suppressed("parse_warnings", suppression_key)
-            if suppressed and not self._show_suppressed_report_rows["parse_warnings"]:
+            if suppressed and not self._show_suppressed_report_rows["data_review"]:
                 continue
             tags = ("suppressed",) if suppressed else ()
-            parse_warning_rows.append(
+            row = {
+                "suppressed": suppressed,
+                "source_file": warning.source_file,
+                "sheet": warning.source_sheet,
+                "date": warning.work_date,
+                "issue": warning.issue,
+                "details": warning.details,
+                "__warning__": warning,
+                "__suppression_key__": suppression_key,
+                "__tags__": tags,
+            }
+            parse_warning_rows.append(row)
+            data_review_rows.append(
                 {
                     "suppressed": suppressed,
+                    "category": "Sheet Parse Warning",
+                    "employee": "",
                     "source_file": warning.source_file,
                     "sheet": warning.source_sheet,
                     "date": warning.work_date,
-                    "issue": warning.issue,
+                    "summary": warning.issue,
                     "details": warning.details,
                     "__warning__": warning,
                     "__suppression_key__": suppression_key,
                     "__tags__": tags,
+                    "__review_table_id__": "parse_warnings",
                 }
             )
         self.pages["parse_warnings"].set_rows(parse_warning_rows)
@@ -2779,17 +2970,31 @@ class DssQtMainWindow(QMainWindow):
                 continue
             suppression_key = core.workbook_health_suppression_key(item)
             suppressed = self._is_row_suppressed("workbook_health", suppression_key)
-            if suppressed and not self._show_suppressed_report_rows["workbook_health"]:
+            if suppressed and not self._show_suppressed_report_rows["data_review"]:
                 continue
             tags = ("suppressed",) if suppressed else ()
-            workbook_health_rows.append(
+            row = {
+                "suppressed": suppressed,
+                "source_file": item.source_file,
+                "status": item.status,
+                "details": item.details,
+                "__suppression_key__": suppression_key,
+                "__tags__": tags,
+            }
+            workbook_health_rows.append(row)
+            data_review_rows.append(
                 {
                     "suppressed": suppressed,
+                    "category": "Workbook Health",
+                    "employee": "",
                     "source_file": item.source_file,
-                    "status": item.status,
+                    "sheet": "",
+                    "date": "",
+                    "summary": item.status,
                     "details": item.details,
                     "__suppression_key__": suppression_key,
                     "__tags__": tags,
+                    "__review_table_id__": "workbook_health",
                 }
             )
         self.pages["workbook_health"].set_rows(workbook_health_rows)
@@ -2797,22 +3002,41 @@ class DssQtMainWindow(QMainWindow):
         for warning in name_typo_warnings:
             suppression_key = core.typo_warning_key(warning.employee, warning.similar_employee)
             suppressed = self._is_row_suppressed("name_typos", suppression_key)
-            if suppressed and not self._show_suppressed_report_rows["name_typos"]:
+            if suppressed and not self._show_suppressed_report_rows["data_review"]:
                 continue
             tags = ("suppressed",) if suppressed else ()
-            name_typo_rows.append(
+            similarity = f"{warning.similarity * 100:.0f}%"
+            locations = "\n".join(warning.locations)
+            row = {
+                "suppressed": suppressed,
+                "employee": warning.employee,
+                "similar_employee": warning.similar_employee,
+                "similarity": similarity,
+                "locations": locations,
+                "__warning__": warning,
+                "__suppression_key__": suppression_key,
+                "__tags__": tags,
+            }
+            name_typo_rows.append(row)
+            data_review_rows.append(
                 {
                     "suppressed": suppressed,
+                    "category": "Name Typo",
                     "employee": warning.employee,
+                    "source_file": "",
+                    "sheet": "",
+                    "date": "",
+                    "summary": f"{warning.employee} -> {warning.similar_employee} ({similarity} similar)",
+                    "details": locations,
                     "similar_employee": warning.similar_employee,
-                    "similarity": f"{warning.similarity * 100:.0f}%",
-                    "locations": "\n".join(warning.locations),
                     "__warning__": warning,
                     "__suppression_key__": suppression_key,
                     "__tags__": tags,
+                    "__review_table_id__": "name_typos",
                 }
             )
         self.pages["name_typos"].set_rows(name_typo_rows)
+        self.pages["data_review"].set_rows(data_review_rows)
         self.pages["audit_data_trail"].set_rows([
             {
                 "source_file": record.source_file,
@@ -2845,7 +3069,19 @@ class DssQtMainWindow(QMainWindow):
             for warning in name_typo_warnings
             if not self._is_row_suppressed("name_typos", core.typo_warning_key(warning.employee, warning.similar_employee))
         )
-        self._sync_reports_alert_chrome(bool(unsuppressed_error_count), bool(unsuppressed_parse_count), bool(unsuppressed_typo_count))
+        unsuppressed_workbook_health_count = sum(
+            1
+            for item in self.current_data.workbook_health
+            if item.source_file in filtered_source_files
+            and not self._is_row_suppressed("workbook_health", core.workbook_health_suppression_key(item))
+        )
+        self._sync_reports_alert_chrome(
+            bool(unsuppressed_error_count),
+            bool(unsuppressed_parse_count),
+            bool(unsuppressed_typo_count),
+            bool(unsuppressed_workbook_health_count),
+        )
+        self._refresh_overview_labels()
 
     def _refresh_email_preview(self, filtered_records: list[core.DailyRecord]) -> None:
         week_start = self.email_drafts_page.selected_week_start()
@@ -2903,12 +3139,15 @@ class DssQtMainWindow(QMainWindow):
         core.save_employee_notes(self.config_path, self.employee_notes)
         core.save_employee_groups(self.config_path, self.employee_groups)
         core.save_missing_email_suppressions(self.config_path, self.missing_email_suppressions)
+        self._invalidate_name_typo_cache()
         self._refresh_filters()
+        self._refresh_overview_labels()
         self.refresh_views()
 
     def _formatting_changed(self) -> None:
         self.profiles, self.current_profile_name = self.formatting_page.snapshot()
         core.save_formatting_profiles(self.config_path, self.profiles, self.current_profile_name)
+        self._refresh_overview_labels()
         self.refresh_views()
 
     def _settings_changed(self) -> None:
@@ -2923,6 +3162,7 @@ class DssQtMainWindow(QMainWindow):
         self.hash_poll_timer.setInterval(max(1, self.app_settings.hash_poll_minutes) * 60 * 1000)
         self._bind_shortcuts()
         self._apply_ui_theme_chrome()
+        self._refresh_overview_labels()
         self.refresh_views()
 
     def apply_settings(self) -> None:
@@ -2935,20 +3175,23 @@ class DssQtMainWindow(QMainWindow):
         typo_active = self.name_typo_worker is not None
         busy = load_active or outlook_active or typo_active
         has_sources = bool(self.source_paths)
-        has_data = self.current_data is not None
-        self.open_button.setEnabled(not busy)
-        self.quick_open_button.setEnabled(not busy)
         self.add_button.setEnabled(not busy)
         self.quick_add_button.setEnabled(not busy)
         self.remove_button.setEnabled(has_sources and not busy)
         self.update_button.setEnabled(has_sources and not busy)
-        self.export_button.setEnabled(has_data and not busy)
         self.cancel_button.setEnabled(busy)
         self.loading_label.setText("Working..." if busy else "")
         self._refresh_quickload_hint_label()
         self._refresh_source_status_labels()
+        self._refresh_export_button_state(busy=busy)
         if message:
             self.status_label.setText(message)
+
+    def _refresh_export_button_state(self, busy: bool | None = None) -> None:
+        if busy is None:
+            busy = self.load_worker is not None or self.outlook_worker is not None or self.name_typo_worker is not None
+        table = self._current_table_page()
+        self.export_button.setEnabled(table is not None and not busy)
 
     def _configured_library_root(self) -> Path | None:
         raw = self.app_settings.dss_library_root.strip()
@@ -2970,14 +3213,6 @@ class DssQtMainWindow(QMainWindow):
             return []
         return [Path(path).expanduser().resolve() for path in dialog.selected_file_paths()]
 
-    def quick_open_dss_files(self) -> None:
-        paths = self._show_quick_dss_picker("Quick Open DSS Workbooks")
-        if not paths:
-            return
-        self.source_paths = paths
-        core.save_last_open_dss_paths(self.config_path, self.source_paths)
-        self.reload_data()
-
     def quick_add_dss_files(self) -> None:
         paths = self._show_quick_dss_picker("Quick Add DSS Workbooks", preselected=self.source_paths)
         if not paths:
@@ -2986,14 +3221,6 @@ class DssQtMainWindow(QMainWindow):
         for path in paths:
             if path.resolve() not in existing:
                 self.source_paths.append(path.resolve())
-        core.save_last_open_dss_paths(self.config_path, self.source_paths)
-        self.reload_data()
-
-    def open_dss_files(self) -> None:
-        paths, _filter = QFileDialog.getOpenFileNames(self, "Open DSS Workbook(s)", "", "Excel Workbook (*.xlsx)")
-        if not paths:
-            return
-        self.source_paths = [Path(path).expanduser().resolve() for path in paths]
         core.save_last_open_dss_paths(self.config_path, self.source_paths)
         self.reload_data()
 
@@ -3023,12 +3250,33 @@ class DssQtMainWindow(QMainWindow):
             item.setCheckState(Qt.Unchecked)
             list_widget.addItem(item)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        clear_all_button = buttons.addButton("Clear All", QDialogButtonBox.DestructiveRole)
+        dialog.setProperty("clear_all_requested", False)
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
+        def _request_clear_all() -> None:
+            dialog.setProperty("clear_all_requested", True)
+            dialog.accept()
+        clear_all_button.clicked.connect(_request_clear_all)
         layout.addWidget(label)
         layout.addWidget(list_widget)
         layout.addWidget(buttons)
-        if dialog.exec() != QDialog.Accepted:
+        result = dialog.exec()
+        if result == 0:
+            return
+        if bool(dialog.property("clear_all_requested")):
+            if QMessageBox.question(self, "Clear All DSSs", "Remove every loaded DSS workbook from the current session?") != QMessageBox.Yes:
+                return
+            self.source_paths = []
+            core.save_last_open_dss_paths(self.config_path, self.source_paths)
+            self.current_data = None
+            self.progress_bar.setValue(0)
+            self.percent_label.setText("0.0%")
+            self._refresh_filters()
+            self._refresh_employee_page()
+            self.loading_label.setText("")
+            self._set_loading_state(False, "No DSS workbooks loaded")
+            self.refresh_views()
             return
         removed = {list_widget.item(row).text() for row in range(list_widget.count()) if list_widget.item(row).checkState() == Qt.Checked}
         self.source_paths = [path for path in self.source_paths if str(path) not in removed]
@@ -3063,7 +3311,13 @@ class DssQtMainWindow(QMainWindow):
         self._next_load_token += 1
         token = self._next_load_token
         self._active_load_token = token
-        worker = LoadWorker(self.source_paths, self.current_data, self.cache_dir)
+        worker = LoadWorker(
+            self.source_paths,
+            self.current_data,
+            self.cache_dir,
+            max_parallel_parse_workers=self.app_settings.max_parallel_parse_workers,
+            partial_preview_enabled=self.app_settings.partial_preview_enabled,
+        )
         self.load_worker = worker
         worker.progressChanged.connect(lambda fraction, message, current_token=token: self._on_load_progress(current_token, fraction, message))
         worker.partialReady.connect(lambda tracker_data, message, current_token=token: self._on_partial_ready(current_token, tracker_data, message))
@@ -3116,11 +3370,12 @@ class DssQtMainWindow(QMainWindow):
         if token != self._active_load_token:
             return
         self.current_data = tracker_data
-        self._cached_name_typo_warnings = []
+        self._invalidate_name_typo_cache()
         self.status_label.setText(message)
         self._refresh_source_status_labels()
         self._refresh_filters()
         self._refresh_employee_page()
+        self._refresh_overview_labels()
         if self.group_tabs.currentWidget() != self.settings_tabs:
             self.refresh_views()
 
@@ -3128,7 +3383,7 @@ class DssQtMainWindow(QMainWindow):
         if token != self._active_load_token:
             return
         self.current_data = tracker_data
-        self._cached_name_typo_warnings = []
+        self._invalidate_name_typo_cache()
         self.progress_bar.setValue(1000)
         self.percent_label.setText("100.0%")
         self.loading_label.setText("")
@@ -3138,6 +3393,7 @@ class DssQtMainWindow(QMainWindow):
         self._set_loading_state(False, f"Loaded {len(tracker_data.source_paths)} DSS workbook(s)")
         self._refresh_filters()
         self._refresh_employee_page()
+        self._refresh_overview_labels()
         self.refresh_views()
         if tracker_data.reloaded_paths or tracker_data.reused_paths:
             QMessageBox.information(
@@ -3530,7 +3786,7 @@ class DssQtMainWindow(QMainWindow):
         self.suppressed_error_findings = set()
         self.suppressed_parse_warnings = set()
         self.suppressed_workbook_health = set()
-        self._cached_name_typo_warnings = []
+        self._invalidate_name_typo_cache()
         self.status_label.setText("No DSS workbooks loaded")
         self.progress_bar.setValue(0)
         self.percent_label.setText("0.0%")
@@ -3574,11 +3830,14 @@ class DssQtMainWindow(QMainWindow):
             "app_settings": {
                 "disable_name_typo_notifications": self.app_settings.disable_name_typo_notifications,
                 "hash_poll_minutes": self.app_settings.hash_poll_minutes,
+                "update_check_delay_seconds": self.app_settings.update_check_delay_seconds,
                 "show_daily_raw_tab": self.app_settings.show_daily_raw_tab,
                 "quickload_last_sources_enabled": self.app_settings.quickload_last_sources_enabled,
                 "quickload_cancel_hotkey": self.app_settings.quickload_cancel_hotkey,
                 "auto_update_check_enabled": self.app_settings.auto_update_check_enabled,
                 "auto_download_updates_on_unmetered_wifi": self.app_settings.auto_download_updates_on_unmetered_wifi,
+                "max_parallel_parse_workers": self.app_settings.max_parallel_parse_workers,
+                "partial_preview_enabled": self.app_settings.partial_preview_enabled,
                 "ui_theme": core.asdict(self.app_settings.ui_theme),
             },
             "formatting_profiles": sorted(self.profiles),
@@ -3727,8 +3986,10 @@ class DssQtMainWindow(QMainWindow):
         core.save_employee_groups(self.config_path, self.employee_groups)
         core.save_missing_email_suppressions(self.config_path, self.missing_email_suppressions)
         self._persist_ignored_name_typos()
+        self._invalidate_name_typo_cache()
         self._refresh_filters()
         self._refresh_employee_page()
+        self._refresh_overview_labels()
         self.refresh_views()
 
     def check_name_typos_manually(self) -> None:
@@ -3736,6 +3997,14 @@ class DssQtMainWindow(QMainWindow):
             QMessageBox.information(self, "Check Name Typos", "Load DSS data first.")
             return
         if self.name_typo_worker is not None:
+            return
+        cache_key = self._current_name_typo_cache_key()
+        if cache_key is not None and cache_key == self._cached_name_typo_key and self._cached_name_typo_warnings:
+            self.refresh_views()
+            self._refresh_overview_labels()
+            self.group_tabs.setCurrentWidget(self.report_tabs)
+            self.report_tabs.setCurrentWidget(self.pages["data_review"])
+            self._set_loading_state(False, f"Name typo review reused cached results: {len(self._cached_name_typo_warnings)} warning(s)")
             return
         employee_names = self._managed_employee_names()
         daily_records = self.current_data.daily_records
@@ -3766,7 +4035,7 @@ class DssQtMainWindow(QMainWindow):
         self.refresh_views()
         self._set_loading_state(False, f"Name typo refresh complete: {len(warnings)} warning(s)")
         self.group_tabs.setCurrentWidget(self.report_tabs)
-        self.report_tabs.setCurrentWidget(self.pages["name_typos"])
+        self.report_tabs.setCurrentWidget(self.pages["data_review"])
         if not warnings:
             QMessageBox.information(self, "Check Name Typos", "No likely name typos were found.")
             return
@@ -3776,7 +4045,7 @@ class DssQtMainWindow(QMainWindow):
             if core.typo_warning_key(warning.employee, warning.similar_employee) not in self.ignored_name_typos
         ]
         if not unsuppressed:
-            QMessageBox.information(self, "Check Name Typos", "All current name typo warnings are already suppressed. Enable Show Suppressed on the Name Typos page to review them.")
+            QMessageBox.information(self, "Check Name Typos", "All current name typo warnings are already suppressed. Enable Show Suppressed on the Data Review page to review them.")
 
     def _on_name_typo_refresh_failed(self, token: int, message: str) -> None:
         if token != self._active_name_typo_token:

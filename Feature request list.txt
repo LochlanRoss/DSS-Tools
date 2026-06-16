@@ -88,3 +88,17 @@ Working scratchpad: check items off when they are done.
 - [x] 10 minutes in and the contact sync still displays working. Previous request for progress and telemetry would be nice. Perhaps expand the syncing outlook emails status message to include the latest synced email.
 
 - [x] Ensure contact sync doesn't wait endlessly on name typos
+
+- [x] Consolidate all warning/problem pages into a single `Data Review` page while keeping drill-through to workbook, sheet, and cell/range context.
+- [x] Add a unified warning review surface with per-row suppression state, inline merge actions for typo cases, and a default-hidden `Show Suppressed` toggle.
+- [x] Reorganize `Settings` into clearer sections for `General`, `Loading`, `Warnings`, `Appearance`, `Persistence`, and `Diagnostics`.
+- [x] Split update-check timing from DSS hash-poll timing so automatic update checks can be tuned independently.
+- [x] Add explicit persistence/retention settings visibility for suppressions, hidden employees, merged names, and saved manual email addresses.
+- [x] Add review-state indicators showing when suppressions, hidden employees, or name merges are active.
+- [x] Cache expensive review passes such as name-typo analysis against the currently loaded DSS set to avoid repeated long UI stalls.
+- [x] Add performance controls for large DSS batches, including configurable parse parallelism and reduced live-refresh behavior while loading.
+- [x] Expand appearance customization beyond individual colours into grouped surfaces such as window chrome, panels, tables, headers, selections, tabs, and button families.
+- [x] Add appearance presets such as `Default Light`, `High Contrast Light`, and `Soft Neutral`, with one-click reset/apply behavior.
+- [x] Improve top-level layout grouping so loading controls, filters, progress, and review actions are more visually distinct.
+- [x] Improve the Employees page layout into clearer roster/details/actions sections with stronger visual separation.
+- [x] Add a post-load summary/status area showing loaded files, employees, PF coverage, warnings count, and hidden/suppressed state at a glance.

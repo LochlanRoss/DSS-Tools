@@ -120,6 +120,9 @@ PARTIAL_RENDER_INTERVAL_MS = 200
 BUG_REPORT_EMAIL = "lross@jatechpowersystems.com"
 WORK_EMAIL_DOMAIN = "@jatechpowersystems.com"
 MAX_PARALLEL_PARSE_WORKERS = 2
+MAX_ALLOWED_PARALLEL_PARSE_WORKERS = 8
+DEFAULT_UPDATE_CHECK_DELAY_SECONDS = 30
+DEFAULT_PARTIAL_PREVIEW_ENABLED = True
 MISSING_EMAIL_DISPLAY = "(missing) \u26A0"
 MISSING_EMAIL_ROW_BACKGROUND = "#fff7d6"
 MISSING_EMAIL_ROW_FOREGROUND = "#7a5a00"
@@ -127,6 +130,7 @@ OUTLOOK_NAME_RULE_LABEL = "Name does not match email address book"
 OUTLOOK_DISPLAY_NAME_TYPO_MIN_SIMILARITY = 0.84
 UPDATE_DIRNAME = "updates"
 UPDATER_EXE_NAME = "DSSToolsUpdater.exe"
+QUICK_DSS_JOB_FOLDER_PATTERN = re.compile(r"PF\d{5}", re.IGNORECASE)
 
 
 def _is_updater_executable_path(path: Path) -> bool:
@@ -777,6 +781,52 @@ UI_THEME_CONFIG_FIELDS: tuple[tuple[str, str], ...] = (
     ("Table - cell background", "table_background"),
 )
 
+UI_THEME_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Window And Panels", ("window_background", "panel_background", "content_chrome_background")),
+    (
+        "Controls And Buttons",
+        (
+            "control_background",
+            "control_foreground",
+            "control_border",
+            "control_hover_background",
+            "control_pressed_background",
+            "control_disabled_background",
+            "control_disabled_foreground",
+            "button_primary_background",
+            "button_primary_foreground",
+            "button_danger_background",
+            "button_danger_foreground",
+        ),
+    ),
+    (
+        "Tabs And Tables",
+        (
+            "tab_inactive_background",
+            "tab_active_background",
+            "tab_inactive_foreground",
+            "header_background",
+            "header_foreground",
+            "selection_background",
+            "selection_foreground",
+            "table_background",
+        ),
+    ),
+    (
+        "Dividers And Alerts",
+        (
+            "employee_divider",
+            "date_divider",
+            "alert_row_background",
+            "alert_row_foreground",
+            "crew_total_background",
+            "crew_total_foreground",
+            "tooltip_background",
+            "tooltip_foreground",
+        ),
+    ),
+)
+
 DSS_TABLE_TREEVIEW_STYLE = "DssTable.Treeview"
 DSS_TAB_SWATCH_W = 6
 DSS_TAB_SWATCH_H = 18
@@ -793,6 +843,60 @@ def normalize_ui_hex_color(value: str) -> str | None:
     if len(body) != 6 or any(c not in "0123456789abcdef" for c in body):
         return None
     return f"#{body}"
+
+
+def ui_theme_presets() -> dict[str, UiThemeColors]:
+    default = DEFAULT_UI_THEME
+    return {
+        "Default Light": default,
+        "High Contrast Light": replace(
+            default,
+            window_background="#dfe6ee",
+            panel_background="#f5f7fa",
+            content_chrome_background="#ffffff",
+            control_background="#ffffff",
+            control_foreground="#0b1220",
+            control_border="#64748b",
+            button_primary_background="#0f5ea8",
+            button_danger_background="#9f2f2f",
+            tab_inactive_background="#d7e0ea",
+            header_background="#cbd7e4",
+            selection_background="#0f5ea8",
+            date_divider="#64748b",
+            employee_divider="#334155",
+            table_background="#ffffff",
+        ),
+        "Soft Neutral": replace(
+            default,
+            window_background="#ece8df",
+            panel_background="#f7f3eb",
+            content_chrome_background="#fffdf8",
+            control_background="#fbf8f1",
+            control_border="#c8bba7",
+            control_hover_background="#f1e6d6",
+            control_pressed_background="#e7d9c5",
+            button_primary_background="#6d8a66",
+            button_danger_background="#a35f4d",
+            tab_inactive_background="#eadfce",
+            header_background="#e2d5c1",
+            selection_background="#6d8a66",
+            date_divider="#9b8f7e",
+            employee_divider="#706655",
+            alert_row_background="#fde8dd",
+            alert_row_foreground="#9a3412",
+            crew_total_background="#e7efe0",
+            crew_total_foreground="#365314",
+            tooltip_background="#f7f2e8",
+            table_background="#fffdf8",
+        ),
+    }
+
+
+def ui_theme_preset_name(theme: UiThemeColors) -> str:
+    for name, preset in ui_theme_presets().items():
+        if preset == theme:
+            return name
+    return "Custom"
 
 
 def _hex_to_rgb_triplet(hex_color: str) -> tuple[int, int, int]:
@@ -895,6 +999,7 @@ def parse_ui_theme_payload(raw: object, defaults: UiThemeColors = DEFAULT_UI_THE
 class AppSettings:
     disable_name_typo_notifications: bool = False
     hash_poll_minutes: int = DEFAULT_HASH_POLL_MINUTES
+    update_check_delay_seconds: int = DEFAULT_UPDATE_CHECK_DELAY_SECONDS
     show_daily_raw_tab: bool = True
     quickload_last_sources_enabled: bool = True
     quickload_cancel_hotkey: str = "<Escape>"
@@ -902,6 +1007,8 @@ class AppSettings:
     auto_download_updates_on_unmetered_wifi: bool = True
     signin_hours_check_enabled: bool = True
     dss_library_root: str = ""
+    max_parallel_parse_workers: int = MAX_PARALLEL_PARSE_WORKERS
+    partial_preview_enabled: bool = DEFAULT_PARTIAL_PREVIEW_ENABLED
     ui_theme: UiThemeColors = field(default_factory=lambda: DEFAULT_UI_THEME)
 
 
@@ -1286,6 +1393,38 @@ def extract_pf_identifier(source_name: str) -> str:
         phase = match.group(2)
         return f"{base}-{phase}" if phase else base
     return Path(source_name).stem.strip() or source_name.strip()
+
+
+def iter_quick_dss_candidate_paths(root_folder: Path) -> list[Path]:
+    candidates: list[Path] = []
+    if not root_folder.exists() or not root_folder.is_dir():
+        return candidates
+    try:
+        job_dirs = [path for path in root_folder.iterdir() if path.is_dir() and QUICK_DSS_JOB_FOLDER_PATTERN.search(path.name)]
+    except OSError:
+        return candidates
+    for job_dir in sorted(job_dirs, key=lambda p: p.name.casefold()):
+        try:
+            field_dirs = [child for child in job_dir.iterdir() if child.is_dir() and child.name.strip().casefold() == "field"]
+        except OSError:
+            continue
+        for field_dir in field_dirs:
+            try:
+                dss_dirs = [child for child in field_dir.iterdir() if child.is_dir() and child.name.strip().casefold() == "03 dss"]
+            except OSError:
+                continue
+            for dss_dir in dss_dirs:
+                try:
+                    files = [child for child in dss_dir.iterdir() if child.is_file() and child.suffix.lower() == ".xlsx" and not child.name.startswith("~$")]
+                except OSError:
+                    continue
+                for file_path in files:
+                    candidates.append(file_path.resolve())
+    try:
+        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        candidates.sort(key=lambda p: p.name.casefold())
+    return candidates
 
 
 _QUICKLOAD_CANCEL_MODIFIER_KEYSYMS: frozenset[str] = frozenset(
@@ -1740,6 +1879,16 @@ def load_app_settings(config_path: Path) -> AppSettings:
         hash_poll_minutes = max(1, int(raw_minutes))
     except (TypeError, ValueError):
         hash_poll_minutes = DEFAULT_HASH_POLL_MINUTES
+    raw_update_delay = raw_settings.get("update_check_delay_seconds", DEFAULT_UPDATE_CHECK_DELAY_SECONDS)
+    try:
+        update_check_delay_seconds = max(5, int(raw_update_delay))
+    except (TypeError, ValueError):
+        update_check_delay_seconds = DEFAULT_UPDATE_CHECK_DELAY_SECONDS
+    raw_parallel = raw_settings.get("max_parallel_parse_workers", MAX_PARALLEL_PARSE_WORKERS)
+    try:
+        max_parallel_parse_workers = min(MAX_ALLOWED_PARALLEL_PARSE_WORKERS, max(1, int(raw_parallel)))
+    except (TypeError, ValueError):
+        max_parallel_parse_workers = MAX_PARALLEL_PARSE_WORKERS
 
     raw_hotkey = str(raw_settings.get("quickload_cancel_hotkey", "<Escape>")).strip()
     cancel_hotkey = normalize_quickload_cancel_hotkey(raw_hotkey)
@@ -1749,6 +1898,7 @@ def load_app_settings(config_path: Path) -> AppSettings:
     return AppSettings(
         disable_name_typo_notifications=bool(raw_settings.get("disable_name_typo_notifications", False)),
         hash_poll_minutes=hash_poll_minutes,
+        update_check_delay_seconds=update_check_delay_seconds,
         show_daily_raw_tab=bool(raw_settings.get("show_daily_raw_tab", True)),
         quickload_last_sources_enabled=bool(raw_settings.get("quickload_last_sources_enabled", True)),
         quickload_cancel_hotkey=cancel_hotkey,
@@ -1756,6 +1906,8 @@ def load_app_settings(config_path: Path) -> AppSettings:
         auto_download_updates_on_unmetered_wifi=bool(raw_settings.get("auto_download_updates_on_unmetered_wifi", True)),
         signin_hours_check_enabled=bool(raw_settings.get("signin_hours_check_enabled", True)),
         dss_library_root=str(raw_settings.get("dss_library_root", "")).strip(),
+        max_parallel_parse_workers=max_parallel_parse_workers,
+        partial_preview_enabled=bool(raw_settings.get("partial_preview_enabled", DEFAULT_PARTIAL_PREVIEW_ENABLED)),
         ui_theme=parse_ui_theme_payload(raw_settings.get("ui_theme")),
     )
 
@@ -1765,6 +1917,7 @@ def save_app_settings(config_path: Path, settings: AppSettings) -> None:
     payload["app_settings"] = {
         "disable_name_typo_notifications": settings.disable_name_typo_notifications,
         "hash_poll_minutes": settings.hash_poll_minutes,
+        "update_check_delay_seconds": settings.update_check_delay_seconds,
         "show_daily_raw_tab": settings.show_daily_raw_tab,
         "quickload_last_sources_enabled": settings.quickload_last_sources_enabled,
         "quickload_cancel_hotkey": settings.quickload_cancel_hotkey,
@@ -1772,6 +1925,8 @@ def save_app_settings(config_path: Path, settings: AppSettings) -> None:
         "auto_download_updates_on_unmetered_wifi": settings.auto_download_updates_on_unmetered_wifi,
         "signin_hours_check_enabled": settings.signin_hours_check_enabled,
         "dss_library_root": settings.dss_library_root,
+        "max_parallel_parse_workers": settings.max_parallel_parse_workers,
+        "partial_preview_enabled": settings.partial_preview_enabled,
         "ui_theme": asdict(settings.ui_theme),
     }
     config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -4611,6 +4766,7 @@ def load_tracker_data(
     partial_callback: Callable[[TrackerData, str], None] | None = None,
     cache_dir: Path | None = None,
     should_cancel: Callable[[], bool] | None = None,
+    max_parallel_parse_workers: int = MAX_PARALLEL_PARSE_WORKERS,
 ) -> TrackerData:
     if isinstance(source_paths, Path):
         normalized_paths = [source_paths]
@@ -4812,7 +4968,7 @@ def load_tracker_data(
                     pending_parse_inputs.append((source_path, workbook_bytes))
 
     if pending_parse_inputs:
-        max_workers = min(MAX_PARALLEL_PARSE_WORKERS, len(pending_parse_inputs))
+        max_workers = min(MAX_ALLOWED_PARALLEL_PARSE_WORKERS, max(1, int(max_parallel_parse_workers)), len(pending_parse_inputs))
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_map = {
                 executor.submit(parse_miss_file, source_path, workbook_bytes): source_path

@@ -60,6 +60,7 @@ from dss_hours_tracker import (
     format_email_subject,
     default_formatting_profiles,
     extract_pf_identifier,
+    iter_quick_dss_candidate_paths,
     FilterSelection,
     find_open_excel_workbook,
     find_outlook_display_name_typos,
@@ -231,6 +232,27 @@ class DssToolsTests(DssToolsFixtures):
         self.assertEqual(extract_pf_identifier("PF25119    -    12 Seismic Installation.xlsx"), "PF25119-12")
         self.assertEqual(extract_pf_identifier("PF25119 – 13 Commissioning.xlsx"), "PF25119-13")
         self.assertEqual(extract_pf_identifier("PF25119—14 Cable removal.xlsx"), "PF25119-14")
+
+    def test_iter_quick_dss_candidate_paths_only_scans_pf_field_03_dss_pattern(self) -> None:
+        with self.workspace_dir("quick_dss_scan") as root:
+            valid_one = root / "JA Tech SharePoint - PF26005_Nutrien_Vanscoy_2026 Misc Work Requests" / "Field" / "03 DSS"
+            valid_two = root / "JA Tech SharePoint - PF26043_Nutrien_Vanscoy_Oil Sampling 2026" / "Field" / "03 DSS"
+            ignored_no_pf = root / "Misc Job Without PF" / "Field" / "03 DSS"
+            ignored_wrong_mid = root / "JA Tech SharePoint - PF26044_Nutrien_Vanscoy_Battery Bank Testing 2026" / "Office" / "03 DSS"
+            ignored_wrong_leaf = root / "JA Tech SharePoint - PF26045_Nutrien_Vanscoy_PD Testing 2026" / "Field" / "DSS"
+            for folder in (valid_one, valid_two, ignored_no_pf, ignored_wrong_mid, ignored_wrong_leaf):
+                folder.mkdir(parents=True, exist_ok=True)
+
+            first = valid_one / "PF26005-3 Ongoing DSS.xlsx"
+            second = valid_two / "PF26043-1 Ongoing DSS.xlsx"
+            ignored = ignored_no_pf / "PF99999-1 Should Ignore.xlsx"
+            temp_lock = valid_one / "~$PF26005-4 Temp.xlsx"
+            for file_path in (first, second, ignored, temp_lock):
+                file_path.write_text("placeholder", encoding="utf-8")
+
+            results = iter_quick_dss_candidate_paths(root)
+
+            self.assertEqual({path.name for path in results}, {first.name, second.name})
 
     def test_select_preferred_dated_sheets_prefers_highest_revision(self) -> None:
         selected = select_preferred_dated_sheets(
@@ -876,12 +898,15 @@ class DssToolsTests(DssToolsFixtures):
                 AppSettings(
                     disable_name_typo_notifications=True,
                     hash_poll_minutes=12,
+                    update_check_delay_seconds=45,
                     show_daily_raw_tab=False,
                     quickload_last_sources_enabled=False,
                     quickload_cancel_hotkey="<F9>",
                     auto_update_check_enabled=False,
                     auto_download_updates_on_unmetered_wifi=False,
                     signin_hours_check_enabled=False,
+                    max_parallel_parse_workers=4,
+                    partial_preview_enabled=False,
                 ),
             )
 
@@ -889,12 +914,15 @@ class DssToolsTests(DssToolsFixtures):
 
             self.assertTrue(loaded.disable_name_typo_notifications)
             self.assertEqual(loaded.hash_poll_minutes, 12)
+            self.assertEqual(loaded.update_check_delay_seconds, 45)
             self.assertFalse(loaded.show_daily_raw_tab)
             self.assertFalse(loaded.quickload_last_sources_enabled)
             self.assertEqual(loaded.quickload_cancel_hotkey, "<F9>")
             self.assertFalse(loaded.auto_update_check_enabled)
             self.assertFalse(loaded.auto_download_updates_on_unmetered_wifi)
             self.assertFalse(loaded.signin_hours_check_enabled)
+            self.assertEqual(loaded.max_parallel_parse_workers, 4)
+            self.assertFalse(loaded.partial_preview_enabled)
             self.assertEqual(loaded.ui_theme, DEFAULT_UI_THEME)
 
     def test_normalize_ui_hex_color(self) -> None:
