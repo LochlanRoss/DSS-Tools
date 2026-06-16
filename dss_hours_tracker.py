@@ -211,6 +211,54 @@ def is_newer_version(candidate_version: str, current_version: str) -> bool:
     return version_key(candidate_version) > version_key(current_version)
 
 
+def natural_text_sort_key(text: str) -> tuple[tuple[int, object], ...]:
+    normalized = (
+        str(text)
+        .replace("\u2010", "-")
+        .replace("\u2011", "-")
+        .replace("\u2012", "-")
+        .replace("\u2013", "-")
+        .replace("\u2014", "-")
+        .replace("\u2212", "-")
+        .strip()
+    )
+    tokens = re.findall(r"\d+|[A-Za-z]+|[^A-Za-z0-9]+", normalized)
+    if not tokens:
+        return ((1, ""),)
+    key: list[tuple[int, object]] = []
+    for token in tokens:
+        if token.isdigit():
+            key.append((0, int(token)))
+        else:
+            key.append((1, token.casefold()))
+    return tuple(key)
+
+
+def pf_number_sort_key(value: str) -> tuple[object, ...]:
+    text = str(value).strip()
+    normalized = (
+        text
+        .replace("\u2010", "-")
+        .replace("\u2011", "-")
+        .replace("\u2012", "-")
+        .replace("\u2013", "-")
+        .replace("\u2014", "-")
+        .replace("\u2212", "-")
+    )
+    match = PF_PATTERN.search(normalized)
+    if not match:
+        return (1, natural_text_sort_key(text))
+    base = match.group(1).upper()
+    phase = match.group(2)
+    try:
+        base_number = int(base[2:])
+    except ValueError:
+        base_number = float("inf")
+    phase_number = int(phase) if phase else -1
+    phase_rank = 0 if phase is None else 1
+    return (0, base_number, phase_rank, phase_number, natural_text_sort_key(text))
+
+
 def parse_latest_release_payload(payload: dict) -> dict[str, object]:
     tag_name = str(payload.get("tag_name", "")).strip()
     version = normalize_release_version(tag_name)
@@ -888,6 +936,39 @@ def ui_theme_presets() -> dict[str, UiThemeColors]:
             crew_total_foreground="#365314",
             tooltip_background="#f7f2e8",
             table_background="#fffdf8",
+        ),
+        "Dark Mode": replace(
+            default,
+            window_background="#0f172a",
+            panel_background="#111827",
+            content_chrome_background="#1f2937",
+            control_background="#1f2937",
+            control_foreground="#e5eefb",
+            control_border="#475569",
+            control_hover_background="#253347",
+            control_pressed_background="#334155",
+            control_disabled_background="#172033",
+            control_disabled_foreground="#7f8ea3",
+            button_primary_background="#2563eb",
+            button_primary_foreground="#eff6ff",
+            button_danger_background="#b91c1c",
+            button_danger_foreground="#fef2f2",
+            tab_inactive_background="#172033",
+            tab_active_background="#1f2937",
+            tab_inactive_foreground="#9fb0c7",
+            header_background="#243244",
+            header_foreground="#e5eefb",
+            selection_background="#2563eb",
+            selection_foreground="#eff6ff",
+            date_divider="#64748b",
+            employee_divider="#94a3b8",
+            alert_row_background="#4c1d2a",
+            alert_row_foreground="#fda4af",
+            crew_total_background="#0f3a36",
+            crew_total_foreground="#99f6e4",
+            tooltip_background="#111827",
+            tooltip_foreground="#e5eefb",
+            table_background="#111827",
         ),
     }
 
@@ -2734,6 +2815,49 @@ def find_address_book_name_typos(
     return warnings
 
 
+def find_cached_employee_name_typos(
+    unresolved_names: Iterable[str],
+    known_employee_names: Iterable[str],
+    daily_records: Iterable[DailyRecord],
+    similarity_threshold: float = 0.93,
+) -> list[NameTypoWarning]:
+    all_names = sorted({name for name in known_employee_names if name.strip()})
+    warnings: list[NameTypoWarning] = []
+
+    for unresolved in sorted({name for name in unresolved_names if name.strip()}):
+        best_match = ""
+        best_similarity = 0.0
+        for candidate in all_names:
+            if candidate == unresolved:
+                continue
+            if normalize_person_name(candidate) == normalize_person_name(unresolved):
+                best_match = candidate
+                best_similarity = 1.0
+                break
+            ratio = likely_same_person_typo(unresolved, candidate, overall_threshold=similarity_threshold)
+            if ratio is None:
+                continue
+            if ratio > best_similarity:
+                best_similarity = ratio
+                best_match = candidate
+        if not best_match:
+            continue
+        locations = [
+            f"{record.work_date.isoformat()} | {record.source_sheet} | {record.source_file}"
+            for record in daily_records
+            if record.employee == unresolved
+        ]
+        warnings.append(
+            NameTypoWarning(
+                employee=unresolved,
+                similar_employee=best_match,
+                similarity=best_similarity,
+                locations=locations,
+            )
+        )
+    return warnings
+
+
 def find_similar_employee_name_pairs(
     all_employee_names: Iterable[str],
     daily_records: Iterable[DailyRecord],
@@ -3025,7 +3149,8 @@ def pf_numbers_for_records(records: Iterable[DailyRecord]) -> str:
             (getattr(record, "pf_number", "") or extract_pf_number(getattr(record, "source_file", "")) or "").strip()
             for record in records
             if (getattr(record, "pf_number", "") or extract_pf_number(getattr(record, "source_file", "")) or "").strip()
-        }
+        },
+        key=pf_number_sort_key,
     )
     return ", ".join(pf_numbers)
 
@@ -8156,7 +8281,7 @@ class DssToolsApp(tk.Tk):
                 for record in self.current_data.daily_records
                 if record.source_path == source_path
             }
-            pf_by_source[source_path] = ", ".join(sorted(values, key=str.casefold)) if values else display_pf_number("")
+            pf_by_source[source_path] = ", ".join(sorted(values, key=pf_number_sort_key)) if values else display_pf_number("")
         return pf_by_source
 
     def _current_pf_selection(self) -> set[str]:
@@ -8186,7 +8311,8 @@ class DssToolsApp(tk.Tk):
             {
                 display_pf_number(record.pf_number)
                 for record in (self.current_data.daily_records if self.current_data is not None else [])
-            }
+            },
+            key=pf_number_sort_key,
         )
         previous_pf_state = dict(self._pf_filter_state)
         if not previous_pf_state:
@@ -8314,7 +8440,7 @@ class DssToolsApp(tk.Tk):
                 fill="x", anchor="w", pady=(4, 0)
             )
 
-        pf_values = sorted(self._pf_filter_state)
+        pf_values = sorted(self._pf_filter_state, key=pf_number_sort_key)
         if pf_values:
             ttk.Separator(self.pf_filter_popup_content, orient="horizontal").pack(fill="x", pady=6)
 
@@ -8438,7 +8564,7 @@ class DssToolsApp(tk.Tk):
             self.filter_button_var.set(f"{len(selected)} Employees")
 
     def _update_pf_filter_button_label(self) -> None:
-        pf_values = sorted(self._pf_filter_state)
+        pf_values = sorted(self._pf_filter_state, key=pf_number_sort_key)
         if not pf_values:
             self.pf_filter_button_var.set("All PFs")
             return

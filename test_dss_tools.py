@@ -17,6 +17,18 @@ from datetime import date
 from pathlib import Path
 from unittest import mock
 
+try:
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication
+    from dss_qt_app import CheckListButton, DataTablePage, TableModel, TableSpec
+except Exception:  # pragma: no cover - optional UI dependency for local/unit environments
+    Qt = None
+    QApplication = None
+    CheckListButton = None
+    DataTablePage = None
+    TableModel = None
+    TableSpec = None
+
 from dss_hours_tracker import (
     AppSettings,
     DEFAULT_PROFILE_NAME,
@@ -48,6 +60,7 @@ from dss_hours_tracker import (
     process_workbook_bytes,
     compute_bytes_hash,
     compute_all_dated_sheet_hashes,
+    pf_number_sort_key,
     format_email_address_display,
     combine_sheet_hashes,
     load_ignored_name_typos,
@@ -65,6 +78,7 @@ from dss_hours_tracker import (
     find_open_excel_workbook,
     find_outlook_display_name_typos,
     find_address_book_name_typos,
+    find_cached_employee_name_typos,
     filter_employee_names,
     FormattingProfile,
     get_app_root,
@@ -108,6 +122,139 @@ from test_dss_tools_fixtures import DssToolsFixtures
 
 
 class DssToolsTests(DssToolsFixtures):
+    @unittest.skipIf(QApplication is None or CheckListButton is None, "PySide6 UI components unavailable")
+    def test_checklist_button_preserves_all_selection_when_choices_expand(self) -> None:
+        app = QApplication.instance() or QApplication([])
+        self.addCleanup(lambda: app.processEvents())
+        button = CheckListButton("All PFs", "PFs")
+        button.set_choices(["PF26043", "PF26044"])
+        self.assertEqual(button.text(), "All PFs")
+        self.assertEqual(button.selected_values(), ["PF26043", "PF26044"])
+
+        button.set_choices(["PF26043", "PF26044", "PF26045"], button.selected_values())
+
+        self.assertEqual(button.text(), "All PFs")
+        self.assertEqual(button.selected_values(), ["PF26043", "PF26044", "PF26045"])
+
+    @unittest.skipIf(QApplication is None or TableModel is None, "PySide6 UI components unavailable")
+    def test_employee_summary_week_sort_preserves_employee_grouping(self) -> None:
+        app = QApplication.instance() or QApplication([])
+        self.addCleanup(lambda: app.processEvents())
+        model = TableModel(
+            [("employee", "Employee"), ("week_number", "Week #"), ("date", "Date"), ("pf_number", "PF#"), ("st", "ST")],
+            rows=[
+                {
+                    "employee": "Abey Philip",
+                    "week_number": "24",
+                    "date": "08-Jun",
+                    "pf_number": "PF26045",
+                    "st": "10",
+                    "__employee_full__": "Abey Philip",
+                    "__week_start__": "2026-06-08",
+                    "__date_sort__": "2026-06-08",
+                    "__source_index__": 0,
+                },
+                {
+                    "employee": "",
+                    "week_number": "",
+                    "date": "09-Jun",
+                    "pf_number": "PF26045",
+                    "st": "10",
+                    "__employee_full__": "Abey Philip",
+                    "__week_start__": "2026-06-08",
+                    "__date_sort__": "2026-06-09",
+                    "__source_index__": 1,
+                },
+                {
+                    "employee": "David Brown",
+                    "week_number": "23",
+                    "date": "01-Jun",
+                    "pf_number": "PF26043-1",
+                    "st": "8",
+                    "__employee_full__": "David Brown",
+                    "__week_start__": "2026-06-01",
+                    "__date_sort__": "2026-06-01",
+                    "__source_index__": 2,
+                },
+                {
+                    "employee": "David Brown",
+                    "week_number": "24",
+                    "date": "08-Jun",
+                    "pf_number": "PF26045",
+                    "st": "7",
+                    "__employee_full__": "David Brown",
+                    "__week_start__": "2026-06-08",
+                    "__date_sort__": "2026-06-08",
+                    "__source_index__": 3,
+                },
+                {
+                    "employee": "",
+                    "week_number": "",
+                    "date": "09-Jun",
+                    "pf_number": "PF26045",
+                    "st": "10",
+                    "__employee_full__": "David Brown",
+                    "__week_start__": "2026-06-08",
+                    "__date_sort__": "2026-06-09",
+                    "__source_index__": 4,
+                },
+            ],
+            table_id="employee_daily_pf",
+        )
+        model.sort(1, Qt.DescendingOrder)
+        sorted_rows = model.rows
+        self.assertEqual([row["__employee_full__"] for row in sorted_rows], [
+            "Abey Philip",
+            "Abey Philip",
+            "David Brown",
+            "David Brown",
+            "David Brown",
+        ])
+        self.assertEqual(
+            [row["__week_start__"] for row in sorted_rows if row["__employee_full__"] == "David Brown"],
+            ["2026-06-08", "2026-06-08", "2026-06-01"],
+        )
+
+    @unittest.skipIf(QApplication is None or DataTablePage is None or TableSpec is None, "PySide6 UI components unavailable")
+    def test_employee_summary_refresh_reapplies_current_sort(self) -> None:
+        app = QApplication.instance() or QApplication([])
+        self.addCleanup(lambda: app.processEvents())
+        page = DataTablePage(
+            TableSpec(
+                "employee_daily_pf",
+                "Summary by Employee",
+                (("employee", "Employee"), ("week_number", "Week #"), ("date", "Date"), ("pf_number", "PF#")),
+            ),
+            DEFAULT_UI_THEME,
+            Path("test_config.json"),
+        )
+        page.view.sortByColumn(1, Qt.DescendingOrder)
+        page.set_rows(
+            [
+                {
+                    "employee": "David Brown",
+                    "week_number": "23",
+                    "date": "01-Jun",
+                    "pf_number": "PF26043-1",
+                    "__employee_full__": "David Brown",
+                    "__week_start__": "2026-06-01",
+                    "__date_sort__": "2026-06-01",
+                    "__source_index__": 0,
+                },
+                {
+                    "employee": "David Brown",
+                    "week_number": "24",
+                    "date": "08-Jun",
+                    "pf_number": "PF26045",
+                    "__employee_full__": "David Brown",
+                    "__week_start__": "2026-06-08",
+                    "__date_sort__": "2026-06-08",
+                    "__source_index__": 1,
+                },
+            ]
+        )
+        self.assertEqual([row["__week_start__"] for row in page.model.rows], ["2026-06-08", "2026-06-01"])
+
     def test_main_installer_postinstall_cleanup(self) -> None:
         from dss_hours_tracker import main
 
@@ -217,6 +364,21 @@ class DssToolsTests(DssToolsFixtures):
         self.assertEqual(extract_pf_identifier("PF26006-1 LC 7 Replacement Ongoing DSS.xlsx"), "PF26006-1")
         self.assertEqual(extract_pf_identifier("PF26006-2 LC 10 Replacement Ongoing DSS.xlsx"), "PF26006-2")
         self.assertEqual(extract_pf_identifier("PF26006-3 Ground Fault Lights Ongoing DSS .xlsx"), "PF26006-3")
+
+    def test_pf_number_sort_key_orders_dash_numbers_numerically(self) -> None:
+        values = ["PF25119-10", "PF25119-2", "PF25119", "PF25119-4"]
+        self.assertEqual(
+            sorted(values, key=pf_number_sort_key),
+            ["PF25119", "PF25119-2", "PF25119-4", "PF25119-10"],
+        )
+
+    def test_pf_numbers_for_records_uses_numeric_pf_sorting(self) -> None:
+        records = [
+            DailyRecord(Path("b.xlsx"), "b.xlsx", date(2026, 6, 1), "Sheet1", "Worker", 1, 0, 0, "", "PF25119-10"),
+            DailyRecord(Path("a.xlsx"), "a.xlsx", date(2026, 6, 1), "Sheet1", "Worker", 1, 0, 0, "", "PF25119-2"),
+            DailyRecord(Path("c.xlsx"), "c.xlsx", date(2026, 6, 1), "Sheet1", "Worker", 1, 0, 0, "", "PF25119"),
+        ]
+        self.assertEqual(pf_numbers_for_records(records), "PF25119, PF25119-2, PF25119-10")
         self.assertEqual(extract_pf_identifier("PF26006-4 Generator Wiring Changes.xlsx"), "PF26006-4")
 
     def test_extract_pf_identifier_keeps_dashed_phase_with_spaced_dash(self) -> None:
@@ -232,6 +394,20 @@ class DssToolsTests(DssToolsFixtures):
         self.assertEqual(extract_pf_identifier("PF25119    -    12 Seismic Installation.xlsx"), "PF25119-12")
         self.assertEqual(extract_pf_identifier("PF25119 – 13 Commissioning.xlsx"), "PF25119-13")
         self.assertEqual(extract_pf_identifier("PF25119—14 Cable removal.xlsx"), "PF25119-14")
+
+    def test_find_cached_employee_name_typos_prefers_high_similarity_local_match(self) -> None:
+        records = [
+            DailyRecord(Path("C:/a.xlsx"), "a.xlsx", date(2026, 6, 11), "2026-06-11", "Chris Mclean", 8, 0, 0, "", "PF26045"),
+        ]
+        warnings = find_cached_employee_name_typos(
+            ["Chris Mclean"],
+            ["Chris McLean", "David Brown"],
+            records,
+            similarity_threshold=0.9,
+        )
+        self.assertEqual(len(warnings), 1)
+        self.assertEqual(warnings[0].employee, "Chris Mclean")
+        self.assertEqual(warnings[0].similar_employee, "Chris McLean")
 
     def test_iter_quick_dss_candidate_paths_only_scans_pf_field_03_dss_pattern(self) -> None:
         with self.workspace_dir("quick_dss_scan") as root:

@@ -318,11 +318,18 @@ class TableSpec:
 
 
 class TableModel(QAbstractTableModel):
-    def __init__(self, columns: list[tuple[str, str]], rows: list[dict[str, Any]] | None = None, theme: core.UiThemeColors | None = None) -> None:
+    def __init__(
+        self,
+        columns: list[tuple[str, str]],
+        rows: list[dict[str, Any]] | None = None,
+        theme: core.UiThemeColors | None = None,
+        table_id: str = "",
+    ) -> None:
         super().__init__()
         self.columns = columns
         self.rows: list[dict[str, Any]] = rows or []
         self.theme = theme or core.DEFAULT_UI_THEME
+        self.table_id = table_id
 
     def set_rows(self, rows: list[dict[str, Any]]) -> None:
         self.beginResetModel()
@@ -383,6 +390,12 @@ class TableModel(QAbstractTableModel):
         key = self.columns[column][0]
         reverse = order == Qt.DescendingOrder
 
+        if self.table_id == "employee_daily_pf":
+            self.layoutAboutToBeChanged.emit()
+            self.rows.sort(key=lambda row: self._employee_daily_pf_sort_key(row, key, reverse))
+            self.layoutChanged.emit()
+            return
+
         def sort_key(row: dict[str, Any]) -> Any:
             value = row.get(key, "")
             if key in TABLE_NUMERIC_COLUMNS:
@@ -396,11 +409,73 @@ class TableModel(QAbstractTableModel):
                     return datetime.strptime(text, "%Y-%m-%d").date()
                 except ValueError:
                     return date.min
+            if key == "pf_number":
+                return core.pf_number_sort_key(str(value))
             return str(value).casefold()
 
         self.layoutAboutToBeChanged.emit()
         self.rows.sort(key=sort_key, reverse=reverse)
         self.layoutChanged.emit()
+
+    def _employee_daily_pf_sort_key(self, row: dict[str, Any], key: str, reverse: bool) -> Any:
+        employee_key = str(row.get("__employee_full__", row.get("employee", ""))).casefold()
+        week_start = self._row_hidden_date(row.get("__week_start__", ""))
+        work_date = self._row_hidden_date(row.get("__date_sort__", ""))
+        pf_key = core.pf_number_sort_key(str(row.get("pf_number", "")))
+        source_index = int(row.get("__source_index__", 0))
+
+        if key == "employee":
+            return (self._descending_text_key(employee_key) if reverse else employee_key, week_start, work_date, pf_key, source_index)
+        if key == "week_number":
+            week_sort = self._descending_date_key(week_start) if reverse else week_start
+            return (employee_key, week_sort, work_date, pf_key, source_index)
+        if key == "date":
+            date_sort = self._descending_date_key(work_date) if reverse else work_date
+            return (employee_key, date_sort, week_start, pf_key, source_index)
+        if key == "pf_number":
+            pf_sort = self._descending_pf_key(pf_key) if reverse else pf_key
+            return (employee_key, week_start, work_date, pf_sort, source_index)
+        if key in TABLE_NUMERIC_COLUMNS:
+            try:
+                numeric_value = float(row.get(key, ""))
+            except (TypeError, ValueError):
+                numeric_value = float("-inf")
+            return (employee_key, week_start, work_date, -numeric_value if reverse else numeric_value, pf_key, source_index)
+        value = str(row.get(key, "")).casefold()
+        value_sort = self._descending_text_key(value) if reverse else value
+        return (employee_key, week_start, work_date, value_sort, pf_key, source_index)
+
+    @staticmethod
+    def _row_hidden_date(value: Any) -> date:
+        text = str(value).strip()
+        if not text:
+            return date.min
+        try:
+            return datetime.strptime(text, "%Y-%m-%d").date()
+        except ValueError:
+            return date.min
+
+    @staticmethod
+    def _descending_date_key(value: date) -> int:
+        return -value.toordinal()
+
+    @staticmethod
+    def _descending_text_key(value: str) -> tuple[int, ...]:
+        return tuple(-ord(char) for char in value)
+
+    @staticmethod
+    def _descending_pf_key(value: tuple[object, ...]) -> tuple[object, ...]:
+        transformed: list[object] = []
+        for token in value:
+            if isinstance(token, (int, float)):
+                transformed.append(-token)
+            elif isinstance(token, tuple):
+                transformed.append(TableModel._descending_pf_key(token))
+            elif isinstance(token, str):
+                transformed.append(TableModel._descending_text_key(token))
+            else:
+                transformed.append(token)
+        return tuple(transformed)
 
 
 class RowAccentDelegate(QStyledItemDelegate):
@@ -442,7 +517,7 @@ class DataTablePage(QWidget):
         self._row_activate_callback = row_activate_callback
         self._context_menu_callback: Callable[[list[dict[str, Any]], QPoint], None] | None = None
         self.columns = list(spec.columns)
-        self.model = TableModel(self.columns, theme=theme)
+        self.model = TableModel(self.columns, theme=theme, table_id=spec.table_id)
         self.view = QTableView(self)
         self.view.setModel(self.model)
         self.view.setItemDelegate(RowAccentDelegate(self.view))
@@ -516,6 +591,9 @@ class DataTablePage(QWidget):
     def set_rows(self, rows: list[dict[str, Any]]) -> None:
         self._current_rows = rows
         self.model.set_rows(rows)
+        sort_index = self.view.horizontalHeader().sortIndicatorSection()
+        if 0 <= sort_index < len(self.columns):
+            self.model.sort(sort_index, self.view.horizontalHeader().sortIndicatorOrder())
         self._emit_selection_change()
 
     def selected_rows(self) -> list[dict[str, Any]]:
@@ -724,29 +802,41 @@ class CheckListButton(QPushButton):
         self.noun = noun
         self.values: list[str] = []
         self.selected: list[str] = []
+        self._all_selected_mode = True
         self.popup = CheckListPopup(self, all_text, "Uncheck All")
         self.popup.selectionChanged.connect(self._set_selection)
         self.clicked.connect(self._show_popup)
 
     def set_choices(self, values: Iterable[str], selected: Iterable[str] | None = None, force_single: bool = False) -> None:
-        previous_values = list(self.values)
-        previous_selected = list(self.selected)
-        was_all_selected = (not previous_values) or (len(previous_selected) == len(previous_values))
+        requested = list(selected) if selected is not None else list(self.selected)
+        preserve_all_mode = self._all_selected_mode or self.text() == self.all_text
         self.values = list(values)
         self.setEnabled(bool(self.values))
-        if force_single and len(self.values) == 1:
+        if not self.values:
+            self.selected = []
+            self._all_selected_mode = True
+        elif force_single and len(self.values) == 1:
             self.selected = [self.values[0]]
+            self._all_selected_mode = True
             self.setEnabled(False)
         else:
             allowed = set(self.values)
-            if was_all_selected:
-                desired = list(self.values)
+            if preserve_all_mode:
+                self.selected = list(self.values)
+                self._all_selected_mode = True
             else:
-                desired = [value for value in (selected or self.selected or self.values) if value in allowed]
-            self.selected = desired if desired else list(self.values)
+                desired = [value for value in requested if value in allowed]
+                if desired:
+                    self.selected = desired
+                    self._all_selected_mode = len(self.selected) == len(self.values)
+                else:
+                    self.selected = list(self.values)
+                    self._all_selected_mode = True
         self._update_text()
 
     def selected_values(self) -> list[str]:
+        if self._all_selected_mode:
+            return list(self.values)
         return list(self.selected)
 
     def _show_popup(self) -> None:
@@ -759,6 +849,7 @@ class CheckListButton(QPushButton):
 
     def _set_selection(self, values: list[str]) -> None:
         self.selected = values if values else []
+        self._all_selected_mode = bool(self.values) and len(self.selected) == len(self.values)
         self._update_text()
         self.selectionChanged.emit(self.selected_values())
 
@@ -776,10 +867,17 @@ class CheckListButton(QPushButton):
 
 
 class QuickDssPickerDialog(QDialog):
+    ITEM_KIND_ROLE = Qt.UserRole + 10
+    ROOT_PF_ROLE = Qt.UserRole + 11
+    FILE_PATH_ROLE = Qt.UserRole
+
     def __init__(self, parent: QWidget, root_folder: Path, selected_paths: Iterable[Path] | None = None, title: str = "Quick DSS Picker") -> None:
         super().__init__(parent)
         self.root_folder = root_folder
         self.selected_paths = {str(Path(path).resolve()) for path in (selected_paths or [])}
+        self._syncing_checks = False
+        self._group_children: dict[str, list[QListWidgetItem]] = {}
+        self._group_headers: dict[str, QListWidgetItem] = {}
         self.setWindowTitle(title)
         self.resize(980, 620)
 
@@ -813,6 +911,7 @@ class QuickDssPickerDialog(QDialog):
         self.check_all_button.clicked.connect(self._check_all_visible)
         self.uncheck_all_button.clicked.connect(self._uncheck_all_visible)
         self.rescan_button.clicked.connect(self._populate)
+        self.list_widget.itemChanged.connect(self._on_item_changed)
 
         self._populate()
 
@@ -821,68 +920,129 @@ class QuickDssPickerDialog(QDialog):
 
     def _format_item_label(self, path: Path) -> str:
         pf = core.extract_pf_identifier(path.name)
-        job_folder = ""
-        relative_hint = path.name
-        try:
-            relative = path.relative_to(self.root_folder)
-            parts = relative.parts
-            if len(parts) >= 4:
-                job_folder = parts[0]
-                relative_hint = " > ".join(parts)
-            else:
-                relative_hint = str(relative)
-        except ValueError:
-            job_folder = path.parents[2].name if len(path.parents) >= 3 else ""
-            relative_hint = path.name
-        try:
-            modified = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
-        except OSError:
-            modified = "Unknown"
-        return f"{pf} | {job_folder} | {path.name} | {modified}\n{relative_hint}"
+        if pf and pf != path.stem.strip():
+            return f"{pf} | {path.name}"
+        return path.name
+
+    def _root_pf_for_path(self, path: Path) -> str:
+        pf = core.extract_pf_identifier(path.name).strip()
+        if pf.upper().startswith("PF"):
+            return pf.split("-", 1)[0]
+        return pf or path.stem.strip()
 
     def _populate(self) -> None:
         previous = set(self.selected_file_paths()) | set(self.selected_paths)
         self.list_widget.clear()
+        self._group_children.clear()
+        self._group_headers.clear()
         candidates = self._iter_candidate_paths()
+        grouped: dict[str, list[Path]] = {}
         for path in candidates:
-            item = QListWidgetItem(self._format_item_label(path))
-            item.setData(Qt.UserRole, str(path))
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Checked if str(path) in previous else Qt.Unchecked)
-            self.list_widget.addItem(item)
+            grouped.setdefault(self._root_pf_for_path(path), []).append(path)
+        self._syncing_checks = True
+        try:
+            for root_pf in sorted(grouped, key=core.pf_number_sort_key):
+                paths = sorted(grouped[root_pf], key=lambda p: core.pf_number_sort_key(core.extract_pf_identifier(p.name)))
+                header = QListWidgetItem(root_pf)
+                header.setData(self.ITEM_KIND_ROLE, "group")
+                header.setData(self.ROOT_PF_ROLE, root_pf)
+                header.setFlags(header.flags() | Qt.ItemIsUserCheckable)
+                self.list_widget.addItem(header)
+                self._group_headers[root_pf] = header
+                children: list[QListWidgetItem] = []
+                all_checked = True
+                for path in paths:
+                    item = QListWidgetItem(f"    {self._format_item_label(path)}")
+                    item.setData(self.FILE_PATH_ROLE, str(path))
+                    item.setData(self.ITEM_KIND_ROLE, "file")
+                    item.setData(self.ROOT_PF_ROLE, root_pf)
+                    item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                    checked = str(path) in previous
+                    item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
+                    if not checked:
+                        all_checked = False
+                    self.list_widget.addItem(item)
+                    children.append(item)
+                self._group_children[root_pf] = children
+                header.setCheckState(Qt.Checked if all_checked and children else Qt.Unchecked)
+        finally:
+            self._syncing_checks = False
         self.summary_label.setText(f"Found {len(candidates)} DSS workbook(s) under {self.root_folder}")
         self._apply_filter()
 
     def _apply_filter(self) -> None:
         needle = self.search_edit.text().strip().casefold()
         visible = 0
-        for row in range(self.list_widget.count()):
-            item = self.list_widget.item(row)
-            haystack = item.text().casefold()
-            hidden = bool(needle) and needle not in haystack
-            item.setHidden(hidden)
-            if not hidden:
-                visible += 1
+        for root_pf, header in self._group_headers.items():
+            header_match = needle in header.text().casefold() if needle else True
+            matching_children = 0
+            for child in self._group_children.get(root_pf, []):
+                child_match = needle in child.text().casefold() if needle else True
+                child.setHidden(not child_match)
+                if child_match:
+                    matching_children += 1
+                    visible += 1
+            header.setHidden(not header_match and matching_children == 0)
         self.summary_label.setText(f"Showing {visible} DSS workbook(s) from {self.root_folder}")
 
     def _check_all_visible(self) -> None:
-        for row in range(self.list_widget.count()):
-            item = self.list_widget.item(row)
-            if not item.isHidden():
-                item.setCheckState(Qt.Checked)
+        self._syncing_checks = True
+        try:
+            for row in range(self.list_widget.count()):
+                item = self.list_widget.item(row)
+                if item.isHidden():
+                    continue
+                if item.data(self.ITEM_KIND_ROLE) == "file":
+                    item.setCheckState(Qt.Checked)
+            for root_pf, header in self._group_headers.items():
+                children = self._group_children.get(root_pf, [])
+                header.setCheckState(Qt.Checked if children and all(child.checkState() == Qt.Checked for child in children) else Qt.Unchecked)
+        finally:
+            self._syncing_checks = False
 
     def _uncheck_all_visible(self) -> None:
-        for row in range(self.list_widget.count()):
-            item = self.list_widget.item(row)
-            if not item.isHidden():
-                item.setCheckState(Qt.Unchecked)
+        self._syncing_checks = True
+        try:
+            for row in range(self.list_widget.count()):
+                item = self.list_widget.item(row)
+                if item.isHidden():
+                    continue
+                if item.data(self.ITEM_KIND_ROLE) == "file":
+                    item.setCheckState(Qt.Unchecked)
+            for header in self._group_headers.values():
+                header.setCheckState(Qt.Unchecked)
+        finally:
+            self._syncing_checks = False
+
+    def _on_item_changed(self, item: QListWidgetItem) -> None:
+        if self._syncing_checks:
+            return
+        kind = str(item.data(self.ITEM_KIND_ROLE) or "")
+        root_pf = str(item.data(self.ROOT_PF_ROLE) or "")
+        if not root_pf:
+            return
+        self._syncing_checks = True
+        try:
+            if kind == "group":
+                checked = item.checkState() == Qt.Checked
+                for child in self._group_children.get(root_pf, []):
+                    child.setCheckState(Qt.Checked if checked else Qt.Unchecked)
+            elif kind == "file":
+                header = self._group_headers.get(root_pf)
+                children = self._group_children.get(root_pf, [])
+                if header is not None:
+                    header.setCheckState(Qt.Checked if children and all(child.checkState() == Qt.Checked for child in children) else Qt.Unchecked)
+        finally:
+            self._syncing_checks = False
 
     def selected_file_paths(self) -> list[str]:
         results: list[str] = []
         for row in range(self.list_widget.count()):
             item = self.list_widget.item(row)
+            if item.data(self.ITEM_KIND_ROLE) != "file":
+                continue
             if item.checkState() == Qt.Checked:
-                results.append(str(item.data(Qt.UserRole)))
+                results.append(str(item.data(self.FILE_PATH_ROLE)))
         return results
 
 
@@ -973,6 +1133,7 @@ class NameTypoWorker(QObject):
     finished = Signal(object)
     failed = Signal(str)
     cancelled = Signal()
+    progressChanged = Signal(float, str)
 
     def __init__(
         self,
@@ -995,31 +1156,53 @@ class NameTypoWorker(QObject):
 
     def run(self) -> None:
         try:
+            self.progressChanged.emit(0.02, "Preparing name typo review...")
             names_to_check = [
                 employee
                 for employee in self.employee_names
                 if not self.employee_emails.get(employee, "").strip() and employee not in self.missing_email_suppressions
             ]
+            self.progressChanged.emit(0.12, f"Checking {len(names_to_check)} unresolved name(s) against local cache...")
+            cached_reference_names = [
+                employee
+                for employee in self.employee_names
+                if self.employee_emails.get(employee, "").strip() or self.employee_outlook_display_names.get(employee, "").strip()
+            ]
+            local_cache_warnings = core.find_cached_employee_name_typos(
+                names_to_check,
+                cached_reference_names,
+                self.daily_records,
+            )
+            locally_inferred = {warning.employee for warning in local_cache_warnings}
+            remaining_names = [employee for employee in names_to_check if employee not in locally_inferred]
             address_book_names: list[str] = []
-            if names_to_check:
+            if remaining_names:
+                self.progressChanged.emit(0.2, f"Querying Outlook for {len(remaining_names)} remaining unresolved name(s)...")
                 try:
                     _results, address_book_names = core.query_outlook_emails(
-                        names_to_check,
+                        remaining_names,
                         should_cancel=self.cancel_event.is_set,
                         scan_full_address_book=True,
+                        progress_callback=lambda processed, total, employee, _resolution: self.progressChanged.emit(
+                            0.2 + (0.5 * (processed / max(total, 1))),
+                            f"Checking Outlook: {processed}/{total} ({employee})",
+                        ),
                     )
                 except core.OperationCancelled:
                     raise
                 except Exception:
                     address_book_names = []
+            else:
+                self.progressChanged.emit(0.7, "All unresolved names were matched against the local cache.")
             if self.cancel_event.is_set():
                 raise core.OperationCancelled("Cancelled name typo refresh.")
 
-            warnings: list[core.NameTypoWarning] = []
+            self.progressChanged.emit(0.8, "Comparing names for likely typos...")
+            warnings: list[core.NameTypoWarning] = list(local_cache_warnings)
             if names_to_check:
                 warnings.extend(core.find_potential_name_typos(names_to_check, self.employee_names, self.daily_records))
                 if address_book_names:
-                    warnings.extend(core.find_address_book_name_typos(names_to_check, address_book_names, self.daily_records))
+                    warnings.extend(core.find_address_book_name_typos(remaining_names, address_book_names, self.daily_records))
             else:
                 warnings.extend(core.find_similar_employee_name_pairs(self.employee_names, self.daily_records))
             warnings.extend(
@@ -1035,6 +1218,7 @@ class NameTypoWorker(QObject):
         except Exception as exc:  # pragma: no cover - UI surface
             self.failed.emit(str(exc))
             return
+        self.progressChanged.emit(1.0, f"Name typo review complete: {len(warnings)} warning(s)")
         self.finished.emit(warnings)
 
 
@@ -2035,24 +2219,9 @@ class DssQtMainWindow(QMainWindow):
         load_layout = QHBoxLayout(load_box)
         load_layout.addWidget(self.source_label, 1)
         load_layout.addWidget(self.loading_label)
-        load_layout.addWidget(self.percent_label)
         load_layout.addWidget(self.progress_bar, 2)
+        load_layout.addWidget(self.percent_label)
         load_layout.addWidget(self.cancel_button)
-
-        top_groups = QVBoxLayout()
-        top_groups.addWidget(controls_box)
-        top_groups.addWidget(filters_box)
-        top_groups.addWidget(load_box)
-        root_layout.addLayout(top_groups)
-
-        status_row = QHBoxLayout()
-        self.status_label = QLabel("Load a DSS workbook to view daily and weekly labour summaries.")
-        self.status_label.setWordWrap(True)
-        self.quickload_hint_label = QLabel("")
-        self.quickload_hint_label.setWordWrap(True)
-        status_row.addWidget(self.status_label, 1)
-        status_row.addWidget(self.quickload_hint_label)
-        root_layout.addLayout(status_row)
 
         overview_box = QGroupBox("Overview")
         overview_layout = QHBoxLayout(overview_box)
@@ -2074,7 +2243,22 @@ class DssQtMainWindow(QMainWindow):
         ):
             overview_layout.addWidget(widget)
         overview_layout.addStretch(1)
-        root_layout.addWidget(overview_box)
+
+        top_groups = QHBoxLayout()
+        top_groups.addWidget(controls_box, 3)
+        top_groups.addWidget(filters_box, 2)
+        top_groups.addWidget(load_box, 3)
+        top_groups.addWidget(overview_box, 3)
+        root_layout.addLayout(top_groups)
+
+        status_row = QHBoxLayout()
+        self.status_label = QLabel("Load a DSS workbook to view daily and weekly labour summaries.")
+        self.status_label.setWordWrap(True)
+        self.quickload_hint_label = QLabel("")
+        self.quickload_hint_label.setWordWrap(True)
+        status_row.addWidget(self.status_label, 1)
+        status_row.addWidget(self.quickload_hint_label)
+        root_layout.addLayout(status_row)
 
         self.group_tabs = QTabWidget()
         root_layout.addWidget(self.group_tabs, 1)
@@ -2453,7 +2637,10 @@ class DssQtMainWindow(QMainWindow):
     def _available_pfs(self) -> list[str]:
         if not self.current_data:
             return []
-        return sorted({core.display_pf_number(record.pf_number) for record in self.current_data.daily_records}, key=str.casefold)
+        return sorted(
+            {core.display_pf_number(record.pf_number) for record in self.current_data.daily_records},
+            key=core.pf_number_sort_key,
+        )
 
     def _sync_data_tabs_visibility(self) -> None:
         daily_raw_page = self.pages["daily_raw"]
@@ -2810,7 +2997,7 @@ class DssQtMainWindow(QMainWindow):
         previous_employee = ""
         previous_date = ""
         previous_week_start: date | None = None
-        for row in employee_daily_pf:
+        for index, row in enumerate(employee_daily_pf):
             date_text = row.work_date.strftime("%d-%b")
             week_number = str(core.reference_week_number(row.work_date))
             employee_changed = row.employee != previous_employee
@@ -2834,6 +3021,10 @@ class DssQtMainWindow(QMainWindow):
                     "ot": core.fmt_hours(row.ot),
                     "dt": core.fmt_hours(row.dt),
                     "total": core.fmt_hours(row.total),
+                    "__employee_full__": row.employee,
+                    "__week_start__": row.week_start.isoformat(),
+                    "__date_sort__": row.work_date.isoformat(),
+                    "__source_index__": index,
                     "__tags__": tuple(tags),
                 }
             )
@@ -3179,8 +3370,11 @@ class DssQtMainWindow(QMainWindow):
         self.quick_add_button.setEnabled(not busy)
         self.remove_button.setEnabled(has_sources and not busy)
         self.update_button.setEnabled(has_sources and not busy)
+        self.employee_filter.setEnabled(not busy)
+        self.pf_filter.setEnabled(not busy)
+        self.group_tabs.setEnabled(not busy)
         self.cancel_button.setEnabled(busy)
-        self.loading_label.setText("Working..." if busy else "")
+        self.loading_label.setText("Working..." if busy and not self.loading_label.text().strip() else ("" if not busy else self.loading_label.text()))
         self._refresh_quickload_hint_label()
         self._refresh_source_status_labels()
         self._refresh_export_button_state(busy=busy)
@@ -3363,7 +3557,7 @@ class DssQtMainWindow(QMainWindow):
         value = max(0, min(1000, int(round(fraction * 1000))))
         self.progress_bar.setValue(value)
         self.percent_label.setText(f"{fraction * 100:.1f}%")
-        self.loading_label.setText(f"{fraction * 100:.1f}%")
+        self.loading_label.setText("Loading...")
         self.status_label.setText(message)
 
     def _on_partial_ready(self, token: int, tracker_data: core.TrackerData, message: str) -> None:
@@ -3604,8 +3798,19 @@ class DssQtMainWindow(QMainWindow):
         self._outlook_partial_updates.clear()
         self._outlook_last_partial_refresh = now
         if updated:
+            self._invalidate_name_typo_cache()
             self._refresh_employee_page()
             self.refresh_views()
+
+    def _on_name_typo_refresh_progress(self, token: int, fraction: float, message: str) -> None:
+        if token != self._active_name_typo_token:
+            return
+        value = max(0, min(1000, int(round(fraction * 1000))))
+        self.progress_bar.setRange(0, 1000)
+        self.progress_bar.setValue(value)
+        self.percent_label.setText(f"{fraction * 100:.1f}%")
+        self.loading_label.setText("Checking names...")
+        self.status_label.setText(message)
 
     def _on_outlook_sync_progress(
         self,
@@ -3640,6 +3845,8 @@ class DssQtMainWindow(QMainWindow):
                 if resolution.display_name.strip():
                     self.employee_outlook_display_names[employee] = resolution.display_name.strip()
                 updated += 1
+        if updated:
+            self._invalidate_name_typo_cache()
         core.save_employee_emails(self.config_path, self.employee_emails, self.employee_outlook_display_names)
         if self.load_worker is None:
             self._set_loading_state(False, f"Matched emails: {updated}")
@@ -3999,7 +4206,7 @@ class DssQtMainWindow(QMainWindow):
         if self.name_typo_worker is not None:
             return
         cache_key = self._current_name_typo_cache_key()
-        if cache_key is not None and cache_key == self._cached_name_typo_key and self._cached_name_typo_warnings:
+        if cache_key is not None and cache_key == self._cached_name_typo_key:
             self.refresh_views()
             self._refresh_overview_labels()
             self.group_tabs.setCurrentWidget(self.report_tabs)
@@ -4019,10 +4226,15 @@ class DssQtMainWindow(QMainWindow):
             self.employee_outlook_display_names,
         )
         self.name_typo_worker = worker
+        worker.progressChanged.connect(lambda fraction, message, current_token=token: self._on_name_typo_refresh_progress(current_token, fraction, message))
         worker.finished.connect(lambda warnings, current_token=token: self._on_name_typo_refresh_finished(current_token, warnings))
         worker.failed.connect(lambda message, current_token=token: self._on_name_typo_refresh_failed(current_token, message))
         worker.cancelled.connect(lambda current_token=token: self._on_name_typo_refresh_cancelled(current_token))
         self.name_typo_thread = threading.Thread(target=worker.run, daemon=True)
+        self.progress_bar.setRange(0, 1000)
+        self.progress_bar.setValue(0)
+        self.percent_label.setText("0.0%")
+        self.loading_label.setText("Checking names...")
         self._set_loading_state(True, "Refreshing name typos...")
         self.name_typo_thread.start()
 
@@ -4207,7 +4419,7 @@ class DssQtMainWindow(QMainWindow):
             self.progress_bar.setRange(0, 1000)
             self.progress_bar.setValue(int(round(fraction * 1000)))
             self.percent_label.setText(f"{fraction * 100:.1f}%")
-            self.loading_label.setText(f"{fraction * 100:.1f}%")
+            self.loading_label.setText("Downloading...")
             self._set_update_status(
                 f"Downloading update... {core.fmt_hours(downloaded / (1024 * 1024))} / {core.fmt_hours(total / (1024 * 1024))} MB"
             )
