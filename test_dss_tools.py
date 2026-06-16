@@ -55,8 +55,10 @@ from dss_hours_tracker import (
     build_permission_denied_message,
     is_newer_version,
     normalize_release_version,
+    OutlookLookupCacheEntry,
     parse_checksum_manifest,
     parse_latest_release_payload,
+    plan_outlook_query_names,
     process_workbook_bytes,
     compute_bytes_hash,
     compute_all_dated_sheet_hashes,
@@ -82,6 +84,7 @@ from dss_hours_tracker import (
     filter_employee_names,
     FormattingProfile,
     get_app_root,
+    get_windows_network_profile,
     is_alert_triggered,
     is_allowed_quickload_cancel_hotkey,
     is_path_like_table_column,
@@ -93,10 +96,12 @@ from dss_hours_tracker import (
     normalize_ui_hex_color,
     parse_ui_theme_payload,
     DailyRecord,
+    _windows_hidden_subprocess_options,
     build_outlook_name_mismatch_findings,
     build_tracker_data_with_status,
     tracker_data_invalidated_for_cache_clear,
     load_employee_emails,
+    load_outlook_lookup_cache,
     load_employee_outlook_display_names,
     load_employee_groups,
     load_table_layouts,
@@ -109,6 +114,7 @@ from dss_hours_tracker import (
     weekly_rollup_sort_key,
     remove_config_keys,
     save_employee_emails,
+    save_outlook_lookup_cache,
     save_employee_groups,
     save_missing_email_suppressions,
     save_employee_name_overrides,
@@ -379,7 +385,95 @@ class DssToolsTests(DssToolsFixtures):
             DailyRecord(Path("c.xlsx"), "c.xlsx", date(2026, 6, 1), "Sheet1", "Worker", 1, 0, 0, "", "PF25119"),
         ]
         self.assertEqual(pf_numbers_for_records(records), "PF25119, PF25119-2, PF25119-10")
+
+    def test_windows_hidden_subprocess_options_non_windows_empty(self) -> None:
+        with mock.patch("dss_hours_tracker.os.name", "posix"):
+            self.assertEqual(_windows_hidden_subprocess_options(), {})
+
+    def test_get_windows_network_profile_uses_hidden_powershell_options(self) -> None:
+        completed = mock.Mock(stdout='{"connected": true, "supported": true}')
+        with (
+            mock.patch("dss_hours_tracker.os.name", "nt"),
+            mock.patch("dss_hours_tracker.subprocess.run", return_value=completed) as run_mock,
+            mock.patch("dss_hours_tracker._windows_hidden_subprocess_options", return_value={"creationflags": 123, "startupinfo": "hidden"}),
+        ):
+            profile = get_windows_network_profile()
+        self.assertEqual(profile["connected"], True)
+        run_mock.assert_called_once()
+        args, kwargs = run_mock.call_args
+        self.assertEqual(args[0][0], "powershell.exe")
+        self.assertIn("-NonInteractive", args[0])
+        self.assertEqual(kwargs["creationflags"], 123)
+        self.assertEqual(kwargs["startupinfo"], "hidden")
         self.assertEqual(extract_pf_identifier("PF26006-4 Generator Wiring Changes.xlsx"), "PF26006-4")
+
+    def test_save_outlook_lookup_cache_round_trips(self) -> None:
+        config_path = Path("config.json")
+        payload_holder: dict[str, object] = {}
+
+        def fake_write_text(text: str, encoding: str = "utf-8") -> int:
+            payload_holder["payload"] = json.loads(text)
+            return len(text)
+
+        with (
+            mock.patch("dss_hours_tracker.read_config_payload", return_value={}),
+            mock.patch.object(Path, "write_text", side_effect=fake_write_text),
+        ):
+            save_outlook_lookup_cache(
+                config_path,
+                {
+                    "Alice Smith": OutlookLookupCacheEntry(
+                        email="alice@example.com",
+                        display_name="Alice Smith",
+                        last_checked="2026-06-16",
+                        matched=True,
+                    ),
+                    "Bob Jones": OutlookLookupCacheEntry(
+                        email="",
+                        display_name="",
+                        last_checked="2026-06-10",
+                        matched=False,
+                    ),
+                },
+            )
+        with mock.patch("dss_hours_tracker.read_config_payload", return_value=payload_holder["payload"]):
+            loaded = load_outlook_lookup_cache(config_path)
+        self.assertEqual(loaded["Alice Smith"].email, "alice@example.com")
+        self.assertEqual(loaded["Alice Smith"].display_name, "Alice Smith")
+        self.assertEqual(loaded["Bob Jones"].last_checked, "2026-06-10")
+        self.assertFalse(loaded["Bob Jones"].matched)
+
+    def test_plan_outlook_query_names_prefers_cache_and_skips_recent_misses(self) -> None:
+        query_names, cached_resolutions, cached_display_names, skipped_recent_misses = plan_outlook_query_names(
+            ["Alice Smith", "Bob Jones", "Cara Dunn", "Doug Hall"],
+            employee_emails={"Doug Hall": "doug@example.com"},
+            employee_outlook_display_names={},
+            lookup_cache={
+                "Alice Smith": OutlookLookupCacheEntry(
+                    email="alice@example.com",
+                    display_name="Alice Smith",
+                    last_checked="2026-06-16",
+                    matched=True,
+                ),
+                "Bob Jones": OutlookLookupCacheEntry(
+                    email="",
+                    display_name="",
+                    last_checked="2026-06-15",
+                    matched=False,
+                ),
+                "Cara Dunn": OutlookLookupCacheEntry(
+                    email="",
+                    display_name="Cara Dunn",
+                    last_checked="2026-05-01",
+                    matched=False,
+                ),
+            },
+            checked_on=date(2026, 6, 16),
+        )
+        self.assertEqual(query_names, ["Cara Dunn"])
+        self.assertEqual(cached_resolutions["Alice Smith"].email, "alice@example.com")
+        self.assertEqual(cached_display_names["Cara Dunn"], "Cara Dunn")
+        self.assertEqual(skipped_recent_misses, {"Bob Jones"})
 
     def test_extract_pf_identifier_keeps_dashed_phase_with_spaced_dash(self) -> None:
         self.assertEqual(extract_pf_identifier("PF25119 -14 Cable removal & Rerouting.xlsx"), "PF25119-14")

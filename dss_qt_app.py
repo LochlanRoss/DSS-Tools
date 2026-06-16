@@ -20,7 +20,7 @@ from openpyxl import Workbook
 import dss_hours_tracker as core
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, QPoint, Qt, QTimer, QUrl, Signal, QItemSelectionModel
-from PySide6.QtGui import QAction, QColor, QDesktopServices, QIcon, QKeySequence, QPalette
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QIcon, QKeySequence, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -47,6 +47,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QSplitter,
     QStyledItemDelegate,
@@ -163,10 +164,10 @@ def _build_qt_chrome_stylesheet(theme: core.UiThemeColors) -> str:
             border-color: {border};
             background-color: {disabled_bg};
         }}
-        QPushButton[text="Add DSSs..."],
+        QPushButton[text="Add DSSs"],
         QPushButton[text="Quick Add"],
-        QPushButton[text="Update View"],
-        QPushButton[text="Export Current View"],
+        QPushButton[text="Refresh"],
+        QPushButton[text="Export View"],
         QPushButton[text="Apply Settings"],
         QPushButton[text="Create Outlook Drafts"],
         QPushButton[text="Sync Outlook Emails"],
@@ -176,10 +177,10 @@ def _build_qt_chrome_stylesheet(theme: core.UiThemeColors) -> str:
             color: {accent_text};
             border-color: {accent};
         }}
-        QPushButton[text="Add DSSs..."]:hover,
+        QPushButton[text="Add DSSs"]:hover,
         QPushButton[text="Quick Add"]:hover,
-        QPushButton[text="Update View"]:hover,
-        QPushButton[text="Export Current View"]:hover,
+        QPushButton[text="Refresh"]:hover,
+        QPushButton[text="Export View"]:hover,
         QPushButton[text="Apply Settings"]:hover,
         QPushButton[text="Create Outlook Drafts"]:hover,
         QPushButton[text="Sync Outlook Emails"]:hover,
@@ -1130,7 +1131,7 @@ class OutlookWorker(QObject):
 
 
 class NameTypoWorker(QObject):
-    finished = Signal(object)
+    finished = Signal(object, object)
     failed = Signal(str)
     cancelled = Signal()
     progressChanged = Signal(float, str)
@@ -1142,6 +1143,7 @@ class NameTypoWorker(QObject):
         employee_emails: dict[str, str],
         missing_email_suppressions: set[str],
         employee_outlook_display_names: dict[str, str],
+        outlook_lookup_cache: dict[str, core.OutlookLookupCacheEntry],
     ) -> None:
         super().__init__()
         self.employee_names = list(employee_names)
@@ -1149,6 +1151,7 @@ class NameTypoWorker(QObject):
         self.employee_emails = dict(employee_emails)
         self.missing_email_suppressions = set(missing_email_suppressions)
         self.employee_outlook_display_names = dict(employee_outlook_display_names)
+        self.outlook_lookup_cache = dict(outlook_lookup_cache)
         self.cancel_event = threading.Event()
 
     def cancel(self) -> None:
@@ -1176,33 +1179,67 @@ class NameTypoWorker(QObject):
             locally_inferred = {warning.employee for warning in local_cache_warnings}
             remaining_names = [employee for employee in names_to_check if employee not in locally_inferred]
             address_book_names: list[str] = []
+            skipped_recent_misses: set[str] = set()
+            cache_updates = dict(self.outlook_lookup_cache)
             if remaining_names:
-                self.progressChanged.emit(0.2, f"Querying Outlook for {len(remaining_names)} remaining unresolved name(s)...")
-                try:
-                    _results, address_book_names = core.query_outlook_emails(
-                        remaining_names,
-                        should_cancel=self.cancel_event.is_set,
-                        scan_full_address_book=True,
-                        progress_callback=lambda processed, total, employee, _resolution: self.progressChanged.emit(
-                            0.2 + (0.5 * (processed / max(total, 1))),
-                            f"Checking Outlook: {processed}/{total} ({employee})",
-                        ),
-                    )
-                except core.OperationCancelled:
-                    raise
-                except Exception:
-                    address_book_names = []
+                query_names, cached_resolutions, cached_display_names, skipped_recent_misses = core.plan_outlook_query_names(
+                    remaining_names,
+                    self.employee_emails,
+                    self.employee_outlook_display_names,
+                    self.outlook_lookup_cache,
+                )
+                for employee, resolution in cached_resolutions.items():
+                    if resolution.email.strip() and not self.employee_emails.get(employee, "").strip():
+                        self.employee_emails[employee] = resolution.email.strip()
+                    if resolution.display_name.strip() and not self.employee_outlook_display_names.get(employee, "").strip():
+                        self.employee_outlook_display_names[employee] = resolution.display_name.strip()
+                for employee, display_name in cached_display_names.items():
+                    if display_name.strip() and not self.employee_outlook_display_names.get(employee, "").strip():
+                        self.employee_outlook_display_names[employee] = display_name.strip()
+                if skipped_recent_misses:
+                    self.progressChanged.emit(0.2, f"Skipping {len(skipped_recent_misses)} recently checked unresolved name(s)...")
+                if query_names:
+                    self.progressChanged.emit(0.2, f"Querying Outlook for {len(query_names)} remaining unresolved name(s)...")
+                    try:
+                        query_results, address_book_names = core.query_outlook_emails(
+                            query_names,
+                            should_cancel=self.cancel_event.is_set,
+                            scan_full_address_book=True,
+                            progress_callback=lambda processed, total, employee, _resolution: self.progressChanged.emit(
+                                0.2 + (0.5 * (processed / max(total, 1))),
+                                f"Checking Outlook: {processed}/{total} ({employee})",
+                            ),
+                        )
+                    except core.OperationCancelled:
+                        raise
+                    except Exception:
+                        address_book_names = []
+                        query_results = {}
+                    cache_updates = core.update_outlook_lookup_cache(cache_updates, query_names, query_results)
+                else:
+                    self.progressChanged.emit(0.7, "All unresolved names were satisfied from the local cache.")
             else:
                 self.progressChanged.emit(0.7, "All unresolved names were matched against the local cache.")
+            effective_names_to_check = [
+                employee
+                for employee in names_to_check
+                if not self.employee_emails.get(employee, "").strip()
+            ]
             if self.cancel_event.is_set():
                 raise core.OperationCancelled("Cancelled name typo refresh.")
 
             self.progressChanged.emit(0.8, "Comparing names for likely typos...")
             warnings: list[core.NameTypoWarning] = list(local_cache_warnings)
-            if names_to_check:
-                warnings.extend(core.find_potential_name_typos(names_to_check, self.employee_names, self.daily_records))
+            if effective_names_to_check:
+                warnings.extend(core.find_potential_name_typos(effective_names_to_check, self.employee_names, self.daily_records))
                 if address_book_names:
-                    warnings.extend(core.find_address_book_name_typos(remaining_names, address_book_names, self.daily_records))
+                    warnings.extend(
+                        core.find_address_book_name_typos(
+                            [employee for employee in remaining_names if employee not in skipped_recent_misses and employee in effective_names_to_check],
+                            address_book_names,
+                            self.daily_records,
+                        )
+                    )
             else:
                 warnings.extend(core.find_similar_employee_name_pairs(self.employee_names, self.daily_records))
             warnings.extend(
@@ -1219,7 +1256,7 @@ class NameTypoWorker(QObject):
             self.failed.emit(str(exc))
             return
         self.progressChanged.emit(1.0, f"Name typo review complete: {len(warnings)} warning(s)")
-        self.finished.emit(warnings)
+        self.finished.emit(warnings, cache_updates)
 
 
 class EmployeesPage(QWidget):
@@ -2113,6 +2150,7 @@ class DssQtMainWindow(QMainWindow):
         self.profiles, self.current_profile_name = core.load_formatting_profiles(self.config_path)
         self.employee_emails = core.load_employee_emails(self.config_path)
         self.employee_outlook_display_names = core.load_employee_outlook_display_names(self.config_path)
+        self.outlook_lookup_cache = core.load_outlook_lookup_cache(self.config_path)
         self.employee_notes = core.load_employee_notes(self.config_path)
         self.employee_groups = core.load_employee_groups(self.config_path)
         self.missing_email_suppressions = core.load_missing_email_suppressions(self.config_path)
@@ -2177,26 +2215,32 @@ class DssQtMainWindow(QMainWindow):
 
     def _build_ui(self) -> None:
         self.setWindowTitle(core.DISPLAY_APP_NAME)
-        self.setMinimumSize(980, 640)
+        self.setMinimumSize(1280, 700)
         root = QWidget()
         root_layout = QVBoxLayout(root)
 
-        self.add_button = QPushButton("Add DSSs...")
+        self.add_button = QPushButton("Add DSSs")
         self.quick_add_button = QPushButton("Quick Add")
-        self.remove_button = QPushButton("Remove DSS(s)")
-        self.update_button = QPushButton("Update View")
-        self.export_button = QPushButton("Export Current View")
+        self.remove_button = QPushButton("Remove DSSs")
+        self.update_button = QPushButton("Refresh")
+        self.export_button = QPushButton("Export View")
         self.employee_filter = CheckListButton("All Employees", "Employees")
         self.pf_filter = CheckListButton("All PFs", "PFs")
         self.source_label = QLabel("No workbook loaded")
         self.loading_label = QLabel("")
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 1000)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFormat("%p%")
         self.percent_label = QLabel("0.0%")
+        self.percent_label.setVisible(False)
         self.cancel_button = QPushButton("Cancel")
         self.cancel_button.setEnabled(False)
+        top_button_font = QFont(self.font())
+        top_button_font.setPointSize(max(8, top_button_font.pointSize() - 1))
         controls_box = QGroupBox("Workbook Controls")
         controls_layout = QHBoxLayout(controls_box)
+        controls_layout.setSpacing(8)
         for widget in (
             self.add_button,
             self.quick_add_button,
@@ -2204,11 +2248,21 @@ class DssQtMainWindow(QMainWindow):
             self.update_button,
             self.export_button,
         ):
+            widget.setFont(top_button_font)
+            widget.setMinimumWidth(112)
+            widget.setMinimumHeight(34)
+            widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             controls_layout.addWidget(widget)
         controls_layout.addStretch(1)
+        self.add_button.setToolTip("Add DSS workbooks to the current session without clearing existing ones.")
+        self.quick_add_button.setToolTip("Scan the root DSS directory and quickly add matching DSS workbooks.")
+        self.remove_button.setToolTip("Remove one or more DSS workbooks from the current session.")
+        self.update_button.setToolTip("Re-read the loaded DSS workbooks and refresh all summaries.")
+        self.export_button.setToolTip("Export the current table view to Excel.")
 
         filters_box = QGroupBox("Filters")
         filters_layout = QHBoxLayout(filters_box)
+        filters_layout.setSpacing(8)
         filters_layout.addWidget(QLabel("Employee"))
         filters_layout.addWidget(self.employee_filter)
         filters_layout.addWidget(QLabel("PF"))
@@ -2217,10 +2271,10 @@ class DssQtMainWindow(QMainWindow):
 
         load_box = QGroupBox("Load Status")
         load_layout = QHBoxLayout(load_box)
+        load_layout.setSpacing(8)
         load_layout.addWidget(self.source_label, 1)
         load_layout.addWidget(self.loading_label)
         load_layout.addWidget(self.progress_bar, 2)
-        load_layout.addWidget(self.percent_label)
         load_layout.addWidget(self.cancel_button)
 
         overview_box = QGroupBox("Overview")
@@ -2245,11 +2299,12 @@ class DssQtMainWindow(QMainWindow):
         overview_layout.addStretch(1)
 
         top_groups = QHBoxLayout()
+        top_groups.setSpacing(10)
         top_groups.addWidget(controls_box, 3)
         top_groups.addWidget(filters_box, 2)
         top_groups.addWidget(load_box, 3)
-        top_groups.addWidget(overview_box, 3)
         root_layout.addLayout(top_groups)
+        root_layout.addWidget(overview_box)
 
         status_row = QHBoxLayout()
         self.status_label = QLabel("Load a DSS workbook to view daily and weekly labour summaries.")
@@ -3757,13 +3812,52 @@ class DssQtMainWindow(QMainWindow):
         if not employee_names:
             QMessageBox.information(self, "Outlook Email Sync", "No missing employee emails need syncing right now.")
             return
+        query_names, cached_resolutions, cached_display_names, skipped_recent_misses = core.plan_outlook_query_names(
+            employee_names,
+            self.employee_emails,
+            self.employee_outlook_display_names,
+            self.outlook_lookup_cache,
+        )
+        cache_applied = 0
+        updated = False
+        for employee, resolution in cached_resolutions.items():
+            if resolution.email.strip() and not self.employee_emails.get(employee, "").strip():
+                self.employee_emails[employee] = resolution.email.strip()
+                cache_applied += 1
+                updated = True
+            if resolution.display_name.strip() and self.employee_outlook_display_names.get(employee, "") != resolution.display_name.strip():
+                self.employee_outlook_display_names[employee] = resolution.display_name.strip()
+                updated = True
+        for employee, display_name in cached_display_names.items():
+            if display_name.strip() and self.employee_outlook_display_names.get(employee, "") != display_name.strip():
+                self.employee_outlook_display_names[employee] = display_name.strip()
+                updated = True
+        if updated:
+            core.save_employee_emails(self.config_path, self.employee_emails, self.employee_outlook_display_names)
+            core.save_outlook_lookup_cache(self.config_path, self.outlook_lookup_cache)
+            self._refresh_employee_page()
+            self.refresh_views()
+        if not query_names:
+            still_missing = sum(
+                1
+                for employee in self._managed_employee_names()
+                if not self.employee_emails.get(employee, "").strip() and employee not in self.missing_email_suppressions
+            )
+            QMessageBox.information(
+                self,
+                "Outlook Email Sync",
+                f"Used cached Outlook results for {cache_applied} employee(s).\n"
+                f"Skipped {len(skipped_recent_misses)} recently checked unresolved name(s).\n"
+                f"Still missing: {still_missing}",
+            )
+            return
         self.cancel_active_work(abandon_ui=True, reset_ui=False, message="")
         self._next_outlook_token += 1
         token = self._next_outlook_token
         self._active_outlook_token = token
         self._outlook_partial_updates = {}
         self._outlook_last_partial_refresh = 0.0
-        worker = OutlookWorker(employee_names)
+        worker = OutlookWorker(query_names)
         self.outlook_worker = worker
         worker.progressChanged.connect(
             lambda processed, total, employee, resolution, current_token=token: self._on_outlook_sync_progress(
@@ -3774,7 +3868,10 @@ class DssQtMainWindow(QMainWindow):
                 resolution,
             )
         )
-        worker.finished.connect(lambda results, address_book_names, current_token=token: self._on_outlook_sync_finished(current_token, results, address_book_names))
+        worker.finished.connect(
+            lambda results, address_book_names, current_token=token, query_names=query_names, cache_applied=cache_applied, skipped_recent_misses=skipped_recent_misses:
+            self._on_outlook_sync_finished(current_token, results, address_book_names, query_names, cache_applied, skipped_recent_misses)
+        )
         worker.failed.connect(lambda message, current_token=token: self._on_outlook_sync_failed(current_token, message))
         worker.cancelled.connect(lambda current_token=token: self._on_outlook_sync_cancelled(current_token))
         self.outlook_thread = threading.Thread(target=worker.run, daemon=True)
@@ -3832,12 +3929,21 @@ class DssQtMainWindow(QMainWindow):
         self.status_label.setText(progress_text)
         self._flush_outlook_partial_updates()
 
-    def _on_outlook_sync_finished(self, token: int, results: dict[str, core.OutlookResolution], address_book_names: list[str]) -> None:
+    def _on_outlook_sync_finished(
+        self,
+        token: int,
+        results: dict[str, core.OutlookResolution],
+        address_book_names: list[str],
+        queried_names: list[str],
+        cache_applied: int,
+        skipped_recent_misses: set[str],
+    ) -> None:
         if token != self._active_outlook_token:
             return
         self.outlook_worker = None
         self.outlook_thread = None
         self._flush_outlook_partial_updates(force=True)
+        self.outlook_lookup_cache = core.update_outlook_lookup_cache(self.outlook_lookup_cache, queried_names, results)
         updated = 0
         for employee, resolution in results.items():
             if resolution.email and not self.employee_emails.get(employee, "").strip():
@@ -3848,8 +3954,9 @@ class DssQtMainWindow(QMainWindow):
         if updated:
             self._invalidate_name_typo_cache()
         core.save_employee_emails(self.config_path, self.employee_emails, self.employee_outlook_display_names)
+        core.save_outlook_lookup_cache(self.config_path, self.outlook_lookup_cache)
         if self.load_worker is None:
-            self._set_loading_state(False, f"Matched emails: {updated}")
+            self._set_loading_state(False, f"Matched emails: {updated + cache_applied}")
         self._refresh_employee_page()
         self.refresh_views()
         warnings: list[core.NameTypoWarning] = []
@@ -3867,7 +3974,12 @@ class DssQtMainWindow(QMainWindow):
             for warning in warnings
             if core.typo_warning_key(warning.employee, warning.similar_employee) not in self.ignored_name_typos
         ]
-        message = f"Matched emails: {updated}\nStill missing: {missing_after}"
+        message = (
+            f"Matched emails from Outlook: {updated}\n"
+            f"Matched emails from cache: {cache_applied}\n"
+            f"Skipped recent unresolved names: {len(skipped_recent_misses)}\n"
+            f"Still missing: {missing_after}"
+        )
         if unsuppressed_warnings and not self.app_settings.disable_name_typo_notifications:
             message += f"\nName typo warnings: {len(unsuppressed_warnings)} (see Reports > Name Typos)"
         QMessageBox.information(self, "Outlook Email Sync", message)
@@ -3964,7 +4076,8 @@ class DssQtMainWindow(QMainWindow):
     def clear_stored_emails(self) -> None:
         self.employee_emails = {}
         self.employee_outlook_display_names = {}
-        core.remove_config_keys(self.config_path, ["employee_emails", "employee_outlook_display_names"])
+        self.outlook_lookup_cache = {}
+        core.remove_config_keys(self.config_path, ["employee_emails", "employee_outlook_display_names", core.OUTLOOK_LOOKUP_CACHE_KEY])
         self._refresh_employee_page()
         self.refresh_views()
         QMessageBox.information(self, "Configuration", "Stored employee emails were cleared.")
@@ -3982,6 +4095,7 @@ class DssQtMainWindow(QMainWindow):
         self.current_profile_name = core.DEFAULT_PROFILE_NAME
         self.employee_emails = {}
         self.employee_outlook_display_names = {}
+        self.outlook_lookup_cache = {}
         self.employee_notes = {}
         self.employee_groups = {}
         self.missing_email_suppressions = set()
@@ -4168,6 +4282,11 @@ class DssQtMainWindow(QMainWindow):
             self.employee_emails[resolved_target] = self.employee_emails[source]
         if not self.employee_outlook_display_names.get(resolved_target, "").strip() and self.employee_outlook_display_names.get(source, "").strip():
             self.employee_outlook_display_names[resolved_target] = self.employee_outlook_display_names[source]
+        source_cache = self.outlook_lookup_cache.get(source)
+        target_cache = self.outlook_lookup_cache.get(resolved_target)
+        if source_cache is not None:
+            if target_cache is None or (not target_cache.email.strip() and source_cache.email.strip()):
+                self.outlook_lookup_cache[resolved_target] = source_cache
         if not self.employee_notes.get(resolved_target, "").strip() and self.employee_notes.get(source, "").strip():
             self.employee_notes[resolved_target] = self.employee_notes[source]
         if source in self.missing_email_suppressions:
@@ -4184,11 +4303,13 @@ class DssQtMainWindow(QMainWindow):
         self.employee_hidden_names.discard(source)
         self.employee_emails.pop(source, None)
         self.employee_outlook_display_names.pop(source, None)
+        self.outlook_lookup_cache.pop(source, None)
         self.employee_notes.pop(source, None)
         self.ignored_name_typos.add(core.typo_warning_key(source, resolved_target))
         self._persist_employee_name_merges()
         core.save_employee_name_overrides(self.config_path, self.employee_added_names, self.employee_hidden_names)
         core.save_employee_emails(self.config_path, self.employee_emails, self.employee_outlook_display_names)
+        core.save_outlook_lookup_cache(self.config_path, self.outlook_lookup_cache)
         core.save_employee_notes(self.config_path, self.employee_notes)
         core.save_employee_groups(self.config_path, self.employee_groups)
         core.save_missing_email_suppressions(self.config_path, self.missing_email_suppressions)
@@ -4224,10 +4345,11 @@ class DssQtMainWindow(QMainWindow):
             self.employee_emails,
             self.missing_email_suppressions,
             self.employee_outlook_display_names,
+            self.outlook_lookup_cache,
         )
         self.name_typo_worker = worker
         worker.progressChanged.connect(lambda fraction, message, current_token=token: self._on_name_typo_refresh_progress(current_token, fraction, message))
-        worker.finished.connect(lambda warnings, current_token=token: self._on_name_typo_refresh_finished(current_token, warnings))
+        worker.finished.connect(lambda warnings, cache_updates, current_token=token: self._on_name_typo_refresh_finished(current_token, warnings, cache_updates))
         worker.failed.connect(lambda message, current_token=token: self._on_name_typo_refresh_failed(current_token, message))
         worker.cancelled.connect(lambda current_token=token: self._on_name_typo_refresh_cancelled(current_token))
         self.name_typo_thread = threading.Thread(target=worker.run, daemon=True)
@@ -4238,11 +4360,18 @@ class DssQtMainWindow(QMainWindow):
         self._set_loading_state(True, "Refreshing name typos...")
         self.name_typo_thread.start()
 
-    def _on_name_typo_refresh_finished(self, token: int, warnings: list[core.NameTypoWarning]) -> None:
+    def _on_name_typo_refresh_finished(
+        self,
+        token: int,
+        warnings: list[core.NameTypoWarning],
+        cache_updates: dict[str, core.OutlookLookupCacheEntry],
+    ) -> None:
         if token != self._active_name_typo_token:
             return
         self.name_typo_worker = None
         self.name_typo_thread = None
+        self.outlook_lookup_cache = dict(cache_updates)
+        core.save_outlook_lookup_cache(self.config_path, self.outlook_lookup_cache)
         self._set_cached_name_typo_warnings(warnings)
         self.refresh_views()
         self._set_loading_state(False, f"Name typo refresh complete: {len(warnings)} warning(s)")
@@ -4570,26 +4699,14 @@ class DssQtMainWindow(QMainWindow):
         pid = os.getpid()
         escaped_path = str(inst).replace("'", "''")
         command = f"while (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ Start-Sleep -Milliseconds 500 }}; Start-Process -FilePath '{escaped_path}'"
-        creationflags = 0
-        startupinfo = None
-        if os.name == "nt":
-            creationflags = (
-                getattr(subprocess, "DETACHED_PROCESS", 0)
-                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-                | getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            )
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
         try:
             subprocess.Popen(
-                ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", command],
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", command],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 stdin=subprocess.DEVNULL,
                 close_fds=False,
-                creationflags=creationflags,
-                startupinfo=startupinfo,
+                **core._windows_hidden_subprocess_options(),
             )
         except OSError as exc:
             QMessageBox.critical(self, "Install Update", f"Could not launch the installer.\n\n{exc}")

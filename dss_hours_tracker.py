@@ -193,6 +193,23 @@ def normalize_release_version(version_text: str) -> str:
     return version_text.strip().lstrip("vV")
 
 
+def _windows_hidden_subprocess_options() -> dict[str, object]:
+    if os.name != "nt":
+        return {}
+    creationflags = (
+        getattr(subprocess, "DETACHED_PROCESS", 0)
+        | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    )
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+    return {
+        "creationflags": creationflags,
+        "startupinfo": startupinfo,
+    }
+
+
 def version_key(version_text: str) -> tuple[tuple[int, object], ...]:
     normalized = normalize_release_version(version_text)
     tokens = re.findall(r"\d+|[A-Za-z]+", normalized)
@@ -443,8 +460,11 @@ def get_windows_network_profile(timeout: int = 10) -> dict[str, object]:
     if os.name != "nt":
         return {"connected": False, "supported": False, "reason": "Windows-only check"}
     command = [
-        "powershell",
+        "powershell.exe",
         "-NoProfile",
+        "-NonInteractive",
+        "-WindowStyle",
+        "Hidden",
         "-Command",
         "[Windows.Networking.Connectivity.NetworkInformation, Windows, ContentType = WindowsRuntime] | Out-Null; "
         "$profile = [Windows.Networking.Connectivity.NetworkInformation]::GetInternetConnectionProfile(); "
@@ -453,7 +473,14 @@ def get_windows_network_profile(timeout: int = 10) -> dict[str, object]:
         "[ordered]@{ connected = ($level -ne 'None'); supported = $true; connectivity_level = $level; is_wlan = [bool]$profile.IsWlanConnectionProfile; network_cost_type = $cost.NetworkCostType.ToString(); roaming = [bool]$cost.Roaming; over_data_limit = [bool]$cost.OverDataLimit; approaching_data_limit = [bool]$cost.ApproachingDataLimit; background_restricted = [bool]$cost.BackgroundDataUsageRestricted } | ConvertTo-Json -Compress",
     ]
     try:
-        completed = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=True)
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=True,
+            **_windows_hidden_subprocess_options(),
+        )
     except (OSError, subprocess.SubprocessError) as exc:
         return {"connected": False, "supported": False, "reason": str(exc)}
     try:
@@ -729,6 +756,14 @@ class ErrorFinding:
 class OutlookResolution:
     email: str
     display_name: str
+
+
+@dataclass(frozen=True)
+class OutlookLookupCacheEntry:
+    email: str = ""
+    display_name: str = ""
+    last_checked: str = ""
+    matched: bool = False
 
 
 @dataclass(frozen=True)
@@ -1620,6 +1655,139 @@ def read_config_payload(config_path: Path) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
+OUTLOOK_LOOKUP_CACHE_KEY = "outlook_lookup_cache"
+OUTLOOK_LOOKUP_MISS_TTL_DAYS = 30
+
+
+def load_outlook_lookup_cache(config_path: Path) -> dict[str, OutlookLookupCacheEntry]:
+    payload = read_config_payload(config_path)
+    raw_map = payload.get(OUTLOOK_LOOKUP_CACHE_KEY, {})
+    if not isinstance(raw_map, dict):
+        return {}
+    cache: dict[str, OutlookLookupCacheEntry] = {}
+    for name, raw_value in raw_map.items():
+        employee = str(name).strip()
+        if not employee or not isinstance(raw_value, dict):
+            continue
+        cache[employee] = OutlookLookupCacheEntry(
+            email=str(raw_value.get("email", "")).strip(),
+            display_name=str(raw_value.get("display_name", "")).strip(),
+            last_checked=str(raw_value.get("last_checked", "")).strip(),
+            matched=bool(raw_value.get("matched", False)),
+        )
+    return cache
+
+
+def save_outlook_lookup_cache(config_path: Path, cache: dict[str, OutlookLookupCacheEntry]) -> None:
+    payload = read_config_payload(config_path)
+    payload[OUTLOOK_LOOKUP_CACHE_KEY] = {
+        name: {
+            "email": entry.email.strip(),
+            "display_name": entry.display_name.strip(),
+            "last_checked": entry.last_checked.strip(),
+            "matched": bool(entry.matched),
+        }
+        for name, entry in sorted(cache.items(), key=lambda item: item[0].lower())
+        if name.strip()
+    }
+    config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _parse_cache_date(text: str) -> date | None:
+    value = text.strip()
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def is_outlook_lookup_cache_entry_fresh(
+    entry: OutlookLookupCacheEntry,
+    *,
+    checked_on: date | None = None,
+    miss_ttl_days: int = OUTLOOK_LOOKUP_MISS_TTL_DAYS,
+) -> bool:
+    checked_date = _parse_cache_date(entry.last_checked)
+    if checked_date is None:
+        return False
+    today = checked_on or date.today()
+    age_days = (today - checked_date).days
+    if age_days < 0:
+        age_days = 0
+    return age_days <= miss_ttl_days
+
+
+def plan_outlook_query_names(
+    employee_names: Iterable[str],
+    employee_emails: dict[str, str],
+    employee_outlook_display_names: dict[str, str],
+    lookup_cache: dict[str, OutlookLookupCacheEntry],
+    *,
+    checked_on: date | None = None,
+    miss_ttl_days: int = OUTLOOK_LOOKUP_MISS_TTL_DAYS,
+) -> tuple[list[str], dict[str, OutlookResolution], dict[str, str], set[str]]:
+    query_names: list[str] = []
+    cached_resolutions: dict[str, OutlookResolution] = {}
+    cached_display_names: dict[str, str] = {}
+    skipped_recent_misses: set[str] = set()
+    seen: set[str] = set()
+    for raw_name in employee_names:
+        employee = str(raw_name).strip()
+        if not employee or employee in seen:
+            continue
+        seen.add(employee)
+        if employee_emails.get(employee, "").strip():
+            continue
+        entry = lookup_cache.get(employee)
+        if entry is None:
+            query_names.append(employee)
+            continue
+        if entry.display_name.strip() and not employee_outlook_display_names.get(employee, "").strip():
+            cached_display_names[employee] = entry.display_name.strip()
+        if entry.email.strip():
+            cached_resolutions[employee] = OutlookResolution(entry.email.strip(), entry.display_name.strip() or employee)
+            continue
+        if is_outlook_lookup_cache_entry_fresh(entry, checked_on=checked_on, miss_ttl_days=miss_ttl_days):
+            skipped_recent_misses.add(employee)
+            continue
+        query_names.append(employee)
+    return query_names, cached_resolutions, cached_display_names, skipped_recent_misses
+
+
+def update_outlook_lookup_cache(
+    lookup_cache: dict[str, OutlookLookupCacheEntry],
+    queried_names: Iterable[str],
+    results: dict[str, OutlookResolution],
+    *,
+    checked_on: date | None = None,
+) -> dict[str, OutlookLookupCacheEntry]:
+    updated = dict(lookup_cache)
+    checked_text = (checked_on or date.today()).isoformat()
+    for raw_name in queried_names:
+        employee = str(raw_name).strip()
+        if not employee:
+            continue
+        resolution = results.get(employee)
+        if resolution is None:
+            prior = updated.get(employee, OutlookLookupCacheEntry())
+            updated[employee] = OutlookLookupCacheEntry(
+                email="",
+                display_name=prior.display_name.strip(),
+                last_checked=checked_text,
+                matched=False,
+            )
+            continue
+        updated[employee] = OutlookLookupCacheEntry(
+            email=resolution.email.strip(),
+            display_name=resolution.display_name.strip(),
+            last_checked=checked_text,
+            matched=bool(resolution.email.strip() or resolution.display_name.strip()),
+        )
+    return updated
+
+
 def parse_threshold_value(raw_value: str) -> float | None:
     text = raw_value.strip()
     if not text:
@@ -1719,11 +1887,10 @@ def save_employee_emails(
         if name.strip()
     }
     if employee_outlook_display_names is not None:
-        with_email = {n.strip() for n, e in employee_emails.items() if n.strip() and e.strip()}
         payload["employee_outlook_display_names"] = {
             name: display.strip()
             for name, display in sorted(employee_outlook_display_names.items(), key=lambda item: item[0].lower())
-            if name.strip() and display.strip() and name in with_email
+            if name.strip() and display.strip()
         }
     config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
@@ -6599,6 +6766,7 @@ class DssToolsApp(tk.Tk):
         self.formatting_profiles, self.current_profile_name = load_formatting_profiles(self.config_path)
         self.employee_emails = load_employee_emails(self.config_path)
         self.employee_outlook_display_names = load_employee_outlook_display_names(self.config_path)
+        self.outlook_lookup_cache = load_outlook_lookup_cache(self.config_path)
         self.employee_notes = load_employee_notes(self.config_path)
         self.missing_email_suppressions = load_missing_email_suppressions(self.config_path)
         self.employee_added_names, self.employee_hidden_names = load_employee_name_overrides(self.config_path)
@@ -7326,6 +7494,7 @@ class DssToolsApp(tk.Tk):
 
     def _persist_employee_emails(self) -> None:
         save_employee_emails(self.config_path, self.employee_emails, self.employee_outlook_display_names)
+        save_outlook_lookup_cache(self.config_path, self.outlook_lookup_cache)
 
     def _persist_employee_groups(self) -> None:
         save_employee_groups(self.config_path, self.employee_groups)
@@ -7527,7 +7696,8 @@ class DssToolsApp(tk.Tk):
             return
         self.employee_emails = {}
         self.employee_outlook_display_names = {}
-        remove_config_keys(self.config_path, ["employee_emails", "employee_outlook_display_names"])
+        self.outlook_lookup_cache = {}
+        remove_config_keys(self.config_path, ["employee_emails", "employee_outlook_display_names", OUTLOOK_LOOKUP_CACHE_KEY])
         if self.current_data is not None:
             self._render_data(self.current_data)
         else:
@@ -7549,6 +7719,7 @@ class DssToolsApp(tk.Tk):
 
         self.employee_emails = {}
         self.employee_outlook_display_names = {}
+        self.outlook_lookup_cache = {}
         self.employee_groups = {}
         self.employee_notes = {}
         self.missing_email_suppressions = set()
@@ -8003,26 +8174,14 @@ class DssToolsApp(tk.Tk):
                 )
         except OSError:
             pass
-        creationflags = 0
-        startupinfo = None
-        if os.name == "nt":
-            creationflags = (
-                getattr(subprocess, "DETACHED_PROCESS", 0)
-                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-                | getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            )
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
         try:
             subprocess.Popen(
-                ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", command],
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", command],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 stdin=subprocess.DEVNULL,
                 close_fds=False,
-                creationflags=creationflags,
-                startupinfo=startupinfo,
+                **_windows_hidden_subprocess_options(),
             )
         except OSError as exc:
             messagebox.showerror("Install Update", f"Could not launch the installer.\n\n{exc}")
@@ -8608,18 +8767,64 @@ class DssToolsApp(tk.Tk):
                 messagebox.showinfo("Outlook Email Sync", "All loaded employees already have email addresses saved.")
             return
 
+        query_names, cached_resolutions, cached_display_names, skipped_recent_misses = plan_outlook_query_names(
+            missing_names,
+            self.employee_emails,
+            self.employee_outlook_display_names,
+            self.outlook_lookup_cache,
+        )
+        cache_applied = 0
+        cache_dirty = False
+        for employee, resolution in cached_resolutions.items():
+            if resolution.email.strip() and not self.employee_emails.get(employee, "").strip():
+                self.employee_emails[employee] = resolution.email.strip()
+                cache_applied += 1
+                cache_dirty = True
+            if resolution.display_name.strip() and self.employee_outlook_display_names.get(employee, "") != resolution.display_name.strip():
+                self.employee_outlook_display_names[employee] = resolution.display_name.strip()
+                cache_dirty = True
+        for employee, display_name in cached_display_names.items():
+            if display_name.strip() and self.employee_outlook_display_names.get(employee, "") != display_name.strip():
+                self.employee_outlook_display_names[employee] = display_name.strip()
+                cache_dirty = True
+        if cache_dirty:
+            self._persist_employee_emails()
+            if self.current_data is not None:
+                self._render_data(self.current_data)
+        if not query_names:
+            if manual:
+                still_missing = sum(
+                    1
+                    for employee in self._managed_employee_names(self.current_data)
+                    if not self.employee_emails.get(employee, "").strip() and employee not in self.missing_email_suppressions
+                )
+                messagebox.showinfo(
+                    "Outlook Email Sync",
+                    f"Used cached Outlook results for {cache_applied} employee(s).\n"
+                    f"Skipped {len(skipped_recent_misses)} recently checked unresolved name(s).\n"
+                    f"Still missing: {still_missing}",
+                )
+            return
+
         self._outlook_sync_in_progress = True
         cancel_event = threading.Event()
         self._begin_cancellable_action("Outlook email sync", cancel_event)
         self._refresh_outlook_sync_button()
         worker = threading.Thread(
             target=self._sync_outlook_emails_worker,
-            args=(missing_names, manual, cancel_event),
+            args=(query_names, manual, cancel_event, cache_applied, skipped_recent_misses),
             daemon=True,
         )
         worker.start()
 
-    def _sync_outlook_emails_worker(self, employee_names: list[str], manual: bool, cancel_event: threading.Event) -> None:
+    def _sync_outlook_emails_worker(
+        self,
+        employee_names: list[str],
+        manual: bool,
+        cancel_event: threading.Event,
+        cache_applied: int,
+        skipped_recent_misses: set[str],
+    ) -> None:
         try:
             results, address_book_names = query_outlook_emails(
                 employee_names,
@@ -8632,7 +8837,18 @@ class DssToolsApp(tk.Tk):
         except Exception as exc:
             self.after(0, lambda: self._handle_outlook_sync_error(exc, manual, cancel_event))
             return
-        self.after(0, lambda: self._handle_outlook_sync_success(results, address_book_names, employee_names, manual, cancel_event))
+        self.after(
+            0,
+            lambda: self._handle_outlook_sync_success(
+                results,
+                address_book_names,
+                employee_names,
+                manual,
+                cancel_event,
+                cache_applied,
+                skipped_recent_misses,
+            ),
+        )
 
     def _handle_outlook_sync_cancelled(self, cancel_event: threading.Event, manual: bool) -> None:
         self._outlook_sync_in_progress = False
@@ -8655,9 +8871,12 @@ class DssToolsApp(tk.Tk):
         employee_names: list[str],
         manual: bool,
         cancel_event: threading.Event | None = None,
+        cache_applied: int = 0,
+        skipped_recent_misses: set[str] | None = None,
     ) -> None:
         self._outlook_sync_in_progress = False
         self._end_cancellable_action(cancel_event)
+        self.outlook_lookup_cache = update_outlook_lookup_cache(self.outlook_lookup_cache, employee_names, results)
         updated = 0
         outlook_dirty = False
         for employee, resolution in results.items():
@@ -8730,7 +8949,10 @@ class DssToolsApp(tk.Tk):
             )
             messagebox.showinfo(
                 "Outlook Email Sync",
-                f"Matched emails: {updated}\nStill missing: {missing_after}",
+                f"Matched emails from Outlook: {updated}\n"
+                f"Matched emails from cache: {cache_applied}\n"
+                f"Skipped recent unresolved names: {len(skipped_recent_misses or set())}\n"
+                f"Still missing: {missing_after}",
             )
         if typo_warnings and not self.app_settings.disable_name_typo_notifications:
             self._show_typo_warning_dialog(typo_warnings)
@@ -8751,15 +8973,44 @@ class DssToolsApp(tk.Tk):
         ]
         raw_warnings: list[NameTypoWarning] = []
         address_book_names: list[str] = []
+        skipped_recent_misses: set[str] = set()
         if names_to_check:
-            try:
-                _results, address_book_names = query_outlook_emails(names_to_check, scan_full_address_book=True)
-            except Exception:
-                address_book_names = []
-        if names_to_check:
+            query_names, cached_resolutions, cached_display_names, skipped_recent_misses = plan_outlook_query_names(
+                names_to_check,
+                self.employee_emails,
+                self.employee_outlook_display_names,
+                self.outlook_lookup_cache,
+            )
+            cache_dirty = False
+            for employee, resolution in cached_resolutions.items():
+                if resolution.email.strip() and not self.employee_emails.get(employee, "").strip():
+                    self.employee_emails[employee] = resolution.email.strip()
+                    cache_dirty = True
+                if resolution.display_name.strip() and self.employee_outlook_display_names.get(employee, "") != resolution.display_name.strip():
+                    self.employee_outlook_display_names[employee] = resolution.display_name.strip()
+                    cache_dirty = True
+            for employee, display_name in cached_display_names.items():
+                if display_name.strip() and self.employee_outlook_display_names.get(employee, "") != display_name.strip():
+                    self.employee_outlook_display_names[employee] = display_name.strip()
+                    cache_dirty = True
+            if query_names:
+                try:
+                    _results, address_book_names = query_outlook_emails(query_names, scan_full_address_book=True)
+                    self.outlook_lookup_cache = update_outlook_lookup_cache(self.outlook_lookup_cache, query_names, _results)
+                    cache_dirty = True
+                except Exception:
+                    address_book_names = []
+            if cache_dirty:
+                self._persist_employee_emails()
+        effective_names_to_check = [
+            employee
+            for employee in names_to_check
+            if not self.employee_emails.get(employee, "").strip()
+        ]
+        if effective_names_to_check:
             raw_warnings.extend(
                 find_potential_name_typos(
-                    names_to_check,
+                    effective_names_to_check,
                     employee_names,
                     daily_records,
                 )
@@ -8767,7 +9018,13 @@ class DssToolsApp(tk.Tk):
         else:
             raw_warnings.extend(find_similar_employee_name_pairs(employee_names, daily_records))
         if address_book_names:
-            raw_warnings.extend(find_address_book_name_typos(names_to_check, address_book_names, daily_records))
+            raw_warnings.extend(
+                find_address_book_name_typos(
+                    [employee for employee in effective_names_to_check if employee not in skipped_recent_misses],
+                    address_book_names,
+                    daily_records,
+                )
+            )
         raw_warnings.extend(
             find_outlook_display_name_typos(
                 employee_names,
