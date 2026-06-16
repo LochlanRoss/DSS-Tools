@@ -1915,13 +1915,25 @@ class DssQtMainWindow(QMainWindow):
             self._employee_summary_week_end = None
             return
 
+        current_start_text = self.employee_summary_week_start_combo.currentData()
+        current_end_text = self.employee_summary_week_end_combo.currentData()
+        current_start = date.fromisoformat(str(current_start_text)) if current_start_text else self._employee_summary_week_start
+        current_end = date.fromisoformat(str(current_end_text)) if current_end_text else self._employee_summary_week_end
+
         valid_weeks = set(weeks)
-        if self._employee_summary_week_start not in valid_weeks:
+        if current_start in valid_weeks:
+            self._employee_summary_week_start = current_start
+        elif self._employee_summary_week_start not in valid_weeks:
             self._employee_summary_week_start = weeks[0]
-        if self._employee_summary_week_end not in valid_weeks:
+        if current_end in valid_weeks:
+            self._employee_summary_week_end = current_end
+        elif self._employee_summary_week_end not in valid_weeks:
             self._employee_summary_week_end = self._employee_summary_week_start
         if self._employee_summary_week_end and self._employee_summary_week_start and self._employee_summary_week_end < self._employee_summary_week_start:
-            self._employee_summary_week_end = self._employee_summary_week_start
+            older_week = min(self._employee_summary_week_start, self._employee_summary_week_end)
+            newer_week = max(self._employee_summary_week_start, self._employee_summary_week_end)
+            self._employee_summary_week_start = older_week
+            self._employee_summary_week_end = newer_week
 
         for combo, selected in ((self.employee_summary_week_start_combo, self._employee_summary_week_start), (self.employee_summary_week_end_combo, self._employee_summary_week_end)):
             combo.blockSignals(True)
@@ -1941,23 +1953,30 @@ class DssQtMainWindow(QMainWindow):
     def _employee_summary_selected_weeks(self) -> tuple[date | None, date | None]:
         start_text = self.employee_summary_week_start_combo.currentData()
         end_text = self.employee_summary_week_end_combo.currentData()
-        start = date.fromisoformat(str(start_text)) if start_text else self._employee_summary_week_start
-        end = date.fromisoformat(str(end_text)) if end_text else self._employee_summary_week_end
+        start_week = date.fromisoformat(str(start_text)) if start_text else self._employee_summary_week_start
+        end_week = date.fromisoformat(str(end_text)) if end_text else self._employee_summary_week_end
         if not self.employee_summary_range_box.isChecked():
-            end = start
-        if start and end and end < start:
-            end = start
-        self._employee_summary_week_start = start
-        self._employee_summary_week_end = end
+            end_week = start_week
+        if start_week and end_week and end_week < start_week:
+            start_week, end_week = end_week, start_week
+        self._employee_summary_week_start = start_week
+        self._employee_summary_week_end = end_week
+        start = start_week
+        end = end_week + core.timedelta(days=6) if end_week else None
         return start, end
 
     def _employee_summary_range_toggled(self, checked: bool) -> None:
         self.employee_summary_week_end_combo.setEnabled(checked and self.employee_summary_week_end_combo.count() > 0)
+        if checked and self.employee_summary_week_end is None:
+            self._employee_summary_week_end = self._employee_summary_week_start
         self.refresh_views()
 
     def _select_employee_summary_latest_week(self) -> None:
         if self.employee_summary_week_start_combo.count() <= 0:
             return
+        latest_week = date.fromisoformat(str(self.employee_summary_week_start_combo.itemData(0)))
+        self._employee_summary_week_start = latest_week
+        self._employee_summary_week_end = latest_week
         self.employee_summary_week_start_combo.setCurrentIndex(0)
         self.employee_summary_week_end_combo.setCurrentIndex(0)
         self.employee_summary_range_box.setChecked(False)
@@ -1966,6 +1985,9 @@ class DssQtMainWindow(QMainWindow):
     def _select_employee_summary_previous_week(self) -> None:
         if self.employee_summary_week_start_combo.count() <= 1:
             return
+        previous_week = date.fromisoformat(str(self.employee_summary_week_start_combo.itemData(1)))
+        self._employee_summary_week_start = previous_week
+        self._employee_summary_week_end = previous_week
         self.employee_summary_week_start_combo.setCurrentIndex(1)
         self.employee_summary_week_end_combo.setCurrentIndex(1)
         self.employee_summary_range_box.setChecked(False)
