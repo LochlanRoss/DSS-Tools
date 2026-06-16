@@ -341,12 +341,16 @@ class RowAccentDelegate(QStyledItemDelegate):
         super().paint(painter, option, index)
         row_payload = index.data(Qt.UserRole) or {}
         tags = set(row_payload.get("__tags__", ()))
-        if "date_break" not in tags:
+        if "employee_break" not in tags and "date_break" not in tags:
             return
         painter.save()
         pen = painter.pen()
-        pen.setColor(QColor("#8b98a9"))
-        pen.setWidth(2)
+        if "employee_break" in tags:
+            pen.setColor(QColor("#5f6f84"))
+            pen.setWidth(3)
+        else:
+            pen.setColor(QColor("#8b98a9"))
+            pen.setWidth(2)
         painter.setPen(pen)
         painter.drawLine(option.rect.topLeft(), option.rect.topRight())
         painter.restore()
@@ -873,6 +877,75 @@ class OutlookWorker(QObject):
             self.failed.emit(str(exc))
             return
         self.finished.emit(results, address_book_names)
+
+
+class NameTypoWorker(QObject):
+    finished = Signal(object)
+    failed = Signal(str)
+    cancelled = Signal()
+
+    def __init__(
+        self,
+        employee_names: list[str],
+        daily_records: list[core.DailyRecord],
+        employee_emails: dict[str, str],
+        missing_email_suppressions: set[str],
+        employee_outlook_display_names: dict[str, str],
+    ) -> None:
+        super().__init__()
+        self.employee_names = list(employee_names)
+        self.daily_records = list(daily_records)
+        self.employee_emails = dict(employee_emails)
+        self.missing_email_suppressions = set(missing_email_suppressions)
+        self.employee_outlook_display_names = dict(employee_outlook_display_names)
+        self.cancel_event = threading.Event()
+
+    def cancel(self) -> None:
+        self.cancel_event.set()
+
+    def run(self) -> None:
+        try:
+            names_to_check = [
+                employee
+                for employee in self.employee_names
+                if not self.employee_emails.get(employee, "").strip() and employee not in self.missing_email_suppressions
+            ]
+            address_book_names: list[str] = []
+            if names_to_check:
+                try:
+                    _results, address_book_names = core.query_outlook_emails(
+                        names_to_check,
+                        should_cancel=self.cancel_event.is_set,
+                        scan_full_address_book=True,
+                    )
+                except core.OperationCancelled:
+                    raise
+                except Exception:
+                    address_book_names = []
+            if self.cancel_event.is_set():
+                raise core.OperationCancelled("Cancelled name typo refresh.")
+
+            warnings: list[core.NameTypoWarning] = []
+            if names_to_check:
+                warnings.extend(core.find_potential_name_typos(names_to_check, self.employee_names, self.daily_records))
+                if address_book_names:
+                    warnings.extend(core.find_address_book_name_typos(names_to_check, address_book_names, self.daily_records))
+            else:
+                warnings.extend(core.find_similar_employee_name_pairs(self.employee_names, self.daily_records))
+            warnings.extend(
+                core.find_outlook_display_name_typos(
+                    self.employee_names,
+                    self.employee_outlook_display_names,
+                    self.daily_records,
+                )
+            )
+        except core.OperationCancelled:
+            self.cancelled.emit()
+            return
+        except Exception as exc:  # pragma: no cover - UI surface
+            self.failed.emit(str(exc))
+            return
+        self.finished.emit(warnings)
 
 
 class EmployeesPage(QWidget):
@@ -1552,10 +1625,14 @@ class DssQtMainWindow(QMainWindow):
         self.load_thread: threading.Thread | None = None
         self.outlook_worker: OutlookWorker | None = None
         self.outlook_thread: threading.Thread | None = None
+        self.name_typo_worker: NameTypoWorker | None = None
+        self.name_typo_thread: threading.Thread | None = None
         self._next_load_token = 0
         self._active_load_token = -1
         self._next_outlook_token = 0
         self._active_outlook_token = -1
+        self._next_name_typo_token = 0
+        self._active_name_typo_token = -1
         self._outlook_partial_updates: dict[str, core.OutlookResolution] = {}
         self._outlook_last_partial_refresh = 0.0
         self._employee_summary_week_start: date | None = None
@@ -1977,9 +2054,16 @@ class DssQtMainWindow(QMainWindow):
         latest_week = date.fromisoformat(str(self.employee_summary_week_start_combo.itemData(0)))
         self._employee_summary_week_start = latest_week
         self._employee_summary_week_end = latest_week
+        self.employee_summary_week_start_combo.blockSignals(True)
+        self.employee_summary_week_end_combo.blockSignals(True)
+        self.employee_summary_range_box.blockSignals(True)
         self.employee_summary_week_start_combo.setCurrentIndex(0)
         self.employee_summary_week_end_combo.setCurrentIndex(0)
         self.employee_summary_range_box.setChecked(False)
+        self.employee_summary_week_start_combo.blockSignals(False)
+        self.employee_summary_week_end_combo.blockSignals(False)
+        self.employee_summary_range_box.blockSignals(False)
+        self.employee_summary_week_end_combo.setEnabled(False)
         self.refresh_views()
 
     def _select_employee_summary_previous_week(self) -> None:
@@ -1988,9 +2072,16 @@ class DssQtMainWindow(QMainWindow):
         previous_week = date.fromisoformat(str(self.employee_summary_week_start_combo.itemData(1)))
         self._employee_summary_week_start = previous_week
         self._employee_summary_week_end = previous_week
+        self.employee_summary_week_start_combo.blockSignals(True)
+        self.employee_summary_week_end_combo.blockSignals(True)
+        self.employee_summary_range_box.blockSignals(True)
         self.employee_summary_week_start_combo.setCurrentIndex(1)
         self.employee_summary_week_end_combo.setCurrentIndex(1)
         self.employee_summary_range_box.setChecked(False)
+        self.employee_summary_week_start_combo.blockSignals(False)
+        self.employee_summary_week_end_combo.blockSignals(False)
+        self.employee_summary_range_box.blockSignals(False)
+        self.employee_summary_week_end_combo.setEnabled(False)
         self.refresh_views()
 
     def _selected_employee_values(self) -> set[str]:
@@ -2223,12 +2314,13 @@ class DssQtMainWindow(QMainWindow):
             return
 
         filtered_records = self._daily_records_filtered()
-        self._sync_employee_summary_week_controls(filtered_records)
         profile = self._active_profile()
         daily_summary = core.aggregate_daily(filtered_records, combine_sources=False)
         weekly_summary = core.aggregate_weekly(filtered_records, combine_sources=False)
         daily_rollup = core.build_daily_rollup(daily_summary)
         weekly_rollup = core.build_weekly_rollup(weekly_summary)
+        employee_week_start, employee_week_end = self._employee_summary_selected_weeks()
+        self._sync_employee_summary_week_controls(filtered_records)
         employee_week_start, employee_week_end = self._employee_summary_selected_weeks()
         employee_daily_pf = core.build_employee_day_pf_rows(
             filtered_records,
@@ -2302,10 +2394,16 @@ class DssQtMainWindow(QMainWindow):
         for row in employee_daily_pf:
             date_text = row.work_date.strftime("%d-%b")
             week_number = str(core.reference_week_number(row.work_date))
-            employee_text = row.employee if row.employee != previous_employee else ""
-            week_cell = week_number if row.employee != previous_employee else ""
-            is_date_break = row.employee != previous_employee or date_text != previous_date
-            date_cell = date_text if row.employee != previous_employee or date_text != previous_date else ""
+            employee_changed = row.employee != previous_employee
+            employee_text = row.employee if employee_changed else ""
+            week_cell = week_number if employee_changed else ""
+            is_date_break = employee_changed or date_text != previous_date
+            date_cell = date_text if is_date_break else ""
+            tags: list[str] = []
+            if is_date_break:
+                tags.append("date_break")
+            if employee_changed:
+                tags.append("employee_break")
             employee_daily_rows.append(
                 {
                     "employee": employee_text,
@@ -2316,7 +2414,7 @@ class DssQtMainWindow(QMainWindow):
                     "ot": core.fmt_hours(row.ot),
                     "dt": core.fmt_hours(row.dt),
                     "total": core.fmt_hours(row.total),
-                    "__tags__": ("date_break",) if is_date_break else (),
+                    "__tags__": tuple(tags),
                 }
             )
             previous_employee = row.employee
@@ -2573,15 +2671,16 @@ class DssQtMainWindow(QMainWindow):
     def _set_loading_state(self, loading: bool, message: str = "") -> None:
         load_active = self.load_worker is not None
         outlook_active = self.outlook_worker is not None
-        busy = load_active or outlook_active
+        typo_active = self.name_typo_worker is not None
+        busy = load_active or outlook_active or typo_active
         has_sources = bool(self.source_paths)
         has_data = self.current_data is not None
-        self.open_button.setEnabled(not load_active)
-        self.quick_open_button.setEnabled(not load_active)
-        self.add_button.setEnabled(not load_active)
-        self.quick_add_button.setEnabled(not load_active)
-        self.remove_button.setEnabled(has_sources and not load_active)
-        self.update_button.setEnabled(has_sources and not load_active)
+        self.open_button.setEnabled(not busy)
+        self.quick_open_button.setEnabled(not busy)
+        self.add_button.setEnabled(not busy)
+        self.quick_add_button.setEnabled(not busy)
+        self.remove_button.setEnabled(has_sources and not busy)
+        self.update_button.setEnabled(has_sources and not busy)
         self.export_button.setEnabled(has_data and not busy)
         self.cancel_button.setEnabled(busy)
         self.loading_label.setText("Working..." if busy else "")
@@ -2730,6 +2829,13 @@ class DssQtMainWindow(QMainWindow):
                 self._active_outlook_token = -1
                 self.outlook_worker = None
                 self.outlook_thread = None
+        if self.name_typo_worker is not None:
+            had_active = True
+            self.name_typo_worker.cancel()
+            if abandon_ui:
+                self._active_name_typo_token = -1
+                self.name_typo_worker = None
+                self.name_typo_thread = None
         if had_active and message:
             self.status_label.setText(message)
         if had_active and abandon_ui and reset_ui:
@@ -3368,34 +3474,63 @@ class DssQtMainWindow(QMainWindow):
         if self.current_data is None or not self._managed_employee_names():
             QMessageBox.information(self, "Check Name Typos", "Load DSS data first.")
             return
+        if self.name_typo_worker is not None:
+            return
         employee_names = self._managed_employee_names()
         daily_records = self.current_data.daily_records
-        address_book_names: list[str] = []
-        names_to_check = [
-            employee
-            for employee in employee_names
-            if not self.employee_emails.get(employee, "").strip() and employee not in self.missing_email_suppressions
-        ]
-        if names_to_check:
-            try:
-                _results, address_book_names = core.query_outlook_emails(names_to_check, scan_full_address_book=True)
-            except Exception:
-                address_book_names = []
-        warnings = self._build_name_typo_warnings(employee_names, daily_records, address_book_names)
+        self._next_name_typo_token += 1
+        token = self._next_name_typo_token
+        self._active_name_typo_token = token
+        worker = NameTypoWorker(
+            employee_names,
+            daily_records,
+            self.employee_emails,
+            self.missing_email_suppressions,
+            self.employee_outlook_display_names,
+        )
+        self.name_typo_worker = worker
+        worker.finished.connect(lambda warnings, current_token=token: self._on_name_typo_refresh_finished(current_token, warnings))
+        worker.failed.connect(lambda message, current_token=token: self._on_name_typo_refresh_failed(current_token, message))
+        worker.cancelled.connect(lambda current_token=token: self._on_name_typo_refresh_cancelled(current_token))
+        self.name_typo_thread = threading.Thread(target=worker.run, daemon=True)
+        self._set_loading_state(True, "Refreshing name typos...")
+        self.name_typo_thread.start()
+
+    def _on_name_typo_refresh_finished(self, token: int, warnings: list[core.NameTypoWarning]) -> None:
+        if token != self._active_name_typo_token:
+            return
+        self.name_typo_worker = None
+        self.name_typo_thread = None
         self._set_cached_name_typo_warnings(warnings)
+        self.refresh_views()
+        self._set_loading_state(False, f"Name typo refresh complete: {len(warnings)} warning(s)")
+        self.group_tabs.setCurrentWidget(self.report_tabs)
+        self.report_tabs.setCurrentWidget(self.pages["name_typos"])
+        if not warnings:
+            QMessageBox.information(self, "Check Name Typos", "No likely name typos were found.")
+            return
         unsuppressed = [
             warning
             for warning in warnings
             if core.typo_warning_key(warning.employee, warning.similar_employee) not in self.ignored_name_typos
         ]
-        self.refresh_views()
-        if not warnings:
-            QMessageBox.information(self, "Check Name Typos", "No likely name typos were found.")
-            return
-        self.group_tabs.setCurrentWidget(self.report_tabs)
-        self.report_tabs.setCurrentWidget(self.pages["name_typos"])
         if not unsuppressed:
             QMessageBox.information(self, "Check Name Typos", "All current name typo warnings are already suppressed. Enable Show Suppressed on the Name Typos page to review them.")
+
+    def _on_name_typo_refresh_failed(self, token: int, message: str) -> None:
+        if token != self._active_name_typo_token:
+            return
+        self.name_typo_worker = None
+        self.name_typo_thread = None
+        self._set_loading_state(False, "Name typo refresh failed")
+        QMessageBox.critical(self, "Check Name Typos", message)
+
+    def _on_name_typo_refresh_cancelled(self, token: int) -> None:
+        if token != self._active_name_typo_token:
+            return
+        self.name_typo_worker = None
+        self.name_typo_thread = None
+        self._set_loading_state(False, "Name typo refresh cancelled")
 
     def show_app_data_folder(self) -> None:
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.app_root)))

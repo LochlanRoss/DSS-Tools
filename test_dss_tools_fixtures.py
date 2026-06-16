@@ -286,3 +286,39 @@ class DssToolsFixtures(unittest.TestCase):
 
         ws["A35"] = "FOR OFFICE USE:"
         wb.save(path)
+
+    def build_eb_campbell_signin_workbook(self, path: Path) -> None:
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Sheet1"
+        ws["O1"] = "SHIFT:"
+        ws["Q1"] = datetime(2026, 6, 11)
+        ws["A3"] = "NAME"
+        ws["C3"] = "TIME   IN"
+        ws["D3"] = "TIME OUT"
+        ws["E3"] = "HOURS"
+        ws["I3"] = "JA TECH JOB #"
+        ws["K3"] = "PHASE\n#"
+        ws["L3"] = "JA TECH\nVEHICLE\nUNIT #"
+        ws["M3"] = "DESCRIPTION OF WORK"
+        ws["P3"] = "EQUIPMENT USED"
+
+        ws["A6"] = "RJ Lacsamana"
+        ws.merge_cells("A6:B7")
+        ws["C6"] = "07:00"
+        ws["D6"] = "17:30"
+        ws["E6"] = 10
+        ws["I6"] = "PF25119"
+        ws["K6"] = 1
+        ws["M6"] = "Planning"
+
+        ws["A12"] = "Grant Bennett"
+        ws["C12"] = "07:00"
+        ws["D12"] = "12:00"
+        ws["E12"] = 5
+        ws["I12"] = "PF25119"
+        ws["K12"] = 14
+        ws["M12"] = "Cable removal"
+
+        ws["A33"] = "FOR OFFICE USE:"
+        wb.save(path)

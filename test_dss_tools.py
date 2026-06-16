@@ -218,6 +218,20 @@ class DssToolsTests(DssToolsFixtures):
         self.assertEqual(extract_pf_identifier("PF26006-3 Ground Fault Lights Ongoing DSS .xlsx"), "PF26006-3")
         self.assertEqual(extract_pf_identifier("PF26006-4 Generator Wiring Changes.xlsx"), "PF26006-4")
 
+    def test_extract_pf_identifier_keeps_dashed_phase_with_spaced_dash(self) -> None:
+        self.assertEqual(extract_pf_identifier("PF25119 -14 Cable removal & Rerouting.xlsx"), "PF25119-14")
+
+    def test_extract_pf_identifier_ignores_unrelated_numbers_later_in_name(self) -> None:
+        self.assertEqual(
+            extract_pf_identifier("PF25119 -4 Ongoing DSS - Install Unit 7 & 8.xlsx"),
+            "PF25119-4",
+        )
+
+    def test_extract_pf_identifier_handles_variable_spacing_and_dash_types(self) -> None:
+        self.assertEqual(extract_pf_identifier("PF25119    -    12 Seismic Installation.xlsx"), "PF25119-12")
+        self.assertEqual(extract_pf_identifier("PF25119 – 13 Commissioning.xlsx"), "PF25119-13")
+        self.assertEqual(extract_pf_identifier("PF25119—14 Cable removal.xlsx"), "PF25119-14")
+
     def test_select_preferred_dated_sheets_prefers_highest_revision(self) -> None:
         selected = select_preferred_dated_sheets(
             ["2026-04-07", "2026-04-07 R1", "2026-04-08", "2026-04-08 rev 2", "notes"]
@@ -306,6 +320,21 @@ class DssToolsTests(DssToolsFixtures):
                 ("Colin Schwindt", "PF26043-2", 2.0, "Sign-in name A7; continuation C8:R8"),
                 ("Colin Schwindt", "PF26043-3", 2.0, "Sign-in name A7; continuation C9:R9"),
                 ("Lochlan Ross", "PF26060-1", 1.0, "Sign-in name A11; data C11:R11"),
+            ],
+        )
+
+    def test_process_workbook_bytes_parses_eb_campbell_signin_phase_layout(self) -> None:
+        with self.workspace_files("eb_campbell_signin") as path:
+            self.build_eb_campbell_signin_workbook(path)
+            records, warnings, health = process_workbook_bytes(path, path.read_bytes())
+
+        self.assertFalse(warnings)
+        self.assertFalse(health)
+        self.assertEqual(
+            [(record.employee, record.pf_number, record.st) for record in records],
+            [
+                ("RJ Lacsamana", "PF25119-1", 10.0),
+                ("Grant Bennett", "PF25119-14", 5.0),
             ],
         )
 

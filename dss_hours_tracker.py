@@ -49,7 +49,7 @@ REVISION_PATTERN = re.compile(
 )
 DSS_HASH_AZ2_COL = 52  # AZ
 DSS_HASH_AZ2_ROW = 2
-PF_PATTERN = re.compile(r"\b(PF\d+(?:-\d+)?)\b", re.IGNORECASE)
+PF_PATTERN = re.compile(r"\b(PF\d+)(?:\s*-\s*(\d+))?\b", re.IGNORECASE)
 WORKBOOK_CALC_ID_PATTERN = re.compile(br'\s(?:calcId|fullCalcOnLoad|forceFullCalc|calcCompleted)="[^"]*"')
 EXCEL_MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 EXCEL_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -855,6 +855,24 @@ class WorkbookHealthItem:
     details: str
 
 
+@dataclass(frozen=True)
+class SignInLayout:
+    layout_id: str
+    name_col: int
+    time_in_col: int
+    time_out_col: int
+    st_col: int
+    ot_col: int | None
+    job_col: int
+    phase_col: int | None
+    work_order_col: int | None
+    operation_col: int | None
+    vehicle_col: int | None
+    description_col: int
+    equipment_col: int | None
+    last_data_col: int
+
+
 def error_finding_suppression_key(finding: ErrorFinding) -> str:
     return json.dumps(
         {
@@ -1187,9 +1205,20 @@ def az2_revision_matches_sheet_name(sheet_name: str, az2_value: object) -> tuple
 
 
 def extract_pf_identifier(source_name: str) -> str:
-    match = PF_PATTERN.search(source_name)
+    normalized_name = (
+        str(source_name)
+        .replace("\u2010", "-")
+        .replace("\u2011", "-")
+        .replace("\u2012", "-")
+        .replace("\u2013", "-")
+        .replace("\u2014", "-")
+        .replace("\u2212", "-")
+    )
+    match = PF_PATTERN.search(normalized_name)
     if match:
-        return match.group(1).upper()
+        base = match.group(1).upper()
+        phase = match.group(2)
+        return f"{base}-{phase}" if phase else base
     return Path(source_name).stem.strip() or source_name.strip()
 
 
@@ -3238,36 +3267,87 @@ def _derive_signin_regular_hours(time_in: object, time_out: object) -> float:
 
 
 def _parse_signin_sheet_date(ws, sheet_name: str) -> date | None:
-    return _parse_excel_date_like(ws.cell(row=1, column=SIGNIN_DATE_COL).value) or parse_sheet_date(sheet_name)
+    direct = _parse_excel_date_like(ws.cell(row=1, column=SIGNIN_DATE_COL).value)
+    if direct is not None:
+        return direct
+    for column in range(1, 26):
+        parsed = _parse_excel_date_like(ws.cell(row=1, column=column).value)
+        if parsed is not None:
+            return parsed
+    return parse_sheet_date(sheet_name)
+
+
+def _normalized_signin_header_text(value: object) -> str:
+    text = _compact_cell_text(value).upper().replace("\n", " ")
+    return " ".join(text.split())
+
+
+def _sheet_header_map(ws, row_idx: int, max_col: int = 25) -> dict[str, int]:
+    headers: dict[str, int] = {}
+    for column in range(1, max_col + 1):
+        header = _normalized_signin_header_text(ws.cell(row=row_idx, column=column).value)
+        if header:
+            headers.setdefault(header, column)
+    return headers
+
+
+def _detect_signin_layout(ws, sheet_name: str) -> SignInLayout | None:
+    if _parse_signin_sheet_date(ws, sheet_name) is None:
+        return None
+    row_one_text = " ".join(_normalized_signin_header_text(ws.cell(1, column).value) for column in range(1, 26))
+    if "SHIFT:" not in row_one_text:
+        return None
+    headers = _sheet_header_map(ws, SIGNIN_HEADER_ROW)
+
+    if (
+        headers.get("NAME") == 1
+        and headers.get("TIME IN") == 3
+        and headers.get("TIME OUT") == 4
+        and headers.get("REG HOURS") == 5
+        and headers.get("HOURS OT") == 6
+        and headers.get("JA TECH JOB #") == 10
+        and headers.get("WORK ORDER #") == 12
+        and headers.get("OPERATION #") == 13
+        and headers.get("DESCRIPTION OF WORK") == 15
+    ):
+        return SignInLayout("vanscoy", 1, 3, 4, 5, 6, 10, None, 12, 13, 14, 15, 18, 18)
+
+    if (
+        headers.get("NAME") == 1
+        and headers.get("TIME IN") == 3
+        and headers.get("TIME OUT") == 4
+        and headers.get("HOURS") == 5
+        and headers.get("JA TECH JOB #") == 9
+        and headers.get("PHASE #") == 11
+        and headers.get("DESCRIPTION OF WORK") == 13
+    ):
+        return SignInLayout("eb_campbell_phase", 1, 3, 4, 5, None, 9, 11, None, None, 12, 13, 16, 17)
+
+    if (
+        headers.get("NAME") == 1
+        and headers.get("TIME IN") == 3
+        and headers.get("TIME OUT") == 4
+        and headers.get("HOURS") == 5
+        and headers.get("JA TECH JOB #") == 9
+        and headers.get("WORK ORDER #") == 11
+        and headers.get("OPERATION #") == 12
+        and headers.get("DESCRIPTION OF WORK") == 14
+    ):
+        return SignInLayout("eb_campbell_workorder", 1, 3, 4, 5, None, 9, None, 11, 12, 13, 14, 17, 18)
+
+    return None
 
 
 def _is_signin_sheet(ws, sheet_name: str) -> bool:
-    expected_headers = {
-        SIGNIN_NAME_COL: "NAME",
-        SIGNIN_TIME_IN_COL: "TIME IN",
-        SIGNIN_TIME_OUT_COL: "TIME OUT",
-        SIGNIN_ST_COL: "REG HOURS",
-        SIGNIN_OT_COL: "HOURS OT",
-        SIGNIN_JOB_COL: "JA TECH JOB #",
-        SIGNIN_WORK_ORDER_COL: "WORK ORDER #",
-        SIGNIN_OPERATION_COL: "OPERATION #",
-        SIGNIN_DESCRIPTION_COL: "DESCRIPTION OF WORK",
-    }
-    if _parse_signin_sheet_date(ws, sheet_name) is None:
-        return False
-    if "SHIFT:" not in _sheet_cell_text(ws, 1, SIGNIN_SHIFT_COL).upper():
-        return False
-    for column, expected in expected_headers.items():
-        actual = _sheet_cell_text(ws, SIGNIN_HEADER_ROW, column).upper()
-        if actual != expected:
-            return False
-    return True
+    return _detect_signin_layout(ws, sheet_name) is not None
 
 
-def _signin_source_range(name_row: int, data_row: int) -> str:
+def _signin_source_range(layout: SignInLayout, name_row: int, data_row: int) -> str:
+    start_col = get_column_letter(layout.time_in_col)
+    end_col = get_column_letter(layout.last_data_col)
     if name_row == data_row:
-        return f"Sign-in name A{name_row}; data C{data_row}:R{data_row}"
-    return f"Sign-in name A{name_row}; continuation C{data_row}:R{data_row}"
+        return f"Sign-in name A{name_row}; data {start_col}{data_row}:{end_col}{data_row}"
+    return f"Sign-in name A{name_row}; continuation {start_col}{data_row}:{end_col}{data_row}"
 
 
 def _signin_footer_reached(name_text: str) -> bool:
@@ -3275,21 +3355,21 @@ def _signin_footer_reached(name_text: str) -> bool:
     return any(normalized.startswith(prefix) for prefix in SIGNIN_FOOTER_PREFIXES)
 
 
-def _signin_row_has_data(ws, row_idx: int) -> bool:
-    for column in range(SIGNIN_NAME_COL, SIGNIN_LAST_DATA_COL + 1):
+def _signin_row_has_data(ws, row_idx: int, layout: SignInLayout) -> bool:
+    for column in range(layout.name_col, layout.last_data_col + 1):
         if ws.cell(row=row_idx, column=column).value not in (None, ""):
             return True
     return False
 
 
-def _signin_row_has_detail_data(ws, row_idx: int) -> bool:
-    for column in range(SIGNIN_TIME_IN_COL, SIGNIN_LAST_DATA_COL + 1):
+def _signin_row_has_detail_data(ws, row_idx: int, layout: SignInLayout) -> bool:
+    for column in range(layout.time_in_col, layout.last_data_col + 1):
         if ws.cell(row=row_idx, column=column).value not in (None, ""):
             return True
     return False
 
 
-def _collect_signin_name_blocks(ws, stop_row: int) -> list[tuple[int, int, int, str]]:
+def _collect_signin_name_blocks(ws, stop_row: int, layout: SignInLayout) -> list[tuple[int, int, int, str]]:
     blocks: list[tuple[int, int, int, str]] = []
     covered_rows: dict[int, tuple[int, int, int, str]] = {}
     merged_ranges = getattr(getattr(ws, "merged_cells", None), "ranges", ())
@@ -3297,10 +3377,10 @@ def _collect_signin_name_blocks(ws, stop_row: int) -> list[tuple[int, int, int, 
     for merged_range in merged_ranges:
         if merged_range.max_row < SIGNIN_DATA_START_ROW:
             continue
-        if not (merged_range.min_col <= SIGNIN_NAME_COL <= merged_range.max_col):
+        if not (merged_range.min_col <= layout.name_col <= merged_range.max_col):
             continue
         name_row = merged_range.min_row
-        name_text = _sheet_cell_text(ws, name_row, SIGNIN_NAME_COL)
+        name_text = _sheet_cell_text(ws, name_row, layout.name_col)
         if not name_text or _signin_footer_reached(name_text):
             continue
         block = (name_row, merged_range.min_row, merged_range.max_row, name_text)
@@ -3313,7 +3393,7 @@ def _collect_signin_name_blocks(ws, stop_row: int) -> list[tuple[int, int, int, 
         if row_idx in covered_rows:
             row_idx = covered_rows[row_idx][2] + 1
             continue
-        name_text = _sheet_cell_text(ws, row_idx, SIGNIN_NAME_COL)
+        name_text = _sheet_cell_text(ws, row_idx, layout.name_col)
         if _signin_footer_reached(name_text):
             break
         if not name_text:
@@ -3324,10 +3404,10 @@ def _collect_signin_name_blocks(ws, stop_row: int) -> list[tuple[int, int, int, 
             next_row = end_row + 1
             if next_row in covered_rows:
                 break
-            next_name = _sheet_cell_text(ws, next_row, SIGNIN_NAME_COL)
+            next_name = _sheet_cell_text(ws, next_row, layout.name_col)
             if next_name:
                 break
-            if not _signin_row_has_detail_data(ws, next_row):
+            if not _signin_row_has_detail_data(ws, next_row, layout):
                 break
             end_row = next_row
         block = (row_idx, row_idx, end_row, name_text)
@@ -3350,15 +3430,18 @@ def _sheet_value_map_from_worksheet(ws, cell_refs: Iterable[str]) -> dict[str, s
 
 
 def _digest_signin_sheet(ws, sheet_name: str, sheet_date: date) -> str:
+    layout = _detect_signin_layout(ws, sheet_name)
+    if layout is None:
+        return _digest_sheet_cells(sheet_date, sheet_name, {})
     cell_refs = list(SIGNIN_HASH_CELLS)
     stop_row = ws.max_row or SIGNIN_DATA_START_ROW
     for row_idx in range(SIGNIN_DATA_START_ROW, stop_row + 1):
-        name_text = _sheet_cell_text(ws, row_idx, SIGNIN_NAME_COL)
+        name_text = _sheet_cell_text(ws, row_idx, layout.name_col)
         if _signin_footer_reached(name_text):
             break
-        if not _signin_row_has_data(ws, row_idx):
+        if not _signin_row_has_data(ws, row_idx, layout):
             continue
-        for column in range(SIGNIN_NAME_COL, SIGNIN_LAST_DATA_COL + 1):
+        for column in range(layout.name_col, layout.last_data_col + 1):
             cell_refs.append(f"{get_column_letter(column)}{row_idx}")
     return _digest_sheet_cells(sheet_date, sheet_name, _sheet_value_map_from_worksheet(ws, cell_refs))
 
@@ -3373,13 +3456,14 @@ def _process_signin_workbook(
     raw_rows: list[dict[str, object]] = []
     warnings: list[SheetParseWarning] = []
     health: list[WorkbookHealthItem] = []
-    signin_sheets: list[tuple[date, str]] = []
+    signin_sheets: list[tuple[date, str, SignInLayout]] = []
     for sheet_name in workbook.sheetnames:
         ws = workbook[sheet_name]
-        if _is_signin_sheet(ws, sheet_name):
+        layout = _detect_signin_layout(ws, sheet_name)
+        if layout is not None:
             sheet_date = _parse_signin_sheet_date(ws, sheet_name)
             if sheet_date is not None:
-                signin_sheets.append((sheet_date, sheet_name))
+                signin_sheets.append((sheet_date, sheet_name, layout))
     signin_sheets.sort(key=lambda item: (item[0], item[1].strip().casefold()), reverse=True)
     emit_progress(0.2, f"Selected sign-in sheets for {source_path.name}")
     if not signin_sheets:
@@ -3390,25 +3474,25 @@ def _process_signin_workbook(
                 details="No recognized sign-in sheets were found.",
             )
         )
-        return records, warnings, health
+        return [], warnings, health
 
     total_sheets = max(len(signin_sheets), 1)
-    for sheet_index, (sheet_date, sheet_name) in enumerate(signin_sheets, start=1):
+    for sheet_index, (sheet_date, sheet_name, layout) in enumerate(signin_sheets, start=1):
         raise_if_cancelled()
         if restrict_to_sheet_names is not None and sheet_name not in restrict_to_sheet_names:
             continue
         ws = workbook[sheet_name]
         stop_row = ws.max_row or SIGNIN_DATA_START_ROW
-        for name_row, block_start, block_end, employee in _collect_signin_name_blocks(ws, stop_row):
+        for name_row, block_start, block_end, employee in _collect_signin_name_blocks(ws, stop_row, layout):
             for row_idx in range(block_start, block_end + 1):
                 raise_if_cancelled()
-                if not _signin_row_has_detail_data(ws, row_idx):
+                if not _signin_row_has_detail_data(ws, row_idx, layout):
                     continue
 
-                time_in_value = ws.cell(row=row_idx, column=SIGNIN_TIME_IN_COL).value
-                time_out_value = ws.cell(row=row_idx, column=SIGNIN_TIME_OUT_COL).value
-                entered_st_value = ws.cell(row=row_idx, column=SIGNIN_ST_COL).value
-                entered_ot_value = ws.cell(row=row_idx, column=SIGNIN_OT_COL).value
+                time_in_value = ws.cell(row=row_idx, column=layout.time_in_col).value
+                time_out_value = ws.cell(row=row_idx, column=layout.time_out_col).value
+                entered_st_value = ws.cell(row=row_idx, column=layout.st_col).value
+                entered_ot_value = ws.cell(row=row_idx, column=layout.ot_col).value if layout.ot_col is not None else None
                 st = to_number(entered_st_value)
                 ot = to_number(entered_ot_value)
                 derived_hours = _calculate_signin_worked_hours(time_in_value, time_out_value)
@@ -3419,6 +3503,13 @@ def _process_signin_workbook(
                 start = _parse_excel_time_fraction(time_in_value)
                 end = _parse_excel_time_fraction(time_out_value)
                 lunch_deducted = bool(start is not None and end is not None and _signin_shift_crosses_noon(start, end))
+                job_text = _sheet_cell_text(ws, row_idx, layout.job_col)
+                phase_text = _sheet_cell_text(ws, row_idx, layout.phase_col) if layout.phase_col is not None else ""
+                pf_number = extract_pf_identifier(job_text) if job_text else ""
+                if pf_number and phase_text and "-" not in pf_number:
+                    phase_number = re.sub(r"[^0-9]", "", phase_text)
+                    if phase_number:
+                        pf_number = f"{pf_number}-{phase_number}"
 
                 raw_rows.append(
                     {
@@ -3430,9 +3521,9 @@ def _process_signin_workbook(
                         "st": st,
                         "ot": ot,
                         "dt": 0.0,
-                        "source_ranges": _signin_source_range(name_row, row_idx),
-                        "pf_number": extract_pf_identifier(_sheet_cell_text(ws, row_idx, SIGNIN_JOB_COL)) if _sheet_cell_text(ws, row_idx, SIGNIN_JOB_COL) else "",
-                        "description": _sheet_cell_text(ws, row_idx, SIGNIN_DESCRIPTION_COL),
+                        "source_ranges": _signin_source_range(layout, name_row, row_idx),
+                        "pf_number": pf_number,
+                        "description": _sheet_cell_text(ws, row_idx, layout.description_col),
                         "signin_entered_st": to_number(entered_st_value) if entered_st_value not in (None, "") else None,
                         "signin_entered_ot": to_number(entered_ot_value) if entered_ot_value not in (None, "") else None,
                         "signin_derived_hours": derived_hours,
