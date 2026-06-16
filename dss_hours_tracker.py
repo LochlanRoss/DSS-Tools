@@ -2776,10 +2776,21 @@ def records_for_week(records: Iterable[DailyRecord], week_start: date) -> list[D
 
 
 def extract_pf_number(source_name: str) -> str | None:
-    match = PF_PATTERN.search(source_name)
+    normalized_name = (
+        str(source_name)
+        .replace("\u2010", "-")
+        .replace("\u2011", "-")
+        .replace("\u2012", "-")
+        .replace("\u2013", "-")
+        .replace("\u2014", "-")
+        .replace("\u2212", "-")
+    )
+    match = PF_PATTERN.search(normalized_name)
     if not match:
         return None
-    return match.group(1).upper()
+    base = match.group(1).upper()
+    phase = match.group(2)
+    return f"{base}-{phase}" if phase else base
 
 
 def display_pf_number(pf_number: str) -> str:
