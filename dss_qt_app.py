@@ -23,6 +23,7 @@ from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, QPoint, Qt
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QIcon, QKeySequence, QPalette
 from PySide6.QtWidgets import (
     QApplication,
+    QBoxLayout,
     QCheckBox,
     QColorDialog,
     QComboBox,
@@ -2195,6 +2196,7 @@ class DssQtMainWindow(QMainWindow):
         self._downloaded_update_path: Path | None = None
         self._update_status_text = f"Installed version: {core.APP_VERSION}"
         self._hash_alerted_paths: set[Path] = set()
+        self._refresh_views_queued = False
         self.hash_poll_timer = QTimer(self)
         self.updateCheckResultReady.connect(self._handle_update_check_result)
         self.updateCheckErrorRaised.connect(self._handle_update_check_error)
@@ -2218,9 +2220,16 @@ class DssQtMainWindow(QMainWindow):
 
     def _build_ui(self) -> None:
         self.setWindowTitle(core.DISPLAY_APP_NAME)
-        self.setMinimumSize(1280, 700)
+        self.setMinimumSize(900, 700)
+        self.main_scroll = QScrollArea()
+        self.main_scroll.setWidgetResizable(True)
+        self.main_scroll.setFrameShape(QScrollArea.NoFrame)
+        self.setCentralWidget(self.main_scroll)
         root = QWidget()
+        self.main_scroll.setWidget(root)
         root_layout = QVBoxLayout(root)
+        root_layout.setContentsMargins(10, 10, 10, 10)
+        root_layout.setSpacing(10)
 
         self.add_button = QPushButton("Add DSSs")
         self.quick_add_button = QPushButton("Quick Add")
@@ -2257,6 +2266,8 @@ class DssQtMainWindow(QMainWindow):
             widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             controls_layout.addWidget(widget)
         controls_layout.addStretch(1)
+        self.controls_box = controls_box
+        self.controls_layout = controls_layout
         self.add_button.setToolTip("Add DSS workbooks to the current session without clearing existing ones.")
         self.quick_add_button.setToolTip("Scan the root DSS directory and quickly add matching DSS workbooks.")
         self.remove_button.setToolTip("Remove one or more DSS workbooks from the current session.")
@@ -2271,6 +2282,8 @@ class DssQtMainWindow(QMainWindow):
         filters_layout.addWidget(QLabel("PF"))
         filters_layout.addWidget(self.pf_filter)
         filters_layout.addStretch(1)
+        self.filters_box = filters_box
+        self.filters_layout = filters_layout
 
         load_box = QGroupBox("Load Status")
         load_layout = QHBoxLayout(load_box)
@@ -2279,6 +2292,8 @@ class DssQtMainWindow(QMainWindow):
         load_layout.addWidget(self.loading_label)
         load_layout.addWidget(self.progress_bar, 2)
         load_layout.addWidget(self.cancel_button)
+        self.load_box = load_box
+        self.load_layout = load_layout
 
         overview_box = QGroupBox("Overview")
         overview_layout = QHBoxLayout(overview_box)
@@ -2300,12 +2315,15 @@ class DssQtMainWindow(QMainWindow):
         ):
             overview_layout.addWidget(widget)
         overview_layout.addStretch(1)
+        self.overview_box = overview_box
+        self.overview_layout = overview_layout
 
         top_groups = QHBoxLayout()
         top_groups.setSpacing(10)
         top_groups.addWidget(controls_box, 3)
         top_groups.addWidget(filters_box, 2)
         top_groups.addWidget(load_box, 3)
+        self.top_groups_layout = top_groups
         root_layout.addLayout(top_groups)
         root_layout.addWidget(overview_box)
 
@@ -2316,11 +2334,11 @@ class DssQtMainWindow(QMainWindow):
         self.quickload_hint_label.setWordWrap(True)
         status_row.addWidget(self.status_label, 1)
         status_row.addWidget(self.quickload_hint_label)
+        self.status_row_layout = status_row
         root_layout.addLayout(status_row)
 
         self.group_tabs = QTabWidget()
         root_layout.addWidget(self.group_tabs, 1)
-        self.setCentralWidget(root)
 
         self.data_tabs = QTabWidget()
         self.summary_tabs = QTabWidget()
@@ -2404,6 +2422,35 @@ class DssQtMainWindow(QMainWindow):
         self.configuration_page.checkNameTyposRequested.connect(self.check_name_typos_manually)
         self.configuration_page.showAppDataRequested.connect(self.show_app_data_folder)
         self.group_tabs.currentChanged.connect(lambda _index: self._refresh_export_button_state())
+        self._apply_responsive_layouts()
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._apply_responsive_layouts()
+
+    def _apply_responsive_layouts(self) -> None:
+        available_width = self.main_scroll.viewport().width() if hasattr(self, "main_scroll") else self.width()
+        stack_top_groups = available_width < 1320
+        stack_secondary_rows = available_width < 1080
+        stack_overview = available_width < 980
+
+        self.top_groups_layout.setDirection(
+            QBoxLayout.TopToBottom if stack_top_groups else QBoxLayout.LeftToRight
+        )
+        self.filters_layout.setDirection(
+            QBoxLayout.TopToBottom if stack_secondary_rows else QBoxLayout.LeftToRight
+        )
+        self.load_layout.setDirection(
+            QBoxLayout.TopToBottom if stack_secondary_rows else QBoxLayout.LeftToRight
+        )
+        self.status_row_layout.setDirection(
+            QBoxLayout.TopToBottom if stack_secondary_rows else QBoxLayout.LeftToRight
+        )
+        self.overview_layout.setDirection(
+            QBoxLayout.TopToBottom if stack_overview else QBoxLayout.LeftToRight
+        )
+
+        self.quickload_hint_label.setMaximumWidth(320 if stack_secondary_rows else 260)
         self.data_tabs.currentChanged.connect(lambda _index: self._refresh_export_button_state())
         self.summary_tabs.currentChanged.connect(lambda _index: self._refresh_export_button_state())
         self.report_tabs.currentChanged.connect(lambda _index: self._refresh_export_button_state())
@@ -2540,7 +2587,7 @@ class DssQtMainWindow(QMainWindow):
         self._refresh_quickload_hint_label()
         self._apply_ui_theme_chrome()
         self._refresh_overview_labels()
-        self.refresh_views()
+        self._queue_refresh_views()
         self._refresh_export_button_state()
         self._set_loading_state(False)
 
@@ -2758,6 +2805,17 @@ class DssQtMainWindow(QMainWindow):
 
     def _effective_qt_theme(self) -> core.UiThemeColors:
         return self.app_settings.ui_theme
+
+    def _queue_refresh_views(self) -> None:
+        if self._refresh_views_queued:
+            return
+        self._refresh_views_queued = True
+
+        def run_refresh() -> None:
+            self._refresh_views_queued = False
+            self.refresh_views()
+
+        QTimer.singleShot(0, run_refresh)
 
     def _apply_ui_theme_chrome(self) -> None:
         theme = self._effective_qt_theme()
@@ -3645,7 +3703,7 @@ class DssQtMainWindow(QMainWindow):
         self._refresh_employee_page()
         self._refresh_overview_labels()
         if self.group_tabs.currentWidget() != self.settings_tabs:
-            self.refresh_views()
+            self._queue_refresh_views()
 
     def _on_load_finished(self, token: int, tracker_data: core.TrackerData) -> None:
         if token != self._active_load_token:
@@ -3659,10 +3717,11 @@ class DssQtMainWindow(QMainWindow):
         self.load_thread = None
         self._quickload_session = False
         self._set_loading_state(False, f"Loaded {len(tracker_data.source_paths)} DSS workbook(s)")
+        self._refresh_source_status_labels()
         self._refresh_filters()
         self._refresh_employee_page()
         self._refresh_overview_labels()
-        self.refresh_views()
+        self._queue_refresh_views()
         if tracker_data.reloaded_paths or tracker_data.reused_paths:
             QMessageBox.information(
                 self,
