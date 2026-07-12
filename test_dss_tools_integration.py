@@ -385,6 +385,18 @@ class DssToolsIntegrationTests(DssToolsFixtures):
             self.assertEqual(len(reloaded.daily_records), len(initial.daily_records))
             self.assertEqual(reloaded.file_hashes[source], initial.file_hashes[source])
 
+    def test_load_tracker_data_force_reparse_bypasses_memory_reuse_for_manual_refresh(self) -> None:
+        with self.workspace_files("source") as source, self.workspace_dir("cache") as cache_dir:
+            self.build_source_workbook(source)
+            initial = load_tracker_data(source, cache_dir=cache_dir)
+
+            reloaded = load_tracker_data(source, previous_data=initial, cache_dir=cache_dir, force_reparse=True)
+
+            self.assertEqual(reloaded.reused_paths, [])
+            self.assertIn(source, reloaded.reloaded_paths)
+            self.assertEqual(reloaded.cache_status_by_path.get(source), "Manual Refresh")
+            self.assertEqual(len(reloaded.daily_records), len(initial.daily_records))
+
     def test_load_tracker_data_reports_overall_progress(self) -> None:
         with self.workspace_files("source1") as source1, self.workspace_files("source2") as source2, self.workspace_dir("cache") as cache_dir:
             self.build_source_workbook(source1)

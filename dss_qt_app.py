@@ -1062,6 +1062,7 @@ class LoadWorker(QObject):
         *,
         max_parallel_parse_workers: int,
         partial_preview_enabled: bool,
+        force_reparse: bool = False,
     ) -> None:
         super().__init__()
         self.source_paths = source_paths
@@ -1069,6 +1070,7 @@ class LoadWorker(QObject):
         self.cache_dir = cache_dir
         self.max_parallel_parse_workers = max_parallel_parse_workers
         self.partial_preview_enabled = partial_preview_enabled
+        self.force_reparse = force_reparse
         self.cancel_event = threading.Event()
 
     def cancel(self) -> None:
@@ -1084,6 +1086,7 @@ class LoadWorker(QObject):
                 cache_dir=self.cache_dir,
                 should_cancel=self.cancel_event.is_set,
                 max_parallel_parse_workers=self.max_parallel_parse_workers,
+                force_reparse=self.force_reparse,
             )
         except core.OperationCancelled:
             self.cancelled.emit()
@@ -2336,6 +2339,7 @@ class DssQtMainWindow(QMainWindow):
             (self.data_tabs, TableSpec("week_totals", "Week Totals", (("week_start", "Week Start"), ("week_end", "Week End"), ("st", "Whole Crew ST"), ("ot", "Whole Crew OT"), ("dt", "Whole Crew DT"), ("total", "Whole Crew Total"), ("expanded", "Expanded Hours")))),
             (self.summary_tabs, TableSpec("daily_by_pf", "Daily by PF", (("source_file", "Source File"), ("pf_number", "PF#"), ("date", "Date"), ("employee", "Employee"), ("st", "ST"), ("ot", "OT"), ("dt", "DT"), ("total", "Total"), ("expanded", "Expanded Hours"), ("row_type", "Row Type")))),
             (self.summary_tabs, TableSpec("weekly_by_pf", "Weekly by PF", (("source_file", "Source File"), ("pf_number", "PF#"), ("week_start", "Week Start"), ("week_end", "Week End"), ("employee", "Employee"), ("st", "ST"), ("ot", "OT"), ("dt", "DT"), ("total", "Total"), ("expanded", "Expanded Hours"), ("row_type", "Row Type")))),
+            (self.summary_tabs, TableSpec("pf_totals", "DSS Totals by PF", (("pf_number", "PF#"), ("row_type", "Row Type"), ("st", "ST"), ("ot", "OT"), ("dt", "DT"), ("total", "Total"), ("expanded", "Expanded Hours")))),
             (self.summary_tabs, TableSpec("employee_daily_pf", "Summary by Employee", (("employee", "Employee"), ("week_number", "Week #"), ("date", "Date"), ("pf_number", "PF#"), ("st", "ST"), ("ot", "OT"), ("dt", "DT"), ("total", "Total")))),
             (self.summary_tabs, TableSpec("combined_daily", "Combined Summary Daily", (("date", "Date"), ("employee", "Employee"), ("st", "ST"), ("ot", "OT"), ("dt", "DT"), ("total", "Total"), ("expanded", "Expanded Hours")))),
             (self.summary_tabs, TableSpec("combined_weekly", "Combined Summary Weekly", (("week_start", "Week Start"), ("week_end", "Week End"), ("employee", "Employee"), ("st", "ST"), ("ot", "OT"), ("dt", "DT"), ("total", "Total"), ("expanded", "Expanded Hours")))),
@@ -2372,7 +2376,7 @@ class DssQtMainWindow(QMainWindow):
         self.add_button.clicked.connect(self.add_dss_files)
         self.quick_add_button.clicked.connect(self.quick_add_dss_files)
         self.remove_button.clicked.connect(self.remove_dss_files)
-        self.update_button.clicked.connect(self.reload_data)
+        self.update_button.clicked.connect(lambda: self.reload_data(force_reparse=True))
         self.export_button.clicked.connect(self.export_current_view)
         self.cancel_button.clicked.connect(self.cancel_active_work)
         self.employee_filter.selectionChanged.connect(lambda _values: self.refresh_views())
@@ -2990,6 +2994,7 @@ class DssQtMainWindow(QMainWindow):
         combined_daily = core.aggregate_daily(filtered_records, combine_sources=True)
         combined_weekly = core.aggregate_weekly(filtered_records, combine_sources=True)
         week_totals = core.build_week_totals(combined_weekly)
+        pf_totals = core.build_pf_totals(filtered_records)
         findings = core.build_error_findings(filtered_records, profile)
         name_typo_warnings = self._current_name_typo_warnings()
         week_starts = sorted({record.week_start for record in combined_weekly}, reverse=True)
@@ -3047,6 +3052,19 @@ class DssQtMainWindow(QMainWindow):
                 ),
             }
             for row in sorted(weekly_rollup, key=lambda item: (item.week_start, item.pf_number, item.row_type == "Crew Total", item.employee), reverse=True)
+        ])
+        self.pages["pf_totals"].set_rows([
+            {
+                "pf_number": core.display_pf_number(row.pf_number),
+                "row_type": row.row_type,
+                "st": core.fmt_hours(row.st),
+                "ot": core.fmt_hours(row.ot),
+                "dt": core.fmt_hours(row.dt),
+                "total": core.fmt_hours(row.total),
+                "expanded": core.fmt_hours(core.expanded_hours(row.st, row.ot, row.dt)),
+                "__tags__": ("crew_total",) if row.row_type == "Overall DSS Total" else (),
+            }
+            for row in pf_totals
         ])
         employee_daily_rows: list[dict[str, str]] = []
         previous_employee = ""
@@ -3542,7 +3560,7 @@ class DssQtMainWindow(QMainWindow):
             self._set_loading_state(False, "No DSS workbooks loaded")
             self.refresh_views()
 
-    def reload_data(self) -> None:
+    def reload_data(self, *, force_reparse: bool = False) -> None:
         if not self.source_paths:
             QMessageBox.information(self, "Open DSS", "Select one or more DSS workbooks first.")
             return
@@ -3566,6 +3584,7 @@ class DssQtMainWindow(QMainWindow):
             self.cache_dir,
             max_parallel_parse_workers=self.app_settings.max_parallel_parse_workers,
             partial_preview_enabled=self.app_settings.partial_preview_enabled,
+            force_reparse=force_reparse,
         )
         self.load_worker = worker
         worker.progressChanged.connect(lambda fraction, message, current_token=token: self._on_load_progress(current_token, fraction, message))

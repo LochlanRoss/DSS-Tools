@@ -86,6 +86,8 @@ The app uses grouped navigation with two tab rows:
   - `Summaries`
     - `Daily by PF#`
     - `Weekly by PF#`
+    - `DSS Totals by PF`
+    - `Summary by Employee`
     - `Combined Summary by Day`
     - `Combined Summary by Week`
   - `Reports`

@@ -38,6 +38,7 @@ from dss_hours_tracker import (
     build_employee_email_list_label,
     build_signin_hours_mismatch_warnings,
     build_employee_day_pf_rows,
+    build_pf_totals,
     query_outlook_emails,
     selection_ranges_for_source_ranges,
     reference_week_number,
@@ -385,6 +386,24 @@ class DssToolsTests(DssToolsFixtures):
             DailyRecord(Path("c.xlsx"), "c.xlsx", date(2026, 6, 1), "Sheet1", "Worker", 1, 0, 0, "", "PF25119"),
         ]
         self.assertEqual(pf_numbers_for_records(records), "PF25119, PF25119-2, PF25119-10")
+
+    def test_build_pf_totals_includes_dash_rows_and_overall_base_totals(self) -> None:
+        records = [
+            DailyRecord(Path("a.xlsx"), "a.xlsx", date(2026, 6, 1), "2026-06-01", "Worker A", 8, 1, 0, "", "PF25119-2"),
+            DailyRecord(Path("b.xlsx"), "b.xlsx", date(2026, 6, 2), "2026-06-02", "Worker B", 4, 0, 2, "", "PF25119-14"),
+            DailyRecord(Path("c.xlsx"), "c.xlsx", date(2026, 6, 3), "2026-06-03", "Worker C", 3, 0, 0, "", "PF26044"),
+        ]
+
+        rows = build_pf_totals(records)
+
+        self.assertEqual([(row.pf_number, row.row_type) for row in rows], [
+            ("PF25119-2", "DSS Dash Total"),
+            ("PF25119-14", "DSS Dash Total"),
+            ("PF25119", "Overall DSS Total"),
+            ("PF26044", "DSS Total"),
+        ])
+        overall = next(row for row in rows if row.pf_number == "PF25119" and row.row_type == "Overall DSS Total")
+        self.assertEqual((overall.st, overall.ot, overall.dt, overall.total), (12, 1, 2, 15))
 
     def test_windows_hidden_subprocess_options_non_windows_empty(self) -> None:
         with mock.patch("dss_hours_tracker.os.name", "posix"):

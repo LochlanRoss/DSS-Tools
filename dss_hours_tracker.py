@@ -703,6 +703,19 @@ class EmployeeDayPfRow:
 
 
 @dataclass(frozen=True)
+class PfTotalsRow:
+    pf_number: str
+    row_type: str
+    st: float
+    ot: float
+    dt: float
+
+    @property
+    def total(self) -> float:
+        return round(self.st + self.ot + self.dt, 2)
+
+
+@dataclass(frozen=True)
 class TrackerData:
     source_paths: list[Path]
     file_hashes: dict[Path, str]
@@ -3310,6 +3323,16 @@ def display_pf_number(pf_number: str) -> str:
     return text if text else "(missing PF)"
 
 
+def base_pf_number(pf_number: str) -> str:
+    text = pf_number.strip().upper()
+    if not text:
+        return ""
+    match = PF_PATTERN.search(text)
+    if not match:
+        return text
+    return match.group(1).upper()
+
+
 def pf_numbers_for_records(records: Iterable[DailyRecord]) -> str:
     pf_numbers = sorted(
         {
@@ -4942,6 +4965,70 @@ def build_week_totals(weekly_records: list[WeeklyRecord]) -> list[WeekTotalRow]:
     return rows
 
 
+def build_pf_totals(records: Iterable[DailyRecord]) -> list[PfTotalsRow]:
+    exact_groups: dict[str, dict[str, float]] = {}
+    base_groups: dict[str, dict[str, object]] = {}
+    for record in records:
+        pf_number = (record.pf_number or "").strip()
+        if not pf_number:
+            continue
+        exact_bucket = exact_groups.setdefault(pf_number, {"st": 0.0, "ot": 0.0, "dt": 0.0})
+        exact_bucket["st"] += record.st
+        exact_bucket["ot"] += record.ot
+        exact_bucket["dt"] += record.dt
+
+        base_pf = base_pf_number(pf_number)
+        base_bucket = base_groups.setdefault(
+            base_pf,
+            {"st": 0.0, "ot": 0.0, "dt": 0.0, "pf_numbers": set()},
+        )
+        base_bucket["st"] = float(base_bucket["st"]) + record.st
+        base_bucket["ot"] = float(base_bucket["ot"]) + record.ot
+        base_bucket["dt"] = float(base_bucket["dt"]) + record.dt
+        pf_numbers = base_bucket["pf_numbers"]
+        if isinstance(pf_numbers, set):
+            pf_numbers.add(pf_number)
+
+    rows: list[PfTotalsRow] = []
+    for pf_number, totals in sorted(exact_groups.items(), key=lambda item: pf_number_sort_key(item[0])):
+        rows.append(
+            PfTotalsRow(
+                pf_number=pf_number,
+                row_type="DSS Total" if "-" not in pf_number else "DSS Dash Total",
+                st=round(totals["st"], 2),
+                ot=round(totals["ot"], 2),
+                dt=round(totals["dt"], 2),
+            )
+        )
+
+    for pf_number, totals in sorted(base_groups.items(), key=lambda item: pf_number_sort_key(item[0])):
+        pf_numbers = totals["pf_numbers"]
+        if not isinstance(pf_numbers, set):
+            continue
+        has_dash_variants = any("-" in item for item in pf_numbers)
+        has_multiple_variants = len(pf_numbers) > 1
+        if not has_dash_variants and not has_multiple_variants:
+            continue
+        rows.append(
+            PfTotalsRow(
+                pf_number=pf_number,
+                row_type="Overall DSS Total",
+                st=round(float(totals["st"]), 2),
+                ot=round(float(totals["ot"]), 2),
+                dt=round(float(totals["dt"]), 2),
+            )
+        )
+
+    return sorted(
+        rows,
+        key=lambda row: (
+            pf_number_sort_key(base_pf_number(row.pf_number) or row.pf_number),
+            1 if row.row_type == "Overall DSS Total" else 0,
+            pf_number_sort_key(row.pf_number),
+        ),
+    )
+
+
 def reference_week_number(value: date) -> int:
     jan1 = date(value.year, 1, 1)
     days_since_sunday = (jan1.weekday() + 1) % 7
@@ -5059,6 +5146,7 @@ def load_tracker_data(
     cache_dir: Path | None = None,
     should_cancel: Callable[[], bool] | None = None,
     max_parallel_parse_workers: int = MAX_PARALLEL_PARSE_WORKERS,
+    force_reparse: bool = False,
 ) -> TrackerData:
     if isinstance(source_paths, Path):
         normalized_paths = [source_paths]
@@ -5176,7 +5264,7 @@ def load_tracker_data(
         file_hash = compute_workbook_content_hash(workbook_bytes)
         file_hashes[source_path] = file_hash
         emit_overall_progress(source_path, 0.1, f"Hashed {source_path.name}")
-        if previous_hashes.get(source_path) == file_hash:
+        if not force_reparse and previous_hashes.get(source_path) == file_hash:
             with state_lock:
                 reused_paths.append(source_path)
                 cache_status_by_path[source_path] = "Memory Hit"
@@ -5185,6 +5273,13 @@ def load_tracker_data(
                 workbook_health.extend(previous_health_by_source_file.get(source_path.name, []))
             emit_overall_progress(source_path, 1.0, f"Unchanged {source_path.name}")
         else:
+            if force_reparse:
+                with state_lock:
+                    reloaded_paths.append(source_path)
+                    cache_status_by_path[source_path] = "Manual Refresh"
+                emit_overall_progress(source_path, 0.15, f"Queued {source_path.name} for manual refresh")
+                pending_parse_inputs.append((source_path, workbook_bytes))
+                continue
             raise_if_cancelled(f"Cancelled loading {source_path.name}")
             cached_records = load_cached_daily_records(cache_dir, source_path, file_hash)
             if cached_records is not None:
@@ -6979,6 +7074,14 @@ class DssToolsApp(tk.Tk):
             default_sort_descending=True,
             ui_theme=self.app_settings.ui_theme,
         )
+        self.pf_totals_table = DataTable(
+            self.summaries_notebook,
+            columns=["pf_number", "row_type", "st", "ot", "dt", "total", "expanded"],
+            headings=["PF#", "Row Type", "ST", "OT", "DT", "Total", "Expanded Hours"],
+            table_id="pf_totals",
+            config_path=self.config_path,
+            ui_theme=self.app_settings.ui_theme,
+        )
         self.week_totals_table = DataTable(
             self.data_notebook,
             columns=["week_start", "week_end", "st", "ot", "dt", "total", "expanded"],
@@ -7117,6 +7220,7 @@ class DssToolsApp(tk.Tk):
         self._refresh_data_tabs()
         self.summaries_notebook.add(self.daily_by_pf_table, text="Daily by PF#")
         self.summaries_notebook.add(self.weekly_rollup_table, text="Weekly by PF#")
+        self.summaries_notebook.add(self.pf_totals_table, text="DSS Totals by PF")
         self.summaries_notebook.add(self.employee_daily_pf_table, text="Summary by Employee")
         self.summaries_notebook.add(self.combined_daily_summary_table, text="Combined Summary by Day")
         self.summaries_notebook.add(self.combined_weekly_summary_table, text="Combined Summary by Week")
@@ -9188,9 +9292,9 @@ class DssToolsApp(tk.Tk):
     def reload_source(self) -> None:
         if not self.current_data or self._is_loading:
             return
-        self.load_source(self.current_data.source_paths, show_success=True)
+        self.load_source(self.current_data.source_paths, show_success=True, force_reparse=True)
 
-    def load_source(self, source_paths: Path | Iterable[Path], show_success: bool = False) -> None:
+    def load_source(self, source_paths: Path | Iterable[Path], show_success: bool = False, force_reparse: bool = False) -> None:
         if self._cancel_event is not None:
             return
         normalized_paths = self._normalize_source_paths(source_paths)
@@ -9206,7 +9310,7 @@ class DssToolsApp(tk.Tk):
 
         worker = threading.Thread(
             target=self._load_source_worker,
-            args=(request_id, normalized_paths, show_success, cancel_event),
+            args=(request_id, normalized_paths, show_success, cancel_event, force_reparse),
             daemon=True,
         )
         worker.start()
@@ -9246,6 +9350,7 @@ class DssToolsApp(tk.Tk):
         self.daily_table.set_rows([])
         self.weekly_rollup_table.set_rows([])
         self.daily_by_pf_table.set_rows([])
+        self.pf_totals_table.set_rows([])
         self.employee_daily_pf_table.set_rows([])
         self.combined_weekly_summary_table.set_rows([])
         self.combined_daily_summary_table.set_rows([])
@@ -9266,6 +9371,7 @@ class DssToolsApp(tk.Tk):
         source_paths: list[Path],
         show_success: bool,
         cancel_event: threading.Event,
+        force_reparse: bool,
     ) -> None:
         def report_progress(progress_fraction: float, message: str) -> None:
             self.after(0, lambda: self._update_progress(request_id, progress_fraction, message))
@@ -9281,6 +9387,7 @@ class DssToolsApp(tk.Tk):
                 partial_callback=report_partial,
                 cache_dir=self.cache_dir,
                 should_cancel=cancel_event.is_set,
+                force_reparse=force_reparse,
             )
         except OperationCancelled:
             self.after(0, lambda: self._handle_load_cancelled(request_id, cancel_event))
@@ -9464,6 +9571,7 @@ class DssToolsApp(tk.Tk):
             record for record in tracker_data.combined_daily_summary if record.employee in allowed_employees
         ]
         employee_daily_pf_rows = build_employee_day_pf_rows(filtered_daily_records)
+        pf_totals_rows = build_pf_totals(filtered_daily_records)
         filtered_week_totals = build_week_totals(filtered_combined_summary) if filtered_combined_summary else []
         filtered_source_files = {record.source_file for record in filtered_daily_records}
         active_parse_warnings = self._current_parse_warnings(tracker_data)
@@ -9562,6 +9670,25 @@ class DssToolsApp(tk.Tk):
             previous_employee = record.employee
             previous_date = date_text
         self.employee_daily_pf_table.set_rows(employee_summary_rows)
+
+        self.pf_totals_table.set_rows(
+            [
+                (
+                    display_pf_number(record.pf_number),
+                    record.row_type,
+                    fmt_hours(record.st),
+                    fmt_hours(record.ot),
+                    fmt_hours(record.dt),
+                    fmt_hours(record.total),
+                    fmt_hours(expanded_hours(record.st, record.ot, record.dt)),
+                )
+                for record in pf_totals_rows
+            ],
+            tags=[
+                ("crew_total",) if record.row_type == "Overall DSS Total" else tuple()
+                for record in pf_totals_rows
+            ],
+        )
 
         combined_summary_rows: list[tuple[str, ...]] = []
         combined_summary_tags: list[tuple[str, ...]] = []
