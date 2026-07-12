@@ -9,12 +9,14 @@ import io
 import json
 import math
 import os
+import queue
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import tomllib
 import urllib.error
 import urllib.request
@@ -44,7 +46,7 @@ except ImportError:  # pragma: no cover - optional Windows integration
 DATE_PATTERN = re.compile(r"(\d{4}-\d{2}-\d{2})")
 # Revision suffix after the date token: rev 1, rv1, r1, r 1, r-1, r.1, Revision 1, etc.
 REVISION_PATTERN = re.compile(
-    r"(?:^|[\s._-])(?:rev(?:ision)?[\s._-]*|rv[\s._-]*|r[\s._-]*)(\d+)(?=$|[\s._-])",
+    r"(?:(?<=\d{4}-\d{2}-\d{2})|^|[\s._-])(?:rev(?:ision)?[\s._-]*|rv[\s._-]*|r[\s._-]*)(\d+)(?=$|[\s._-])",
     re.IGNORECASE,
 )
 DSS_HASH_AZ2_COL = 52  # AZ
@@ -113,6 +115,7 @@ CACHE_DIRNAME = "cache"
 CACHE_RETENTION_DAYS = 7
 HASH_CHECK_INTERVAL_MS = 300000
 AUTO_OUTLOOK_SYNC_DELAY_MS = 60000
+OUTLOOK_PER_NAME_TIMEOUT_SECONDS = 8.0
 AUTO_UPDATE_CHECK_DELAY_MS = 30000
 DEFAULT_HASH_POLL_MINUTES = 5
 PROGRESS_UI_UPDATE_INTERVAL_MS = 75
@@ -3234,48 +3237,116 @@ def query_outlook_emails(
         return {}, []
     check_cancel = should_cancel or (lambda: False)
 
-    pythoncom.CoInitialize()
-    try:
+    def resolve_recipient_once(employee: str) -> OutlookResolution | None:
+        pythoncom.CoInitialize()
         try:
             outlook = win32com.client.Dispatch("Outlook.Application")
             namespace = outlook.GetNamespace("MAPI")
-        except Exception as exc:
-            raise RuntimeError("Could not open Outlook to query email addresses.") from exc
-
-        address_book_index: dict[str, list[OutlookResolution]] = {}
-        address_book_names: list[str] = []
-        if scan_full_address_book:
-            address_book_index, address_book_names = build_outlook_address_book_index(namespace)
-        results: dict[str, OutlookResolution] = {}
-        matched_display_names: set[str] = set()
-        total_names = len(names)
-        for index, employee in enumerate(names, start=1):
-            if check_cancel():
-                raise OperationCancelled("Cancelled Outlook email sync.")
-            candidates = list(address_book_index.get(normalize_person_name(employee), []))
             try:
                 recipient = namespace.CreateRecipient(employee)
                 recipient.Resolve()
             except Exception:
                 recipient = None
-            if recipient is not None and getattr(recipient, "Resolved", False):
-                email = extract_smtp_address(recipient)
-                if email:
-                    display_name = extract_resolved_display_name(recipient) or employee
-                    candidates.append(OutlookResolution(email=email, display_name=display_name))
-                    if display_name.strip():
-                        matched_display_names.add(display_name.strip())
-            preferred = choose_preferred_outlook_resolution(candidates)
-            if preferred is not None:
-                results[employee] = preferred
-                if preferred.display_name.strip():
-                    matched_display_names.add(preferred.display_name.strip())
-            if progress_callback is not None:
-                progress_callback(index, total_names, employee, preferred)
-        names_for_typos = address_book_names if scan_full_address_book else sorted(matched_display_names, key=str.casefold)
-        return results, names_for_typos
-    finally:
-        pythoncom.CoUninitialize()
+            if recipient is None or not getattr(recipient, "Resolved", False):
+                return None
+            email = extract_smtp_address(recipient)
+            if not email:
+                return None
+            display_name = extract_resolved_display_name(recipient) or employee
+            return OutlookResolution(email=email, display_name=display_name)
+        finally:
+            pythoncom.CoUninitialize()
+
+    def resolve_recipient_with_timeout(employee: str, timeout_seconds: float) -> OutlookResolution | None:
+        if timeout_seconds <= 0:
+            return resolve_recipient_once(employee)
+        result_queue: queue.Queue[tuple[str, OutlookResolution | Exception | None]] = queue.Queue(maxsize=1)
+
+        def worker() -> None:
+            try:
+                result_queue.put(("ok", resolve_recipient_once(employee)))
+            except Exception as exc:
+                result_queue.put(("error", exc))
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            if check_cancel():
+                raise OperationCancelled("Cancelled Outlook email sync.")
+            try:
+                state, payload = result_queue.get(timeout=0.1)
+            except queue.Empty:
+                if not thread.is_alive():
+                    return None
+                if time.monotonic() >= deadline:
+                    return None
+                continue
+            if state == "error":
+                if isinstance(payload, Exception):
+                    raise RuntimeError(f"Outlook lookup failed for {employee}.") from payload
+                raise RuntimeError(f"Outlook lookup failed for {employee}.")
+            return payload if isinstance(payload, OutlookResolution) else None
+
+    address_book_index: dict[str, list[OutlookResolution]] = {}
+    address_book_names: list[str] = []
+    namespace = None
+    if scan_full_address_book:
+        pythoncom.CoInitialize()
+        try:
+            try:
+                outlook = win32com.client.Dispatch("Outlook.Application")
+                namespace = outlook.GetNamespace("MAPI")
+            except Exception as exc:
+                raise RuntimeError("Could not open Outlook to query email addresses.") from exc
+            address_book_index, address_book_names = build_outlook_address_book_index(namespace)
+            results: dict[str, OutlookResolution] = {}
+            matched_display_names: set[str] = set()
+            total_names = len(names)
+            for index, employee in enumerate(names, start=1):
+                if check_cancel():
+                    raise OperationCancelled("Cancelled Outlook email sync.")
+                candidates = list(address_book_index.get(normalize_person_name(employee), []))
+                direct_resolution: OutlookResolution | None = None
+                try:
+                    recipient = namespace.CreateRecipient(employee)
+                    recipient.Resolve()
+                except Exception:
+                    recipient = None
+                if recipient is not None and getattr(recipient, "Resolved", False):
+                    email = extract_smtp_address(recipient)
+                    if email:
+                        display_name = extract_resolved_display_name(recipient) or employee
+                        direct_resolution = OutlookResolution(email=email, display_name=display_name)
+                if direct_resolution is not None:
+                    candidates.append(direct_resolution)
+                    if direct_resolution.display_name.strip():
+                        matched_display_names.add(direct_resolution.display_name.strip())
+                preferred = choose_preferred_outlook_resolution(candidates)
+                if preferred is not None:
+                    results[employee] = preferred
+                    if preferred.display_name.strip():
+                        matched_display_names.add(preferred.display_name.strip())
+                if progress_callback is not None:
+                    progress_callback(index, total_names, employee, preferred)
+            return results, address_book_names
+        finally:
+            pythoncom.CoUninitialize()
+
+    results = {}
+    matched_display_names: set[str] = set()
+    total_names = len(names)
+    for index, employee in enumerate(names, start=1):
+        if check_cancel():
+            raise OperationCancelled("Cancelled Outlook email sync.")
+        preferred = resolve_recipient_with_timeout(employee, OUTLOOK_PER_NAME_TIMEOUT_SECONDS)
+        if preferred is not None:
+            results[employee] = preferred
+            if preferred.display_name.strip():
+                matched_display_names.add(preferred.display_name.strip())
+        if progress_callback is not None:
+            progress_callback(index, total_names, employee, preferred)
+    return results, sorted(matched_display_names, key=str.casefold)
 
 
 def lookup_outlook_emails(

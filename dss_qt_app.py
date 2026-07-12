@@ -3496,19 +3496,20 @@ class DssQtMainWindow(QMainWindow):
         outlook_active = self.outlook_worker is not None
         typo_active = self.name_typo_worker is not None
         busy = load_active or outlook_active or typo_active
+        ui_locked = load_active or typo_active
         has_sources = bool(self.source_paths)
         self.add_button.setEnabled(not busy)
         self.quick_add_button.setEnabled(not busy)
         self.remove_button.setEnabled(has_sources and not busy)
         self.update_button.setEnabled(has_sources and not busy)
-        self.employee_filter.setEnabled(not busy)
-        self.pf_filter.setEnabled(not busy)
-        self.group_tabs.setEnabled(not busy)
+        self.employee_filter.setEnabled(not ui_locked)
+        self.pf_filter.setEnabled(not ui_locked)
+        self.group_tabs.setEnabled(True)
         self.cancel_button.setEnabled(busy)
         self.loading_label.setText("Working..." if busy and not self.loading_label.text().strip() else ("" if not busy else self.loading_label.text()))
         self._refresh_quickload_hint_label()
         self._refresh_source_status_labels()
-        self._refresh_export_button_state(busy=busy)
+        self._refresh_export_button_state(busy=ui_locked)
         if message:
             self.status_label.setText(message)
 
@@ -3953,6 +3954,10 @@ class DssQtMainWindow(QMainWindow):
         worker.failed.connect(lambda message, current_token=token: self._on_outlook_sync_failed(current_token, message))
         worker.cancelled.connect(lambda current_token=token: self._on_outlook_sync_cancelled(current_token))
         self.outlook_thread = threading.Thread(target=worker.run, daemon=True)
+        self.progress_bar.setRange(0, 1000)
+        self.progress_bar.setValue(0)
+        self.percent_label.setText("0.0%")
+        self.loading_label.setText("Syncing emails...")
         self._set_loading_state(True, "Syncing Outlook emails...")
         self.outlook_thread.start()
 
@@ -3997,6 +4002,11 @@ class DssQtMainWindow(QMainWindow):
     ) -> None:
         if token != self._active_outlook_token:
             return
+        fraction = processed / max(total, 1)
+        self.progress_bar.setRange(0, 1000)
+        self.progress_bar.setValue(max(0, min(1000, int(round(fraction * 1000)))))
+        self.percent_label.setText(f"{fraction * 100:.1f}%")
+        self.loading_label.setText("Syncing emails...")
         progress_text = f"Syncing Outlook emails... {processed}/{total}"
         if employee:
             if isinstance(resolution, core.OutlookResolution) and resolution.email.strip():
@@ -4034,14 +4044,18 @@ class DssQtMainWindow(QMainWindow):
         core.save_employee_emails(self.config_path, self.employee_emails, self.employee_outlook_display_names)
         core.save_outlook_lookup_cache(self.config_path, self.outlook_lookup_cache)
         if self.load_worker is None:
+            self.progress_bar.setRange(0, 1000)
+            self.progress_bar.setValue(1000)
+            self.percent_label.setText("100.0%")
+            self.loading_label.setText("")
             self._set_loading_state(False, f"Matched emails: {updated + cache_applied}")
         self._refresh_employee_page()
-        self.refresh_views()
         warnings: list[core.NameTypoWarning] = []
         if not self.app_settings.disable_name_typo_notifications:
             warnings = self._build_name_typo_warnings(self._managed_employee_names(), self.current_data.daily_records if self.current_data else [], address_book_names)
         self._set_cached_name_typo_warnings(warnings)
-        self.refresh_views()
+        self._refresh_overview_labels()
+        self._queue_refresh_views()
         missing_after = sum(
             1
             for employee in self._managed_employee_names()
@@ -4069,6 +4083,7 @@ class DssQtMainWindow(QMainWindow):
         self.outlook_thread = None
         self._outlook_partial_updates.clear()
         if self.load_worker is None:
+            self.loading_label.setText("")
             self._set_loading_state(False, "Outlook sync failed")
         QMessageBox.critical(self, "Outlook Email Sync", message)
 
@@ -4079,6 +4094,7 @@ class DssQtMainWindow(QMainWindow):
         self.outlook_thread = None
         self._outlook_partial_updates.clear()
         if self.load_worker is None:
+            self.loading_label.setText("")
             self._set_loading_state(False, "Outlook sync cancelled")
 
     def _current_filtered_records(self) -> list[core.DailyRecord]:

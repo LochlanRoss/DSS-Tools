@@ -11,6 +11,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import json
 from datetime import date
@@ -331,6 +332,8 @@ class DssToolsTests(DssToolsFixtures):
         self.assertEqual(parse_sheet_revision("2026-04-07 rev 12"), 12)
         self.assertEqual(parse_sheet_revision("2026-04-26 rv1"), 1)
         self.assertEqual(parse_sheet_revision("2026-04-26 RV2"), 2)
+        self.assertEqual(parse_sheet_revision("2026-07-08r1"), 1)
+        self.assertEqual(parse_sheet_revision("2026-07-08rev1"), 1)
 
     def test_az2_revision_matches_sheet_name(self) -> None:
         ok, _ = az2_revision_matches_sheet_name("2026-04-07 R2", 2)
@@ -343,6 +346,8 @@ class DssToolsTests(DssToolsFixtures):
         ok, msg = az2_revision_matches_sheet_name("2026-04-07 R1", "")
         self.assertFalse(ok)
         self.assertIn("blank", (msg or "").lower())
+        ok, msg = az2_revision_matches_sheet_name("2026-07-08r1", 1)
+        self.assertTrue(ok, msg)
 
     def test_combine_sheet_hashes_stable(self) -> None:
         a = {"2026-04-07": "aa", "2026-04-08": "bb"}
@@ -787,8 +792,8 @@ class DssToolsTests(DssToolsFixtures):
             win32com_mock.client.Dispatch.return_value = FakeOutlook()
             results, names = query_outlook_emails(["Person Example"], scan_full_address_book=False)
 
-        pythoncom_mock.CoInitialize.assert_called_once()
-        pythoncom_mock.CoUninitialize.assert_called_once()
+        self.assertEqual(pythoncom_mock.CoInitialize.call_count, 1)
+        self.assertEqual(pythoncom_mock.CoUninitialize.call_count, 1)
         self.assertEqual(results["Person Example"].email, "person@jatechpowersystems.com")
         self.assertEqual(names, ["Person Example"])
 
@@ -825,8 +830,8 @@ class DssToolsTests(DssToolsFixtures):
                 ),
             )
 
-        pythoncom_mock.CoInitialize.assert_called_once()
-        pythoncom_mock.CoUninitialize.assert_called_once()
+        self.assertEqual(pythoncom_mock.CoInitialize.call_count, 2)
+        self.assertEqual(pythoncom_mock.CoUninitialize.call_count, 2)
         self.assertEqual(results["Alice Smith"].email, "a@jatechpowersystems.com")
         self.assertEqual(results["Bob Smith"].email, "b@jatechpowersystems.com")
         self.assertEqual(
@@ -834,6 +839,50 @@ class DssToolsTests(DssToolsFixtures):
             [
                 (1, 2, "Alice Smith", "a@jatechpowersystems.com"),
                 (2, 2, "Bob Smith", "b@jatechpowersystems.com"),
+            ],
+        )
+
+    def test_query_outlook_emails_continues_after_per_name_timeout(self) -> None:
+        class FakeRecipient:
+            Resolved = True
+
+            def Resolve(self) -> None:
+                return None
+
+        class FakeNamespace:
+            def CreateRecipient(self, employee: str) -> FakeRecipient:
+                if employee == "Slow Person":
+                    time.sleep(0.2)
+                return FakeRecipient()
+
+        class FakeOutlook:
+            def GetNamespace(self, _name: str) -> FakeNamespace:
+                return FakeNamespace()
+
+        progress_events: list[tuple[int, int, str, str]] = []
+        with (
+            mock.patch("dss_hours_tracker.pythoncom"),
+            mock.patch("dss_hours_tracker.win32com") as win32com_mock,
+            mock.patch("dss_hours_tracker.OUTLOOK_PER_NAME_TIMEOUT_SECONDS", 0.01),
+            mock.patch("dss_hours_tracker.extract_smtp_address", side_effect=lambda recipient: "fast@jatechpowersystems.com"),
+            mock.patch("dss_hours_tracker.extract_resolved_display_name", return_value="Fast Person"),
+        ):
+            win32com_mock.client.Dispatch.return_value = FakeOutlook()
+            results, _names = query_outlook_emails(
+                ["Slow Person", "Fast Person"],
+                scan_full_address_book=False,
+                progress_callback=lambda processed, total, employee, resolution: progress_events.append(
+                    (processed, total, employee, resolution.email if resolution else "")
+                ),
+            )
+
+        self.assertNotIn("Slow Person", results)
+        self.assertEqual(results["Fast Person"].email, "fast@jatechpowersystems.com")
+        self.assertEqual(
+            progress_events,
+            [
+                (1, 2, "Slow Person", ""),
+                (2, 2, "Fast Person", "fast@jatechpowersystems.com"),
             ],
         )
 
