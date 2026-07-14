@@ -1318,6 +1318,8 @@ class EmployeesPage(QWidget):
         self.group_list = QListWidget()
         self.group_list.setSelectionMode(QListWidget.NoSelection)
         self.alias_target_combo = QComboBox()
+        self.alias_target_combo.setEditable(True)
+        self.alias_target_combo.setInsertPolicy(QComboBox.NoInsert)
         self.alias_set_button = QPushButton("Save Alias")
         self.alias_clear_button = QPushButton("Clear Alias")
         self.alias_status_label = QLabel("")
@@ -1375,6 +1377,7 @@ class EmployeesPage(QWidget):
         self.alias_set_button.clicked.connect(self._save_alias)
         self.alias_clear_button.clicked.connect(self._clear_alias)
         self.alias_target_combo.currentIndexChanged.connect(lambda _idx: self._update_employee_action_states())
+        self.alias_target_combo.editTextChanged.connect(lambda _text: self._update_employee_action_states())
         self.email_edit.editingFinished.connect(self._save_current)
         self.save_email_button.clicked.connect(self._save_current)
         self.suppression_box.toggled.connect(lambda _checked: self._save_current())
@@ -1497,7 +1500,12 @@ class EmployeesPage(QWidget):
             suffix = f" | {email}" if email else ""
             self.alias_target_combo.addItem(f"{name}{suffix}", name)
         alias_index = self.alias_target_combo.findData(alias_target)
-        self.alias_target_combo.setCurrentIndex(alias_index if alias_index >= 0 else 0)
+        if alias_index >= 0:
+            self.alias_target_combo.setCurrentIndex(alias_index)
+        elif alias_target:
+            self.alias_target_combo.setEditText(alias_target)
+        else:
+            self.alias_target_combo.setCurrentIndex(0)
         if is_alias:
             self.alias_status_label.setText(f"This employee is currently treated as an alias of '{alias_target}'. Edit the kept name to manage email, notes, and groups.")
         else:
@@ -1670,13 +1678,14 @@ class EmployeesPage(QWidget):
         is_alias = bool(employee and employee in self.employee_aliases)
         self.remove_employee_button.setEnabled(bool(employee))
         self.remove_employee_button.setText("Restore Employee" if hidden else "Hide Employee")
-        self.alias_set_button.setEnabled(bool(employee) and bool(self.alias_target_combo.currentData()))
+        alias_target = self._selected_alias_target()
+        self.alias_set_button.setEnabled(bool(employee) and bool(alias_target) and alias_target != employee)
         self.alias_clear_button.setEnabled(is_alias)
         self.save_email_button.setEnabled(bool(employee) and not is_alias)
 
     def _save_alias(self) -> None:
         employee = self.current_employee().strip()
-        target = str(self.alias_target_combo.currentData() or "").strip()
+        target = self._selected_alias_target()
         if not employee or not target or employee == target:
             return
         self.mergeRequested.emit(employee, target)
@@ -1686,6 +1695,15 @@ class EmployeesPage(QWidget):
         if not employee or employee not in self.employee_aliases:
             return
         self.clearAliasRequested.emit(employee)
+
+    def _selected_alias_target(self) -> str:
+        data_value = str(self.alias_target_combo.currentData() or "").strip()
+        text_value = self.alias_target_combo.currentText().strip()
+        if data_value:
+            return data_value
+        if text_value.casefold() == "no alias":
+            return ""
+        return text_value
 
 
 class FormattingRulesPage(QWidget):
@@ -2269,6 +2287,7 @@ class DssQtMainWindow(QMainWindow):
         self._update_status_text = f"Installed version: {core.APP_VERSION}"
         self._hash_alerted_paths: set[Path] = set()
         self._refresh_views_queued = False
+        self._name_typo_manual_by_token: dict[int, bool] = {}
         self.hash_poll_timer = QTimer(self)
         self.updateCheckResultReady.connect(self._handle_update_check_result)
         self.updateCheckErrorRaised.connect(self._handle_update_check_error)
@@ -2292,7 +2311,7 @@ class DssQtMainWindow(QMainWindow):
 
     def _build_ui(self) -> None:
         self.setWindowTitle(core.DISPLAY_APP_NAME)
-        self.setMinimumSize(900, 700)
+        self.setMinimumSize(720, 700)
         self.main_scroll = QScrollArea()
         self.main_scroll.setWidgetResizable(True)
         self.main_scroll.setFrameShape(QScrollArea.NoFrame)
@@ -2323,21 +2342,22 @@ class DssQtMainWindow(QMainWindow):
         top_button_font = QFont(self.font())
         top_button_font.setPointSize(max(8, top_button_font.pointSize() - 1))
         controls_box = QGroupBox("Workbook Controls")
-        controls_layout = QHBoxLayout(controls_box)
-        controls_layout.setSpacing(8)
-        for widget in (
+        controls_layout = QGridLayout(controls_box)
+        controls_layout.setHorizontalSpacing(4)
+        controls_layout.setVerticalSpacing(4)
+        self._top_control_buttons = [
             self.add_button,
             self.quick_add_button,
             self.remove_button,
             self.update_button,
             self.export_button,
-        ):
+        ]
+        for widget in self._top_control_buttons:
             widget.setFont(top_button_font)
-            widget.setMinimumWidth(112)
+            widget.setMinimumWidth(0)
             widget.setMinimumHeight(34)
-            widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            controls_layout.addWidget(widget)
-        controls_layout.addStretch(1)
+            widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+            widget.setStyleSheet("padding: 4px 6px;")
         self.controls_box = controls_box
         self.controls_layout = controls_layout
         self.add_button.setToolTip("Add DSS workbooks to the current session without clearing existing ones.")
@@ -2491,6 +2511,9 @@ class DssQtMainWindow(QMainWindow):
         self.configuration_page.checkNameTyposRequested.connect(self.check_name_typos_manually)
         self.configuration_page.showAppDataRequested.connect(self.show_app_data_folder)
         self.group_tabs.currentChanged.connect(lambda _index: self._refresh_export_button_state())
+        self.data_tabs.currentChanged.connect(lambda _index: self._refresh_export_button_state())
+        self.summary_tabs.currentChanged.connect(lambda _index: self._refresh_export_button_state())
+        self.report_tabs.currentChanged.connect(lambda _index: self._refresh_export_button_state())
         self._apply_responsive_layouts()
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
@@ -2499,8 +2522,8 @@ class DssQtMainWindow(QMainWindow):
 
     def _apply_responsive_layouts(self) -> None:
         available_width = self.main_scroll.viewport().width() if hasattr(self, "main_scroll") else self.width()
-        stack_top_groups = available_width < 1320
-        stack_secondary_rows = available_width < 1080
+        stack_top_groups = available_width < 1180
+        stack_secondary_rows = available_width < 900
         stack_overview = available_width < 980
 
         self.top_groups_layout.setDirection(
@@ -2520,9 +2543,25 @@ class DssQtMainWindow(QMainWindow):
         )
 
         self.quickload_hint_label.setMaximumWidth(320 if stack_secondary_rows else 260)
-        self.data_tabs.currentChanged.connect(lambda _index: self._refresh_export_button_state())
-        self.summary_tabs.currentChanged.connect(lambda _index: self._refresh_export_button_state())
-        self.report_tabs.currentChanged.connect(lambda _index: self._refresh_export_button_state())
+        self._reflow_top_control_buttons(available_width)
+
+    def _reflow_top_control_buttons(self, available_width: int) -> None:
+        if available_width < 760:
+            columns = 2
+        elif available_width < 920:
+            columns = 3
+        elif available_width < 1120:
+            columns = 4
+        else:
+            columns = 5
+        while self.controls_layout.count():
+            self.controls_layout.takeAt(0)
+        for index, widget in enumerate(self._top_control_buttons):
+            row = index // columns
+            column = index % columns
+            self.controls_layout.addWidget(widget, row, column)
+        for column in range(columns):
+            self.controls_layout.setColumnStretch(column, 1)
 
     def _build_employee_summary_toolbar(self) -> None:
         page = self.pages["employee_daily_pf"]
@@ -3573,7 +3612,7 @@ class DssQtMainWindow(QMainWindow):
         outlook_active = self.outlook_worker is not None
         typo_active = self.name_typo_worker is not None
         busy = load_active or outlook_active or typo_active
-        ui_locked = load_active or typo_active
+        ui_locked = load_active
         has_sources = bool(self.source_paths)
         self.add_button.setEnabled(not busy)
         self.quick_add_button.setEnabled(not busy)
@@ -3589,6 +3628,10 @@ class DssQtMainWindow(QMainWindow):
         self._refresh_export_button_state(busy=ui_locked)
         if message:
             self.status_label.setText(message)
+
+    def _clear_loading_label_if_idle(self) -> None:
+        if self.load_worker is None and self.outlook_worker is None and self.name_typo_worker is None:
+            self.loading_label.setText("")
 
     def _refresh_export_button_state(self, busy: bool | None = None) -> None:
         if busy is None:
@@ -3800,6 +3843,8 @@ class DssQtMainWindow(QMainWindow):
         self._refresh_employee_page()
         self.refresh_views()
         self._queue_refresh_overview_labels()
+        if tracker_data.reloaded_paths:
+            QTimer.singleShot(0, lambda: self._start_name_typo_refresh(manual=False))
         if tracker_data.reloaded_paths or tracker_data.reused_paths:
             QMessageBox.information(
                 self,
@@ -4448,6 +4493,9 @@ class DssQtMainWindow(QMainWindow):
         resolved_target = core.resolve_employee_name_merge(target, self.employee_name_merges)
         if resolved_target == source:
             return
+        discovered = {self._display_employee_name(name) for name in (self.current_data.employee_names if self.current_data else [])}
+        if resolved_target not in discovered:
+            self.employee_added_names.add(resolved_target)
         self.employee_name_merges[source] = resolved_target
         if not self.employee_emails.get(resolved_target, "").strip() and self.employee_emails.get(source, "").strip():
             self.employee_emails[resolved_target] = self.employee_emails[source]
@@ -4508,8 +4556,12 @@ class DssQtMainWindow(QMainWindow):
         self.refresh_views()
 
     def check_name_typos_manually(self) -> None:
+        self._start_name_typo_refresh(manual=True)
+
+    def _start_name_typo_refresh(self, *, manual: bool) -> None:
         if self.current_data is None or not self._managed_employee_names():
-            QMessageBox.information(self, "Check Name Typos", "Load DSS data first.")
+            if manual:
+                QMessageBox.information(self, "Check Name Typos", "Load DSS data first.")
             return
         if self.name_typo_worker is not None:
             return
@@ -4517,8 +4569,10 @@ class DssQtMainWindow(QMainWindow):
         if cache_key is not None and cache_key == self._cached_name_typo_key:
             self.refresh_views()
             self._refresh_overview_labels()
-            self.group_tabs.setCurrentWidget(self.report_tabs)
-            self.report_tabs.setCurrentWidget(self.pages["data_review"])
+            if manual:
+                self.group_tabs.setCurrentWidget(self.report_tabs)
+                self.report_tabs.setCurrentWidget(self.pages["data_review"])
+            self.loading_label.setText("")
             self._set_loading_state(False, f"Name typo review reused cached results: {len(self._cached_name_typo_warnings)} warning(s)")
             return
         employee_names = self._managed_employee_names()
@@ -4526,6 +4580,7 @@ class DssQtMainWindow(QMainWindow):
         self._next_name_typo_token += 1
         token = self._next_name_typo_token
         self._active_name_typo_token = token
+        self._name_typo_manual_by_token[token] = manual
         worker = NameTypoWorker(
             employee_names,
             daily_records,
@@ -4544,7 +4599,7 @@ class DssQtMainWindow(QMainWindow):
         self.progress_bar.setValue(0)
         self.percent_label.setText("0.0%")
         self.loading_label.setText("Checking names...")
-        self._set_loading_state(True, "Refreshing name typos...")
+        self._set_loading_state(True, "Refreshing name typos..." if manual else "Refreshing name typos in background...")
         self.name_typo_thread.start()
 
     def _on_name_typo_refresh_finished(
@@ -4555,16 +4610,19 @@ class DssQtMainWindow(QMainWindow):
     ) -> None:
         if token != self._active_name_typo_token:
             return
+        manual = self._name_typo_manual_by_token.pop(token, False)
         self.name_typo_worker = None
         self.name_typo_thread = None
         self.outlook_lookup_cache = dict(cache_updates)
         core.save_outlook_lookup_cache(self.config_path, self.outlook_lookup_cache)
         self._set_cached_name_typo_warnings(warnings)
         self.refresh_views()
+        self.loading_label.setText("")
         self._set_loading_state(False, f"Name typo refresh complete: {len(warnings)} warning(s)")
-        self.group_tabs.setCurrentWidget(self.report_tabs)
-        self.report_tabs.setCurrentWidget(self.pages["data_review"])
-        if not warnings:
+        if manual:
+            self.group_tabs.setCurrentWidget(self.report_tabs)
+            self.report_tabs.setCurrentWidget(self.pages["data_review"])
+        if not warnings and manual:
             QMessageBox.information(self, "Check Name Typos", "No likely name typos were found.")
             return
         unsuppressed = [
@@ -4572,22 +4630,26 @@ class DssQtMainWindow(QMainWindow):
             for warning in warnings
             if core.typo_warning_key(warning.employee, warning.similar_employee) not in self.ignored_name_typos
         ]
-        if not unsuppressed:
+        if not unsuppressed and manual:
             QMessageBox.information(self, "Check Name Typos", "All current name typo warnings are already suppressed. Enable Show Suppressed on the Data Review page to review them.")
 
     def _on_name_typo_refresh_failed(self, token: int, message: str) -> None:
         if token != self._active_name_typo_token:
             return
+        self._name_typo_manual_by_token.pop(token, None)
         self.name_typo_worker = None
         self.name_typo_thread = None
+        self.loading_label.setText("")
         self._set_loading_state(False, "Name typo refresh failed")
         QMessageBox.critical(self, "Check Name Typos", message)
 
     def _on_name_typo_refresh_cancelled(self, token: int) -> None:
         if token != self._active_name_typo_token:
             return
+        self._name_typo_manual_by_token.pop(token, None)
         self.name_typo_worker = None
         self.name_typo_thread = None
+        self.loading_label.setText("")
         self._set_loading_state(False, "Name typo refresh cancelled")
 
     def show_app_data_folder(self) -> None:

@@ -102,3 +102,6 @@ Working scratchpad: check items off when they are done.
 - [x] Improve top-level layout grouping so loading controls, filters, progress, and review actions are more visually distinct.
 - [x] Improve the Employees page layout into clearer roster/details/actions sections with stronger visual separation.
 - [x] Add a post-load summary/status area showing loaded files, employees, PF coverage, warnings count, and hidden/suppressed state at a glance.
+- [x] There is no summary window for hours on the DSS total. I would like another summaries page which shows each DSS dash number hour total so far, as well as each overall DSS with all the dash numbers added up together. I would like to see every listed DSS's total hours so far. This should include ST, OT, DT, and Expanded Hours. This should be by PF and not by employee.
+- [x] The UI does not actually refresh when the refresh button is pressed. The user has to make changes in the UI to selections in order for it to refresh.
+- [x] Make the name typo check occur after any DSS load, but not after a zero-diff refresh, and run it as a separate background step so it does not continue hanging the UI while the DSSs load.

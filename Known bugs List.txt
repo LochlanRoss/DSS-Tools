@@ -8,8 +8,8 @@ Working scratchpad: check items off when they are done.
 - [x] Revision counting missed forms like `rv1` and incorrectly raised an AZ2 mismatch warning for sheets such as `2026-04-26 rv1`.
   Fix shipped: `REVISION_PATTERN` now treats `rv` + digits case-insensitively before the generic `r` + digits branch.
 
-- [ ] The create bug report button previously raised an Outlook path error: `Path does not exist. Verify the path is correct.`
-  Current status: the draft-creation path now retries safer attachment-path variants and falls back to saving the draft without the diagnostic attachment if Outlook rejects the file path. This still needs live Outlook verification before it should be marked complete.
+- [x] The create bug report button previously raised an Outlook path error: `Path does not exist. Verify the path is correct.`
+  Fix shipped and verified: the draft-creation path now retries safer attachment-path variants and falls back to saving the draft without the diagnostic attachment if Outlook rejects the file path. Live Outlook verification passed.
 
 - [x] Entering an email with the Save Email button did not remove the missing-email warning indicator in the Employees roster.
   Fix shipped: saving employee details now refreshes the Employees page immediately so the roster warning state updates without needing another UI action.
@@ -17,5 +17,11 @@ Working scratchpad: check items off when they are done.
 - [x] The Employees tab now exposes an explicit alias workflow so one spelling can be saved as an alias of another spelling, for example `Mike Spratt` -> `Michael Spratt`.
   Fix shipped: the Employees detail pane now includes `Alias To`, `Save Alias`, and `Clear Alias`, and existing aliases are visible in the roster.
 
-- [ ] When checking for name typos, the progress bar showed 100% but the cancel button remained and the UI stayed locked.
-  Current status: the finish/fail/cancel paths now clear the worker state and call `_set_loading_state(False, ...)`, but this still needs runtime verification against a fresh build before it should be marked complete.
+- [x] When checking for name typos, the progress bar showed 100% but the cancel button remained and the UI stayed locked.
+  Fix shipped: the name-typo pass now runs without locking the broader UI, and the finish/fail/cancel paths clear the worker state and release the loading state cleanly.
+
+- [x] The minimum size of the window was too wide because the top controls did not shrink and wrap tightly enough.
+  Fix shipped: the top control buttons now reflow into smaller multi-row layouts, button minimum widths were reduced, and the window minimum width was lowered.
+
+- [x] The Load Status `Checking names...` did not clear after the name typo check completed.
+  Fix shipped: the name-typo completion, failure, cancellation, and cached-result paths now explicitly clear the loading label.
