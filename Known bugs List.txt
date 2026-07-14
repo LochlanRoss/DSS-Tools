@@ -1,8 +1,21 @@
-Delete entries from this list after you ask me directly if they are fixed and I confirm they are. 
+# Known bugs checklist
 
-**Windows taskbar / desktop icon looked like a solid blue tile while ``dss_tools.ico`` in the repo looked correct.** Causes: (1) PyInstaller embedded an ICO that only contained a tiny frame because Pillow wrote the smallest size first; (2) desktop shortcuts pointed at ``dss_tools.ico`` while the taskbar used the **embedded** icon in ``DSSTools.exe``, so the two could disagree; (3) Windows icon cache. **Mitigations shipped:** ``tools/ensure_dss_tools_ico.py`` builds square multi-size ICO with 256×256 first; CI/Inno shortcuts use ``DSSTools.exe`` for ``IconFilename``; release workflow requires ``DSS-Tools Icon.png`` and regenerates ``dss_tools.ico`` from it only (no placeholder). Rebuild the installer after these changes; restart or refresh icon cache only if a ghost image persists.
+Working scratchpad: check items off when they are done.
 
-There is a bug with the revision counting. Some sheets are not showing as revs when they really are. For example: I have a sheet named "2026-04-26 rv1" whose AZ2 signature matches at "1", but the parser flags this entry as a parsing error and claims "AZ2 indicates a revision sheet, but the sheet name has no a revision suffix (parsed revision 0). (AZ2 raw value: '1')" Can we expand the logic to look for any "r" case insensitive character and any number and assign that automatically as a rev, then compare that number against the AZ2 signature? — **Fix attempted:** `REVISION_PATTERN` now treats `rv` + digits (e.g. `rv1`, `RV2`) like other revision suffixes before the generic `r` + digits branch.
+- [x] Windows taskbar / desktop icon looked like a solid blue tile while `dss_tools.ico` in the repo looked correct.
+  Mitigations shipped: `tools/ensure_dss_tools_ico.py` builds a square multi-size ICO with 256x256 first; CI/Inno shortcuts use `DSSTools.exe` for `IconFilename`; the release workflow regenerates `dss_tools.ico` from `DSS-Tools Icon.png` only. Rebuild the installer after these changes; refresh the Windows icon cache only if a ghost image persists.
 
+- [x] Revision counting missed forms like `rv1` and incorrectly raised an AZ2 mismatch warning for sheets such as `2026-04-26 rv1`.
+  Fix shipped: `REVISION_PATTERN` now treats `rv` + digits case-insensitively before the generic `r` + digits branch.
 
-The create bug report button does not work and is bugged. "Could not create the bug repott draft. (-2147352567, 'Exception occurred,•, (4096, 'Microsoft Outlook', 'Path does not exist. Verify the path is correct.•, None, O, -2147024893), None)"
+- [ ] The create bug report button previously raised an Outlook path error: `Path does not exist. Verify the path is correct.`
+  Current status: the draft-creation path now retries safer attachment-path variants and falls back to saving the draft without the diagnostic attachment if Outlook rejects the file path. This still needs live Outlook verification before it should be marked complete.
+
+- [x] Entering an email with the Save Email button did not remove the missing-email warning indicator in the Employees roster.
+  Fix shipped: saving employee details now refreshes the Employees page immediately so the roster warning state updates without needing another UI action.
+
+- [x] The Employees tab now exposes an explicit alias workflow so one spelling can be saved as an alias of another spelling, for example `Mike Spratt` -> `Michael Spratt`.
+  Fix shipped: the Employees detail pane now includes `Alias To`, `Save Alias`, and `Clear Alias`, and existing aliases are visible in the roster.
+
+- [ ] When checking for name typos, the progress bar showed 100% but the cancel button remained and the UI stayed locked.
+  Current status: the finish/fail/cancel paths now clear the worker state and call `_set_loading_state(False, ...)`, but this still needs runtime verification against a fresh build before it should be marked complete.

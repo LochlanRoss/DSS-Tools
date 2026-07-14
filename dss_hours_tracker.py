@@ -9363,7 +9363,7 @@ class DssToolsApp(tk.Tk):
     def reload_source(self) -> None:
         if not self.current_data or self._is_loading:
             return
-        self.load_source(self.current_data.source_paths, show_success=True, force_reparse=True)
+        self.load_source(self.current_data.source_paths, show_success=True)
 
     def load_source(self, source_paths: Path | Iterable[Path], show_success: bool = False, force_reparse: bool = False) -> None:
         if self._cancel_event is not None:

@@ -1267,6 +1267,7 @@ class EmployeesPage(QWidget):
     changed = Signal()
     syncRequested = Signal()
     mergeRequested = Signal(str, str)
+    clearAliasRequested = Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -1276,6 +1277,7 @@ class EmployeesPage(QWidget):
         self.employee_notes: dict[str, str] = {}
         self.employee_groups: dict[str, list[str]] = {}
         self.missing_email_suppressions: set[str] = set()
+        self.employee_aliases: dict[str, str] = {}
 
         splitter = QSplitter(self)
         left = QWidget()
@@ -1315,13 +1317,26 @@ class EmployeesPage(QWidget):
         self.notes_edit = QPlainTextEdit()
         self.group_list = QListWidget()
         self.group_list.setSelectionMode(QListWidget.NoSelection)
+        self.alias_target_combo = QComboBox()
+        self.alias_set_button = QPushButton("Save Alias")
+        self.alias_clear_button = QPushButton("Clear Alias")
+        self.alias_status_label = QLabel("")
+        self.alias_status_label.setWordWrap(True)
         email_row = QWidget()
         email_row_layout = QHBoxLayout(email_row)
         email_row_layout.setContentsMargins(0, 0, 0, 0)
         email_row_layout.addWidget(self.email_edit, 1)
         email_row_layout.addWidget(self.save_email_button)
+        alias_row = QWidget()
+        alias_row_layout = QHBoxLayout(alias_row)
+        alias_row_layout.setContentsMargins(0, 0, 0, 0)
+        alias_row_layout.addWidget(self.alias_target_combo, 1)
+        alias_row_layout.addWidget(self.alias_set_button)
+        alias_row_layout.addWidget(self.alias_clear_button)
         form.addRow("Employee", self.employee_name_label)
         form.addRow("Email", email_row)
+        form.addRow("Alias To", alias_row)
+        form.addRow("", self.alias_status_label)
         form.addRow("", self.suppression_box)
         form.addRow("Notes", self.notes_edit)
         form.addRow("Groups", self.group_list)
@@ -1357,6 +1372,9 @@ class EmployeesPage(QWidget):
         self.add_group_button.clicked.connect(self._add_group)
         self.remove_group_button.clicked.connect(self._remove_group)
         self.sync_button.clicked.connect(self.syncRequested.emit)
+        self.alias_set_button.clicked.connect(self._save_alias)
+        self.alias_clear_button.clicked.connect(self._clear_alias)
+        self.alias_target_combo.currentIndexChanged.connect(lambda _idx: self._update_employee_action_states())
         self.email_edit.editingFinished.connect(self._save_current)
         self.save_email_button.clicked.connect(self._save_current)
         self.suppression_box.toggled.connect(lambda _checked: self._save_current())
@@ -1373,6 +1391,7 @@ class EmployeesPage(QWidget):
         employee_notes: dict[str, str],
         employee_groups: dict[str, list[str]],
         missing_email_suppressions: set[str],
+        employee_aliases: dict[str, str],
     ) -> None:
         current = self.current_employee()
         self.employee_names = sorted(set(employee_names) | set(hidden_employee_names), key=str.casefold)
@@ -1381,6 +1400,7 @@ class EmployeesPage(QWidget):
         self.employee_notes = dict(employee_notes)
         self.employee_groups = {name: list(values) for name, values in employee_groups.items()}
         self.missing_email_suppressions = set(missing_email_suppressions)
+        self.employee_aliases = dict(employee_aliases)
         self._render_employee_list(current)
 
         self.groups_list.blockSignals(True)
@@ -1400,8 +1420,12 @@ class EmployeesPage(QWidget):
             hidden = employee in self.hidden_employee_names
             if hidden and not self.show_hidden_box.isChecked():
                 continue
+            alias_target = self.employee_aliases.get(employee, "").strip()
             suppressed = employee in self.missing_email_suppressions
             label, missing = core.build_employee_email_list_label(employee, self.employee_emails.get(employee, ""), suppressed=suppressed)
+            if alias_target:
+                label = f"[Alias -> {alias_target}] {employee}"
+                missing = False
             if hidden:
                 label = f"[Hidden] {label}"
             item = QListWidgetItem(label)
@@ -1432,7 +1456,11 @@ class EmployeesPage(QWidget):
         return [str(item.data(Qt.UserRole)) for item in self.employee_list.selectedItems()]
 
     def snapshot(self) -> tuple[list[str], set[str], dict[str, str], dict[str, str], dict[str, list[str]], set[str]]:
-        visible = [name for name in self.employee_names if name not in self.hidden_employee_names]
+        visible = [
+            name
+            for name in self.employee_names
+            if name not in self.hidden_employee_names and name not in self.employee_aliases
+        ]
         return (
             visible,
             set(self.hidden_employee_names),
@@ -1444,29 +1472,57 @@ class EmployeesPage(QWidget):
 
     def _populate_details(self) -> None:
         employee = self.current_employee()
+        alias_target = self.employee_aliases.get(employee, "").strip()
+        is_alias = bool(alias_target)
         self.employee_name_label.setText(employee)
         self.email_edit.blockSignals(True)
         self.notes_edit.blockSignals(True)
         self.group_list.blockSignals(True)
         self.suppression_box.blockSignals(True)
+        self.alias_target_combo.blockSignals(True)
         self.email_edit.setText(self.employee_emails.get(employee, ""))
         self.notes_edit.setPlainText(self.employee_notes.get(employee, ""))
         self.suppression_box.setChecked(employee in self.missing_email_suppressions)
+        self.alias_target_combo.clear()
+        self.alias_target_combo.addItem("No alias", "")
+        for name in sorted(
+            [
+                candidate
+                for candidate in self.employee_names
+                if candidate != employee and candidate not in self.employee_aliases
+            ],
+            key=str.casefold,
+        ):
+            email = self.employee_emails.get(name, "").strip()
+            suffix = f" | {email}" if email else ""
+            self.alias_target_combo.addItem(f"{name}{suffix}", name)
+        alias_index = self.alias_target_combo.findData(alias_target)
+        self.alias_target_combo.setCurrentIndex(alias_index if alias_index >= 0 else 0)
+        if is_alias:
+            self.alias_status_label.setText(f"This employee is currently treated as an alias of '{alias_target}'. Edit the kept name to manage email, notes, and groups.")
+        else:
+            self.alias_status_label.setText("Use Alias To when two spellings should always be treated as the same employee.")
         self.group_list.clear()
         for group_name in sorted(self.employee_groups, key=str.casefold):
             item = QListWidgetItem(group_name)
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Checked if employee and employee in self.employee_groups.get(group_name, []) else Qt.Unchecked)
             self.group_list.addItem(item)
+        self.email_edit.setEnabled(not is_alias)
+        self.save_email_button.setEnabled(bool(employee) and not is_alias)
+        self.suppression_box.setEnabled(not is_alias)
+        self.notes_edit.setEnabled(not is_alias)
+        self.group_list.setEnabled(not is_alias)
         self.email_edit.blockSignals(False)
         self.notes_edit.blockSignals(False)
         self.group_list.blockSignals(False)
         self.suppression_box.blockSignals(False)
+        self.alias_target_combo.blockSignals(False)
         self._update_employee_action_states()
 
     def _save_current(self) -> None:
         employee = self.current_employee()
-        if not employee:
+        if not employee or employee in self.employee_aliases:
             return
         self.employee_emails[employee] = self.email_edit.text().strip()
         self.employee_notes[employee] = self.notes_edit.toPlainText().strip()
@@ -1611,9 +1667,25 @@ class EmployeesPage(QWidget):
         self.merge_employee_button.setEnabled(len(set(selected)) == 2)
         employee = self.current_employee()
         hidden = bool(employee and employee in self.hidden_employee_names)
+        is_alias = bool(employee and employee in self.employee_aliases)
         self.remove_employee_button.setEnabled(bool(employee))
         self.remove_employee_button.setText("Restore Employee" if hidden else "Hide Employee")
-        self.save_email_button.setEnabled(bool(employee))
+        self.alias_set_button.setEnabled(bool(employee) and bool(self.alias_target_combo.currentData()))
+        self.alias_clear_button.setEnabled(is_alias)
+        self.save_email_button.setEnabled(bool(employee) and not is_alias)
+
+    def _save_alias(self) -> None:
+        employee = self.current_employee().strip()
+        target = str(self.alias_target_combo.currentData() or "").strip()
+        if not employee or not target or employee == target:
+            return
+        self.mergeRequested.emit(employee, target)
+
+    def _clear_alias(self) -> None:
+        employee = self.current_employee().strip()
+        if not employee or employee not in self.employee_aliases:
+            return
+        self.clearAliasRequested.emit(employee)
 
 
 class FormattingRulesPage(QWidget):
@@ -2381,20 +2453,16 @@ class DssQtMainWindow(QMainWindow):
         self.report_tabs.addTab(self.email_drafts_page, "Email Drafts")
 
         self.configuration_page = ConfigurationPage()
-        self.configuration_scroll = QScrollArea()
-        self.configuration_scroll.setWidgetResizable(True)
-        self.configuration_scroll.setFrameShape(QScrollArea.NoFrame)
-        self.configuration_scroll.setWidget(self.configuration_page)
         self.employees_page = EmployeesPage()
         self.formatting_page = FormattingRulesPage()
-        self.settings_tabs.addTab(self.configuration_scroll, "Configuration")
+        self.settings_tabs.addTab(self.configuration_page, "Configuration")
         self.settings_tabs.addTab(self.employees_page, "Employees")
         self.settings_tabs.addTab(self.formatting_page, "Formatting Rules")
 
         self.add_button.clicked.connect(self.add_dss_files)
         self.quick_add_button.clicked.connect(self.quick_add_dss_files)
         self.remove_button.clicked.connect(self.remove_dss_files)
-        self.update_button.clicked.connect(lambda: self.reload_data(force_reparse=True))
+        self.update_button.clicked.connect(lambda: self.reload_data())
         self.export_button.clicked.connect(self.export_current_view)
         self.cancel_button.clicked.connect(self.cancel_active_work)
         self.employee_filter.selectionChanged.connect(lambda _values: self.refresh_views())
@@ -2406,6 +2474,7 @@ class DssQtMainWindow(QMainWindow):
         self.employees_page.changed.connect(self._employees_changed)
         self.employees_page.syncRequested.connect(self.sync_outlook_emails)
         self.employees_page.mergeRequested.connect(self._merge_employee_alias)
+        self.employees_page.clearAliasRequested.connect(self._clear_employee_alias)
         self.formatting_page.changed.connect(self._formatting_changed)
         self.configuration_page.settingsChanged.connect(self._settings_changed)
         self.configuration_page.applyRequested.connect(self.apply_settings)
@@ -2763,18 +2832,23 @@ class DssQtMainWindow(QMainWindow):
         self.pf_filter.set_choices(pfs, self.pf_filter.selected_values(), force_single=True)
 
     def _refresh_employee_page(self) -> None:
+        employee_names = sorted(
+            set(self._managed_employee_names()) | set(self.employee_hidden_names) | set(self.employee_name_merges),
+            key=str.casefold,
+        )
         hidden_names = {
             self._display_employee_name(name)
             for name in self.employee_hidden_names
             if name not in self.employee_name_merges
         }
         self.employees_page.set_data(
-            self._managed_employee_names(),
+            employee_names,
             hidden_names,
             self.employee_emails,
             self.employee_notes,
             self.employee_groups,
             self.missing_email_suppressions,
+            self.employee_name_merges,
         )
 
     def _set_update_status(self, text: str) -> None:
@@ -2816,6 +2890,9 @@ class DssQtMainWindow(QMainWindow):
             self.refresh_views()
 
         QTimer.singleShot(0, run_refresh)
+
+    def _queue_refresh_overview_labels(self) -> None:
+        QTimer.singleShot(0, self._refresh_overview_labels)
 
     def _apply_ui_theme_chrome(self) -> None:
         theme = self._effective_qt_theme()
@@ -3378,7 +3455,6 @@ class DssQtMainWindow(QMainWindow):
             for record in sorted(filtered_records, key=lambda item: (item.work_date, item.source_sheet, item.employee), reverse=True)
         ])
         self._refresh_email_preview(filtered_records)
-        self._refresh_filters()
         unsuppressed_error_count = sum(1 for item in findings if not self._is_row_suppressed("error_report", core.error_finding_suppression_key(item)))
         unsuppressed_parse_count = sum(
             1
@@ -3462,6 +3538,7 @@ class DssQtMainWindow(QMainWindow):
         core.save_employee_groups(self.config_path, self.employee_groups)
         core.save_missing_email_suppressions(self.config_path, self.missing_email_suppressions)
         self._invalidate_name_typo_cache()
+        self._refresh_employee_page()
         self._refresh_filters()
         self._refresh_overview_labels()
         self.refresh_views()
@@ -3702,9 +3779,9 @@ class DssQtMainWindow(QMainWindow):
         self._refresh_source_status_labels()
         self._refresh_filters()
         self._refresh_employee_page()
-        self._refresh_overview_labels()
         if self.group_tabs.currentWidget() != self.settings_tabs:
             self._queue_refresh_views()
+        self._queue_refresh_overview_labels()
 
     def _on_load_finished(self, token: int, tracker_data: core.TrackerData) -> None:
         if token != self._active_load_token:
@@ -3721,8 +3798,8 @@ class DssQtMainWindow(QMainWindow):
         self._refresh_source_status_labels()
         self._refresh_filters()
         self._refresh_employee_page()
-        self._refresh_overview_labels()
-        self._queue_refresh_views()
+        self.refresh_views()
+        self._queue_refresh_overview_labels()
         if tracker_data.reloaded_paths or tracker_data.reused_paths:
             QMessageBox.information(
                 self,
@@ -4408,6 +4485,22 @@ class DssQtMainWindow(QMainWindow):
         core.save_employee_groups(self.config_path, self.employee_groups)
         core.save_missing_email_suppressions(self.config_path, self.missing_email_suppressions)
         self._persist_ignored_name_typos()
+        self._invalidate_name_typo_cache()
+        self._refresh_filters()
+        self._refresh_employee_page()
+        self._refresh_overview_labels()
+        self.refresh_views()
+
+    def _clear_employee_alias(self, source_name: str) -> None:
+        source = source_name.strip()
+        if not source or source not in self.employee_name_merges:
+            return
+        self.employee_name_merges.pop(source, None)
+        discovered = {self._display_employee_name(name) for name in (self.current_data.employee_names if self.current_data else [])}
+        if source not in discovered:
+            self.employee_added_names.add(source)
+        self._persist_employee_name_merges()
+        core.save_employee_name_overrides(self.config_path, self.employee_added_names, self.employee_hidden_names)
         self._invalidate_name_typo_cache()
         self._refresh_filters()
         self._refresh_employee_page()
