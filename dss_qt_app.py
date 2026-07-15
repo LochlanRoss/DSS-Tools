@@ -11,7 +11,7 @@ import threading
 import time
 from fnmatch import fnmatch
 from dataclasses import dataclass, replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -1268,6 +1268,7 @@ class EmployeesPage(QWidget):
     syncRequested = Signal()
     mergeRequested = Signal(str, str)
     clearAliasRequested = Signal(str)
+    previewTimesheetsRequested = Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -1278,6 +1279,7 @@ class EmployeesPage(QWidget):
         self.employee_groups: dict[str, list[str]] = {}
         self.missing_email_suppressions: set[str] = set()
         self.employee_aliases: dict[str, str] = {}
+        self.employee_timesheet_names: dict[str, str] = {}
 
         splitter = QSplitter(self)
         left = QWidget()
@@ -1312,7 +1314,9 @@ class EmployeesPage(QWidget):
         form = QFormLayout(detail_box)
         self.employee_name_label = QLabel("")
         self.email_edit = QLineEdit()
+        self.timesheet_name_edit = QLineEdit()
         self.save_email_button = QPushButton("Save Email")
+        self.preview_timesheets_button = QPushButton("Preview Timesheets")
         self.suppression_box = QCheckBox("Suppress missing email warnings for this employee")
         self.notes_edit = QPlainTextEdit()
         self.group_list = QListWidget()
@@ -1337,11 +1341,13 @@ class EmployeesPage(QWidget):
         alias_row_layout.addWidget(self.alias_clear_button)
         form.addRow("Employee", self.employee_name_label)
         form.addRow("Email", email_row)
+        form.addRow("Timesheet Name", self.timesheet_name_edit)
         form.addRow("Alias To", alias_row)
         form.addRow("", self.alias_status_label)
         form.addRow("", self.suppression_box)
         form.addRow("Notes", self.notes_edit)
         form.addRow("Groups", self.group_list)
+        form.addRow("", self.preview_timesheets_button)
 
         group_box = QGroupBox("Group Membership")
         group_layout = QVBoxLayout(group_box)
@@ -1379,7 +1385,9 @@ class EmployeesPage(QWidget):
         self.alias_target_combo.currentIndexChanged.connect(lambda _idx: self._update_employee_action_states())
         self.alias_target_combo.editTextChanged.connect(lambda _text: self._update_employee_action_states())
         self.email_edit.editingFinished.connect(self._save_current)
+        self.timesheet_name_edit.editingFinished.connect(self._save_current)
         self.save_email_button.clicked.connect(self._save_current)
+        self.preview_timesheets_button.clicked.connect(self._preview_timesheets)
         self.suppression_box.toggled.connect(lambda _checked: self._save_current())
         self.notes_edit.textChanged.connect(self._save_current)
         self.group_list.itemChanged.connect(lambda _item: self._save_current())
@@ -1395,6 +1403,7 @@ class EmployeesPage(QWidget):
         employee_groups: dict[str, list[str]],
         missing_email_suppressions: set[str],
         employee_aliases: dict[str, str],
+        employee_timesheet_names: dict[str, str],
     ) -> None:
         current = self.current_employee()
         self.employee_names = sorted(set(employee_names) | set(hidden_employee_names), key=str.casefold)
@@ -1404,6 +1413,7 @@ class EmployeesPage(QWidget):
         self.employee_groups = {name: list(values) for name, values in employee_groups.items()}
         self.missing_email_suppressions = set(missing_email_suppressions)
         self.employee_aliases = dict(employee_aliases)
+        self.employee_timesheet_names = dict(employee_timesheet_names)
         self._render_employee_list(current)
 
         self.groups_list.blockSignals(True)
@@ -1458,7 +1468,7 @@ class EmployeesPage(QWidget):
     def selected_employees(self) -> list[str]:
         return [str(item.data(Qt.UserRole)) for item in self.employee_list.selectedItems()]
 
-    def snapshot(self) -> tuple[list[str], set[str], dict[str, str], dict[str, str], dict[str, list[str]], set[str]]:
+    def snapshot(self) -> tuple[list[str], set[str], dict[str, str], dict[str, str], dict[str, list[str]], set[str], dict[str, str]]:
         visible = [
             name
             for name in self.employee_names
@@ -1471,6 +1481,7 @@ class EmployeesPage(QWidget):
             dict(self.employee_notes),
             {name: list(values) for name, values in self.employee_groups.items()},
             set(self.missing_email_suppressions),
+            dict(self.employee_timesheet_names),
         )
 
     def _populate_details(self) -> None:
@@ -1479,11 +1490,13 @@ class EmployeesPage(QWidget):
         is_alias = bool(alias_target)
         self.employee_name_label.setText(employee)
         self.email_edit.blockSignals(True)
+        self.timesheet_name_edit.blockSignals(True)
         self.notes_edit.blockSignals(True)
         self.group_list.blockSignals(True)
         self.suppression_box.blockSignals(True)
         self.alias_target_combo.blockSignals(True)
         self.email_edit.setText(self.employee_emails.get(employee, ""))
+        self.timesheet_name_edit.setText(self.employee_timesheet_names.get(employee, ""))
         self.notes_edit.setPlainText(self.employee_notes.get(employee, ""))
         self.suppression_box.setChecked(employee in self.missing_email_suppressions)
         self.alias_target_combo.clear()
@@ -1518,10 +1531,13 @@ class EmployeesPage(QWidget):
             self.group_list.addItem(item)
         self.email_edit.setEnabled(not is_alias)
         self.save_email_button.setEnabled(bool(employee) and not is_alias)
+        self.timesheet_name_edit.setEnabled(not is_alias)
         self.suppression_box.setEnabled(not is_alias)
         self.notes_edit.setEnabled(not is_alias)
         self.group_list.setEnabled(not is_alias)
+        self.preview_timesheets_button.setEnabled(bool(employee))
         self.email_edit.blockSignals(False)
+        self.timesheet_name_edit.blockSignals(False)
         self.notes_edit.blockSignals(False)
         self.group_list.blockSignals(False)
         self.suppression_box.blockSignals(False)
@@ -1533,6 +1549,11 @@ class EmployeesPage(QWidget):
         if not employee or employee in self.employee_aliases:
             return
         self.employee_emails[employee] = self.email_edit.text().strip()
+        timesheet_name = self.timesheet_name_edit.text().strip()
+        if timesheet_name:
+            self.employee_timesheet_names[employee] = timesheet_name
+        else:
+            self.employee_timesheet_names.pop(employee, None)
         self.employee_notes[employee] = self.notes_edit.toPlainText().strip()
         if self.suppression_box.isChecked():
             self.missing_email_suppressions.add(employee)
@@ -1696,6 +1717,11 @@ class EmployeesPage(QWidget):
             return
         self.clearAliasRequested.emit(employee)
 
+    def _preview_timesheets(self) -> None:
+        employee = self.current_employee().strip()
+        if employee:
+            self.previewTimesheetsRequested.emit(employee)
+
     def _selected_alias_target(self) -> str:
         data_value = str(self.alias_target_combo.currentData() or "").strip()
         text_value = self.alias_target_combo.currentText().strip()
@@ -1857,12 +1883,21 @@ class ConfigurationPage(QWidget):
         self.signin_hours_check_box = QCheckBox()
         self.library_root_edit = QLineEdit()
         self.library_root_browse_button = QPushButton("Browse...")
+        self.timesheet_root_edit = QLineEdit()
+        self.timesheet_root_browse_button = QPushButton("Browse...")
+        self.job_note_rules_edit = QPlainTextEdit()
+        self.job_note_rules_edit.setPlaceholderText("PF25154 | $70 per diem\nPF25154 | $86 Travel | 8 | Requires 8+ root PF hours")
         self.version_label = QLabel(f"Application version: {core.APP_VERSION}")
         library_root_row = QWidget()
         library_root_layout = QHBoxLayout(library_root_row)
         library_root_layout.setContentsMargins(0, 0, 0, 0)
         library_root_layout.addWidget(self.library_root_edit, 1)
         library_root_layout.addWidget(self.library_root_browse_button)
+        timesheet_root_row = QWidget()
+        timesheet_root_layout = QHBoxLayout(timesheet_root_row)
+        timesheet_root_layout.setContentsMargins(0, 0, 0, 0)
+        timesheet_root_layout.addWidget(self.timesheet_root_edit, 1)
+        timesheet_root_layout.addWidget(self.timesheet_root_browse_button)
 
         general_box = QGroupBox("General")
         general_form = QFormLayout(general_box)
@@ -1878,6 +1913,7 @@ class ConfigurationPage(QWidget):
         loading_form.addRow("Max parallel workbook parses", self.max_parallel_spin)
         loading_form.addRow("Show partial results while loading", self.partial_preview_box)
         loading_form.addRow("DSS library root folder", library_root_row)
+        loading_form.addRow("Timesheet discovery root folder", timesheet_root_row)
 
         warnings_box = QGroupBox("Warnings")
         warnings_form = QFormLayout(warnings_box)
@@ -1885,6 +1921,17 @@ class ConfigurationPage(QWidget):
         warnings_form.addRow("Check sign-in time against entered hours", self.signin_hours_check_box)
         warnings_form.addRow("Automatically check GitHub for updates on startup", self.auto_update_check_box)
         warnings_form.addRow("Automatically download updates on unmetered Wi-Fi", self.auto_update_download_box)
+
+        self.job_notes_box = QGroupBox("Job Note Rules")
+        job_notes_layout = QVBoxLayout(self.job_notes_box)
+        job_notes_help = QLabel(
+            "One rule per line: `PF | required note text | optional min root-PF hours | optional description`.\n"
+            "Example: `PF25154 | $70 per diem`\n"
+            "Example: `PF25154 | $86 Travel | 8 | Travel note required when 8+ root PF hours are booked`"
+        )
+        job_notes_help.setWordWrap(True)
+        job_notes_layout.addWidget(job_notes_help)
+        job_notes_layout.addWidget(self.job_note_rules_edit)
 
         self.persistence_box = QGroupBox("Persistence")
         persistence_layout = QVBoxLayout(self.persistence_box)
@@ -1976,6 +2023,7 @@ class ConfigurationPage(QWidget):
         layout.addWidget(general_box)
         layout.addWidget(loading_box)
         layout.addWidget(warnings_box)
+        layout.addWidget(self.job_notes_box)
         layout.addWidget(self.persistence_box)
         layout.addWidget(self.appearance_box)
         layout.addWidget(self.apply_button, 0, Qt.AlignLeft)
@@ -1995,10 +2043,13 @@ class ConfigurationPage(QWidget):
         self.auto_update_download_box.toggled.connect(self.settingsChanged.emit)
         self.signin_hours_check_box.toggled.connect(self.settingsChanged.emit)
         self.library_root_edit.editingFinished.connect(self.settingsChanged.emit)
+        self.timesheet_root_edit.editingFinished.connect(self.settingsChanged.emit)
+        self.job_note_rules_edit.textChanged.connect(self.settingsChanged.emit)
         for edit in self._theme_line_edits.values():
             edit.editingFinished.connect(self.settingsChanged.emit)
             edit.textChanged.connect(lambda _text, field=edit: self._apply_theme_edit_preview(field))
         self.library_root_browse_button.clicked.connect(self._browse_library_root)
+        self.timesheet_root_browse_button.clicked.connect(self._browse_timesheet_root)
         self.apply_preset_button.clicked.connect(self._apply_selected_preset)
         self.reset_button.clicked.connect(self.resetRequested.emit)
         self.clear_cache_button.clicked.connect(self.clearCacheRequested.emit)
@@ -2018,6 +2069,12 @@ class ConfigurationPage(QWidget):
         folder = QFileDialog.getExistingDirectory(self, "Choose DSS Library Root Folder", self.library_root_edit.text().strip() or str(Path.home()))
         if folder:
             self.library_root_edit.setText(folder)
+            self.settingsChanged.emit()
+
+    def _browse_timesheet_root(self) -> None:
+        folder = QFileDialog.getExistingDirectory(self, "Choose Timesheet Discovery Root Folder", self.timesheet_root_edit.text().strip() or str(Path.home()))
+        if folder:
+            self.timesheet_root_edit.setText(folder)
             self.settingsChanged.emit()
 
     def _pick_theme_colour(self, attr: str) -> None:
@@ -2070,6 +2127,8 @@ class ConfigurationPage(QWidget):
                     "Hidden employees remain saved until you restore them and survive updates.",
                     "Employee merges remain saved until you change them and survive updates.",
                     "Manual employee email addresses remain saved until cleared and survive updates.",
+                    "Manual employee timesheet names remain saved until you change them and survive updates.",
+                    "PF-specific job note rules remain saved until you change them and survive updates.",
                 ]
             )
         )
@@ -2090,12 +2149,21 @@ class ConfigurationPage(QWidget):
         self.auto_update_download_box.setChecked(settings.auto_download_updates_on_unmetered_wifi)
         self.signin_hours_check_box.setChecked(settings.signin_hours_check_enabled)
         self.library_root_edit.setText(settings.dss_library_root)
+        self.timesheet_root_edit.setText(settings.timesheet_library_root)
         for _label, attr in core.UI_THEME_CONFIG_FIELDS:
             edit = self._theme_line_edits.get(attr)
             if edit is not None:
                 edit.setText(getattr(settings.ui_theme, attr))
                 self._apply_theme_edit_preview(edit)
         self.appearance_preset_combo.setCurrentText(core.ui_theme_preset_name(settings.ui_theme))
+
+    def set_job_note_rules_text(self, text: str) -> None:
+        self.job_note_rules_edit.blockSignals(True)
+        self.job_note_rules_edit.setPlainText(text)
+        self.job_note_rules_edit.blockSignals(False)
+
+    def job_note_rules_text(self) -> str:
+        return self.job_note_rules_edit.toPlainText()
 
     def snapshot(self, current: core.AppSettings) -> core.AppSettings:
         hotkey = core.normalize_quickload_cancel_hotkey(self.quickload_hotkey_combo.currentText().strip())
@@ -2123,6 +2191,7 @@ class ConfigurationPage(QWidget):
             auto_download_updates_on_unmetered_wifi=self.auto_update_download_box.isChecked(),
             signin_hours_check_enabled=self.signin_hours_check_box.isChecked(),
             dss_library_root=self.library_root_edit.text().strip(),
+            timesheet_library_root=self.timesheet_root_edit.text().strip(),
             max_parallel_parse_workers=int(self.max_parallel_spin.value()),
             partial_preview_enabled=self.partial_preview_box.isChecked(),
             ui_theme=core.parse_ui_theme_payload(theme_payload, defaults=current.ui_theme),
@@ -2145,6 +2214,7 @@ class EmailDraftsPage(QWidget):
                     ("employee", "Employee"),
                     ("email", "Email"),
                     ("pf_numbers", "PF#"),
+                    ("notes", "Notes"),
                     ("days", "Rows"),
                     ("st", "ST"),
                     ("ot", "OT"),
@@ -2246,6 +2316,8 @@ class DssQtMainWindow(QMainWindow):
         self.employee_outlook_display_names = core.load_employee_outlook_display_names(self.config_path)
         self.outlook_lookup_cache = core.load_outlook_lookup_cache(self.config_path)
         self.employee_notes = core.load_employee_notes(self.config_path)
+        self.employee_timesheet_names = core.load_employee_timesheet_names(self.config_path)
+        self.job_note_rules = core.load_job_note_rules(self.config_path)
         self.employee_groups = core.load_employee_groups(self.config_path)
         self.missing_email_suppressions = core.load_missing_email_suppressions(self.config_path)
         self.employee_added_names, self.employee_hidden_names = core.load_employee_name_overrides(self.config_path)
@@ -2253,10 +2325,12 @@ class DssQtMainWindow(QMainWindow):
         self.subject_template, self.body_template = core.load_email_templates(self.config_path)
         self.ignored_name_typos = core.load_ignored_name_typos(self.config_path)
         self.suppressed_error_findings = core.load_named_suppressions(self.config_path, "suppressed_error_findings")
+        self.suppressed_timesheet_findings = core.load_named_suppressions(self.config_path, "suppressed_timesheet_findings")
         self.suppressed_parse_warnings = core.load_named_suppressions(self.config_path, "suppressed_parse_warnings")
         self.suppressed_workbook_health = core.load_named_suppressions(self.config_path, "suppressed_workbook_health")
         self._cached_name_typo_warnings: list[core.NameTypoWarning] = []
         self._cached_name_typo_key: str | None = None
+        self._timesheet_parse_cache: dict[tuple[Path, str], tuple[list[core.TimesheetRecord], list[core.TimesheetParseWarning]]] = {}
         self.current_data: core.TrackerData | None = None
         self.source_paths: list[Path] = list(initial_source or [])
         self.load_worker: LoadWorker | None = None
@@ -2455,6 +2529,7 @@ class DssQtMainWindow(QMainWindow):
             (self.summary_tabs, TableSpec("combined_weekly", "Combined Summary Weekly", (("week_start", "Week Start"), ("week_end", "Week End"), ("employee", "Employee"), ("st", "ST"), ("ot", "OT"), ("dt", "DT"), ("total", "Total"), ("expanded", "Expanded Hours")))),
             (self.report_tabs, TableSpec("data_review", "Data Review", (("suppressed", "Suppressed"), ("category", "Category"), ("employee", "Employee"), ("source_file", "Source File"), ("sheet", "Sheet"), ("date", "Date"), ("summary", "Summary"), ("details", "Details")))),
             (None, TableSpec("error_report", "Error Report", (("suppressed", "Suppressed"), ("employee", "Employee"), ("week_start", "Week Start"), ("week_end", "Week End"), ("hour_type", "Rule"), ("limit", "Limit"), ("actual_total", "Actual"), ("delta", "Delta"), ("trigger_date", "Trigger Date"), ("source_files", "Source Files"), ("reason", "Reason"), ("breakdown", "Breakdown")))),
+            (self.report_tabs, TableSpec("timesheet_checks", "Timesheet Checks", (("suppressed", "Suppressed"), ("employee", "Employee"), ("date", "Date"), ("issue", "Issue"), ("timesheet_file", "Timesheet File"), ("dss_source_files", "DSS Source Files"), ("details", "Details")))),
             (None, TableSpec("parse_warnings", "Sheet Parse Warnings", (("suppressed", "Suppressed"), ("source_file", "Source File"), ("sheet", "Sheet"), ("date", "Date"), ("issue", "Issue"), ("details", "Details")))),
             (None, TableSpec("workbook_health", "Workbook Health", (("suppressed", "Suppressed"), ("source_file", "Source File"), ("status", "Status"), ("details", "Details")))),
             (None, TableSpec("name_typos", "Name Typos", (("suppressed", "Suppressed"), ("employee", "Employee"), ("similar_employee", "Suggested Match"), ("similarity", "Similarity"), ("locations", "Locations")))),
@@ -2473,6 +2548,7 @@ class DssQtMainWindow(QMainWindow):
         self.report_tabs.addTab(self.email_drafts_page, "Email Drafts")
 
         self.configuration_page = ConfigurationPage()
+        self.configuration_page.set_job_note_rules_text(core.format_job_note_rules_text(self.job_note_rules))
         self.employees_page = EmployeesPage()
         self.formatting_page = FormattingRulesPage()
         self.settings_tabs.addTab(self.configuration_page, "Configuration")
@@ -2495,6 +2571,7 @@ class DssQtMainWindow(QMainWindow):
         self.employees_page.syncRequested.connect(self.sync_outlook_emails)
         self.employees_page.mergeRequested.connect(self._merge_employee_alias)
         self.employees_page.clearAliasRequested.connect(self._clear_employee_alias)
+        self.employees_page.previewTimesheetsRequested.connect(self.preview_timesheet_discovery)
         self.formatting_page.changed.connect(self._formatting_changed)
         self.configuration_page.settingsChanged.connect(self._settings_changed)
         self.configuration_page.applyRequested.connect(self.apply_settings)
@@ -2888,6 +2965,7 @@ class DssQtMainWindow(QMainWindow):
             self.employee_groups,
             self.missing_email_suppressions,
             self.employee_name_merges,
+            self.employee_timesheet_names,
         )
 
     def _set_update_status(self, text: str) -> None:
@@ -2940,10 +3018,17 @@ class DssQtMainWindow(QMainWindow):
             app.setPalette(_build_forced_qt_palette(theme))
         self.setStyleSheet(_build_qt_chrome_stylesheet(theme))
 
-    def _sync_reports_alert_chrome(self, has_errors: bool, has_parse_warnings: bool, has_name_typos: bool = False, has_workbook_health: bool = False) -> None:
+    def _sync_reports_alert_chrome(
+        self,
+        has_errors: bool,
+        has_parse_warnings: bool,
+        has_name_typos: bool = False,
+        has_workbook_health: bool = False,
+        has_timesheet_checks: bool = False,
+    ) -> None:
         review_index = self.report_tabs.indexOf(self.pages["data_review"])
         reports_index = self.group_tabs.indexOf(self.report_tabs)
-        has_review_items = has_errors or has_parse_warnings or has_name_typos or has_workbook_health
+        has_review_items = has_errors or has_parse_warnings or has_name_typos or has_workbook_health or has_timesheet_checks
         self.report_tabs.setTabText(review_index, "Data Review (!)" if has_review_items else "Data Review")
         self.group_tabs.setTabText(reports_index, "Reports (!)" if has_review_items else "Reports")
 
@@ -2975,12 +3060,14 @@ class DssQtMainWindow(QMainWindow):
             pf_count = len({core.display_pf_number(record.pf_number) for record in self.current_data.daily_records if core.display_pf_number(record.pf_number)})
             unsuppressed_review = (
                 sum(1 for item in core.find_error_findings(self.current_data.daily_records, self._active_profile()) if not self._is_row_suppressed("error_report", core.error_finding_suppression_key(item)))
+                + sum(1 for item in self._build_timesheet_findings(self._daily_records_filtered()) if not self._is_row_suppressed("timesheet_checks", core.timesheet_comparison_suppression_key(item)))
                 + sum(1 for warning in self._current_parse_warnings() if not self._is_row_suppressed("parse_warnings", core.sheet_parse_warning_suppression_key(warning)))
                 + sum(1 for item in self.current_data.workbook_health if not self._is_row_suppressed("workbook_health", core.workbook_health_suppression_key(item)))
                 + sum(1 for warning in self._current_name_typo_warnings() if not self._is_row_suppressed("name_typos", core.typo_warning_key(warning.employee, warning.similar_employee)))
             )
         suppressed_total = (
             len(self.suppressed_error_findings)
+            + len(self.suppressed_timesheet_findings)
             + len(self.suppressed_parse_warnings)
             + len(self.suppressed_workbook_health)
             + len(self.ignored_name_typos)
@@ -3030,9 +3117,125 @@ class DssQtMainWindow(QMainWindow):
             if self._display_employee_name(warning.employee).casefold() != self._display_employee_name(warning.similar_employee).casefold()
         ]
 
+    def _build_timesheet_findings(self, filtered_records: list[core.DailyRecord]) -> list[core.TimesheetComparisonFinding]:
+        root = Path(self.app_settings.timesheet_library_root.strip()).expanduser() if self.app_settings.timesheet_library_root.strip() else None
+        if root is None or not root.exists() or not root.is_dir():
+            return []
+        records_by_employee_week: dict[tuple[str, date], list[core.DailyRecord]] = {}
+        for record in filtered_records:
+            records_by_employee_week.setdefault((record.employee, core.monday_week_start(record.work_date)), []).append(record)
+        if not records_by_employee_week:
+            return []
+
+        discovery_cache: dict[tuple[str, date], list[Path]] = {}
+        findings: list[core.TimesheetComparisonFinding] = []
+        for (employee, week_start), employee_week_records in sorted(records_by_employee_week.items(), key=lambda item: (item[0][1], item[0][0].casefold())):
+            query_name = self.employee_timesheet_names.get(employee, "").strip() or employee
+            cache_key = (query_name.casefold(), week_start)
+            if cache_key not in discovery_cache:
+                matches = core.discover_timesheet_candidates(root, query_name, reference_date=week_start)
+                discovery_cache[cache_key] = list(matches.get("this_week", []))
+                discovery_cache[(query_name.casefold(), week_start, "last_week")] = list(matches.get("last_week", []))
+            candidates = discovery_cache[cache_key]
+            nearby_last_week = discovery_cache.get((query_name.casefold(), week_start, "last_week"), [])
+            dss_source_files = ", ".join(sorted({record.source_file for record in employee_week_records}))
+            week_end = week_start + timedelta(days=6)
+            if not candidates:
+                week_number = core.reference_week_number(week_start)
+                nearby_text = f" | Nearby older candidates: {', '.join(path.name for path in nearby_last_week)}" if nearby_last_week else ""
+                findings.append(
+                    core.TimesheetComparisonFinding(
+                        employee=employee,
+                        work_date=week_start,
+                        week_start=week_start,
+                        week_end=week_end,
+                        issue="Week File Not Detected",
+                        summary=f"Week {week_number} file not detected for {employee}.",
+                        details=f"Search name: {query_name} | Expected week starting {week_start.isoformat()} | DSS source files: {dss_source_files}{nearby_text}",
+                        dss_source_files=dss_source_files,
+                    )
+                )
+                continue
+            if len(candidates) > 1:
+                findings.append(
+                    core.TimesheetComparisonFinding(
+                        employee=employee,
+                        work_date=week_start,
+                        week_start=week_start,
+                        week_end=week_end,
+                        issue="Multiple Timesheet Candidates",
+                        summary=f"Found {len(candidates)} candidate timesheets for the week of {week_start.isoformat()}; using the best match.",
+                        details="\n".join(str(path) for path in candidates),
+                        timesheet_file=candidates[0].name,
+                        dss_source_files=dss_source_files,
+                    )
+                )
+            selected_path = candidates[0]
+            parse_cache_key = (selected_path, employee.casefold())
+            cached = self._timesheet_parse_cache.get(parse_cache_key)
+            if cached is None:
+                cached = core.load_timesheet_records(selected_path, employee_name=employee)
+                self._timesheet_parse_cache[parse_cache_key] = cached
+            parsed_records, parse_warnings = cached
+            relevant_records = [
+                record
+                for record in parsed_records
+                if core.monday_week_start(record.work_date) == week_start
+                and record.employee.strip().casefold() == employee.casefold()
+            ]
+            if parse_warnings and not relevant_records:
+                for warning in parse_warnings:
+                    findings.append(
+                        core.TimesheetComparisonFinding(
+                            employee=employee,
+                            work_date=week_start,
+                            week_start=week_start,
+                            week_end=week_end,
+                            issue="Timesheet Parse Warning",
+                            summary=f"Could not parse usable rows from {selected_path.name} for the week of {week_start.isoformat()}.",
+                            details=f"{warning.source_sheet or '[sheet]'} row {warning.row_number}: {warning.details}",
+                            timesheet_file=selected_path.name,
+                            dss_source_files=dss_source_files,
+                        )
+                    )
+            if not relevant_records:
+                findings.append(
+                    core.TimesheetComparisonFinding(
+                        employee=employee,
+                        work_date=week_start,
+                        week_start=week_start,
+                        week_end=week_end,
+                        issue="No Parsed Timesheet Rows",
+                        summary=f"No timesheet rows were parsed for {employee} in the week of {week_start.isoformat()}.",
+                        details=f"Timesheet file: {selected_path}",
+                        timesheet_file=selected_path.name,
+                        dss_source_files=dss_source_files,
+                    )
+                )
+                continue
+            findings.extend(
+                core.build_timesheet_comparison_findings(
+                    employee,
+                    employee_week_records,
+                    relevant_records,
+                    timesheet_file=selected_path.name,
+                )
+            )
+            findings.extend(
+                core.build_timesheet_required_note_findings(
+                    employee,
+                    relevant_records,
+                    self.job_note_rules,
+                    timesheet_file=selected_path.name,
+                )
+            )
+        return findings
+
     def _suppression_set_for_table(self, table_id: str) -> set[str]:
         if table_id == "error_report":
             return self.suppressed_error_findings
+        if table_id == "timesheet_checks":
+            return self.suppressed_timesheet_findings
         if table_id == "parse_warnings":
             return self.suppressed_parse_warnings
         if table_id == "workbook_health":
@@ -3048,6 +3251,8 @@ class DssQtMainWindow(QMainWindow):
     def _persist_suppression_set(self, table_id: str) -> None:
         if table_id == "error_report":
             core.save_named_suppressions(self.config_path, "suppressed_error_findings", self.suppressed_error_findings)
+        elif table_id == "timesheet_checks":
+            core.save_named_suppressions(self.config_path, "suppressed_timesheet_findings", self.suppressed_timesheet_findings)
         elif table_id == "parse_warnings":
             core.save_named_suppressions(self.config_path, "suppressed_parse_warnings", self.suppressed_parse_warnings)
         elif table_id == "workbook_health":
@@ -3148,7 +3353,7 @@ class DssQtMainWindow(QMainWindow):
                 page.set_rows([])
             self.email_drafts_page.preview_table.set_rows([])
             self.email_drafts_page.set_weeks([])
-            self._sync_reports_alert_chrome(False, False, False)
+            self._sync_reports_alert_chrome(False, False, False, False, False)
             return
 
         filtered_records = self._daily_records_filtered()
@@ -3170,6 +3375,7 @@ class DssQtMainWindow(QMainWindow):
         week_totals = core.build_week_totals(combined_weekly)
         pf_totals = core.build_pf_totals(filtered_records)
         findings = core.build_error_findings(filtered_records, profile)
+        timesheet_findings = self._build_timesheet_findings(filtered_records)
         name_typo_warnings = self._current_name_typo_warnings()
         week_starts = sorted({record.week_start for record in combined_weekly}, reverse=True)
 
@@ -3362,6 +3568,46 @@ class DssQtMainWindow(QMainWindow):
                 }
             )
         self.pages["error_report"].set_rows(error_rows)
+        timesheet_rows: list[dict[str, Any]] = []
+        for item in sorted(timesheet_findings, key=lambda finding: (finding.work_date, finding.employee, finding.issue), reverse=True):
+            suppression_key = core.timesheet_comparison_suppression_key(item)
+            suppressed = self._is_row_suppressed("timesheet_checks", suppression_key)
+            if suppressed and not self._show_suppressed_report_rows["data_review"]:
+                continue
+            tags = ["alert"]
+            if suppressed:
+                tags.append("suppressed")
+            timesheet_rows.append(
+                {
+                    "suppressed": suppressed,
+                    "employee": item.employee,
+                    "date": item.work_date.isoformat(),
+                    "issue": item.issue,
+                    "timesheet_file": item.timesheet_file,
+                    "dss_source_files": item.dss_source_files,
+                    "details": item.details,
+                    "__finding__": item,
+                    "__suppression_key__": suppression_key,
+                    "__tags__": tuple(tags),
+                }
+            )
+            data_review_rows.append(
+                {
+                    "suppressed": suppressed,
+                    "category": "Timesheet Check",
+                    "employee": item.employee,
+                    "source_file": item.timesheet_file or item.dss_source_files,
+                    "sheet": "",
+                    "date": item.work_date.isoformat(),
+                    "summary": item.summary,
+                    "details": item.details,
+                    "__finding__": item,
+                    "__suppression_key__": suppression_key,
+                    "__tags__": tuple(tags),
+                    "__review_table_id__": "timesheet_checks",
+                }
+            )
+        self.pages["timesheet_checks"].set_rows(timesheet_rows)
         filtered_source_files = {record.source_file for record in filtered_records}
         active_parse_warnings = self._current_parse_warnings()
         parse_warning_rows: list[dict[str, Any]] = []
@@ -3495,6 +3741,11 @@ class DssQtMainWindow(QMainWindow):
         ])
         self._refresh_email_preview(filtered_records)
         unsuppressed_error_count = sum(1 for item in findings if not self._is_row_suppressed("error_report", core.error_finding_suppression_key(item)))
+        unsuppressed_timesheet_count = sum(
+            1
+            for item in timesheet_findings
+            if not self._is_row_suppressed("timesheet_checks", core.timesheet_comparison_suppression_key(item))
+        )
         unsuppressed_parse_count = sum(
             1
             for warning in active_parse_warnings
@@ -3517,6 +3768,7 @@ class DssQtMainWindow(QMainWindow):
             bool(unsuppressed_parse_count),
             bool(unsuppressed_typo_count),
             bool(unsuppressed_workbook_health_count),
+            bool(unsuppressed_timesheet_count),
         )
         self._refresh_overview_labels()
 
@@ -3525,7 +3777,8 @@ class DssQtMainWindow(QMainWindow):
         if week_start is None:
             self.email_drafts_page.preview_table.set_rows([])
             return
-        requests = core.build_email_draft_requests(filtered_records, self.employee_emails, week_start)
+        notes_by_employee = self._build_email_notes_by_employee(filtered_records, week_start)
+        requests = core.build_email_draft_requests(filtered_records, self.employee_emails, week_start, notes_by_employee)
         rows: list[dict[str, Any]] = []
         for request in requests:
             st_total = round(sum(record.st for record in request.records), 2)
@@ -3540,6 +3793,7 @@ class DssQtMainWindow(QMainWindow):
                     "employee": request.employee,
                     "email": display_email,
                     "pf_numbers": pf_numbers or core.display_pf_number(""),
+                    "notes": " | ".join(request.notes),
                     "days": str(len(request.records)),
                     "st": core.fmt_hours(st_total),
                     "ot": core.fmt_hours(ot_total),
@@ -3550,6 +3804,25 @@ class DssQtMainWindow(QMainWindow):
                 }
             )
         self.email_drafts_page.preview_table.set_rows(rows)
+
+    def _build_email_notes_by_employee(
+        self,
+        filtered_records: list[core.DailyRecord],
+        week_start: date,
+    ) -> dict[str, list[str]]:
+        notes_by_employee: dict[str, list[str]] = {}
+        grouped_records: dict[str, list[core.DailyRecord]] = {}
+        for record in core.records_for_week(filtered_records, week_start):
+            grouped_records.setdefault(record.employee, []).append(record)
+        for employee, employee_records in grouped_records.items():
+            note_lines = core.build_email_note_lines(
+                employee_records,
+                employee_note=self.employee_notes.get(employee, ""),
+                job_note_rules=self.job_note_rules,
+            )
+            if note_lines:
+                notes_by_employee[employee] = note_lines
+        return notes_by_employee
 
     def _save_table_layout(self, table_id: str, visible_columns: list[str], widths: dict[str, int], sort_column: str, sort_descending: bool) -> None:
         core.save_table_layout(
@@ -3562,7 +3835,7 @@ class DssQtMainWindow(QMainWindow):
         )
 
     def _employees_changed(self) -> None:
-        employee_names, hidden_names, emails, notes, groups, suppressions = self.employees_page.snapshot()
+        employee_names, hidden_names, emails, notes, groups, suppressions, timesheet_names = self.employees_page.snapshot()
         managed = set(employee_names)
         discovered = {self._display_employee_name(name) for name in (self.current_data.employee_names if self.current_data else [])}
         self.employee_added_names = managed - discovered
@@ -3571,9 +3844,11 @@ class DssQtMainWindow(QMainWindow):
         self.employee_notes = notes
         self.employee_groups = groups
         self.missing_email_suppressions = suppressions
+        self.employee_timesheet_names = timesheet_names
         core.save_employee_name_overrides(self.config_path, self.employee_added_names, self.employee_hidden_names)
         core.save_employee_emails(self.config_path, self.employee_emails, self.employee_outlook_display_names)
         core.save_employee_notes(self.config_path, self.employee_notes)
+        core.save_employee_timesheet_names(self.config_path, self.employee_timesheet_names)
         core.save_employee_groups(self.config_path, self.employee_groups)
         core.save_missing_email_suppressions(self.config_path, self.missing_email_suppressions)
         self._invalidate_name_typo_cache()
@@ -3591,10 +3866,12 @@ class DssQtMainWindow(QMainWindow):
     def _settings_changed(self) -> None:
         try:
             self.app_settings = self.configuration_page.snapshot(self.app_settings)
+            self.job_note_rules = core.parse_job_note_rules_text(self.configuration_page.job_note_rules_text())
         except ValueError as exc:
             self._set_update_status(f"Settings error: {exc}")
             return
         core.save_app_settings(self.config_path, self.app_settings)
+        core.save_job_note_rules(self.config_path, self.job_note_rules)
         core.save_last_open_dss_paths(self.config_path, self.source_paths)
         self._sync_data_tabs_visibility()
         self.hash_poll_timer.setInterval(max(1, self.app_settings.hash_poll_minutes) * 60 * 1000)
@@ -3647,6 +3924,17 @@ class DssQtMainWindow(QMainWindow):
         root = Path(raw).expanduser()
         if not root.exists() or not root.is_dir():
             QMessageBox.warning(self, "Quick DSS Picker", f"The configured DSS library root does not exist:\n{root}")
+            return None
+        return root.resolve()
+
+    def _configured_timesheet_root(self) -> Path | None:
+        raw = self.app_settings.timesheet_library_root.strip()
+        if not raw:
+            QMessageBox.information(self, "Timesheet Discovery", "Set the timesheet discovery root folder first in Settings -> Configuration.")
+            return None
+        root = Path(raw).expanduser()
+        if not root.exists() or not root.is_dir():
+            QMessageBox.warning(self, "Timesheet Discovery", f"The configured timesheet discovery root does not exist:\n{root}")
             return None
         return root.resolve()
 
@@ -4227,7 +4515,9 @@ class DssQtMainWindow(QMainWindow):
         if not self.current_data or week_start is None:
             QMessageBox.information(self, "Email Drafts", "Load DSS data and choose a week first.")
             return
-        requests = core.build_email_draft_requests(self._current_filtered_records(), self.employee_emails, week_start)
+        filtered_records = self._current_filtered_records()
+        notes_by_employee = self._build_email_notes_by_employee(filtered_records, week_start)
+        requests = core.build_email_draft_requests(filtered_records, self.employee_emails, week_start, notes_by_employee)
         selected_preview_rows = self.email_drafts_page.preview_table.selected_rows()
         selected_employees = {row.get("employee", "") for row in selected_preview_rows}
         if selected_employees:
@@ -4313,16 +4603,20 @@ class DssQtMainWindow(QMainWindow):
         self.employee_outlook_display_names = {}
         self.outlook_lookup_cache = {}
         self.employee_notes = {}
+        self.employee_timesheet_names = {}
         self.employee_groups = {}
         self.missing_email_suppressions = set()
         self.employee_added_names = set()
         self.employee_hidden_names = set()
         self.employee_name_merges = {}
+        self.job_note_rules = []
         self.subject_template, self.body_template = core.load_email_templates(self.config_path)
         self.ignored_name_typos = set()
         self.suppressed_error_findings = set()
+        self.suppressed_timesheet_findings = set()
         self.suppressed_parse_warnings = set()
         self.suppressed_workbook_health = set()
+        self._timesheet_parse_cache = {}
         self._invalidate_name_typo_cache()
         self.status_label.setText("No DSS workbooks loaded")
         self.progress_bar.setValue(0)
@@ -4335,9 +4629,12 @@ class DssQtMainWindow(QMainWindow):
         self.app_settings = core.AppSettings()
         self.profiles = core.default_formatting_profiles()
         self.current_profile_name = core.DEFAULT_PROFILE_NAME
+        self.job_note_rules = []
         core.save_app_settings(self.config_path, self.app_settings)
         core.save_formatting_profiles(self.config_path, self.profiles, self.current_profile_name)
+        core.save_job_note_rules(self.config_path, self.job_note_rules)
         self.configuration_page.set_settings(self.app_settings)
+        self.configuration_page.set_job_note_rules_text("")
         self.formatting_page.set_data(self.profiles, self.current_profile_name)
         self._sync_data_tabs_visibility()
         self.hash_poll_timer.setInterval(max(1, self.app_settings.hash_poll_minutes) * 60 * 1000)
@@ -4375,11 +4672,13 @@ class DssQtMainWindow(QMainWindow):
                 "auto_download_updates_on_unmetered_wifi": self.app_settings.auto_download_updates_on_unmetered_wifi,
                 "max_parallel_parse_workers": self.app_settings.max_parallel_parse_workers,
                 "partial_preview_enabled": self.app_settings.partial_preview_enabled,
+                "timesheet_library_root": self.app_settings.timesheet_library_root,
                 "ui_theme": core.asdict(self.app_settings.ui_theme),
             },
             "formatting_profiles": sorted(self.profiles),
             "current_profile_name": self.current_profile_name,
             "employee_email_count": len([email for email in self.employee_emails.values() if email.strip()]),
+            "employee_timesheet_name_count": len([name for name in self.employee_timesheet_names.values() if name.strip()]),
             "missing_email_suppression_count": len(self.missing_email_suppressions),
             "employee_group_count": len(self.employee_groups),
             "cache_file_count": len(list(self.cache_dir.glob("*.json"))),
@@ -4479,6 +4778,29 @@ class DssQtMainWindow(QMainWindow):
             lines.append("")
         QMessageBox.information(self, "Loaded DSS Status", "\n".join(lines).rstrip())
 
+    def preview_timesheet_discovery(self, employee: str) -> None:
+        employee_name = employee.strip()
+        if not employee_name:
+            return
+        root = self._configured_timesheet_root()
+        if root is None:
+            return
+        query_name = self.employee_timesheet_names.get(employee_name, "").strip() or employee_name
+        matches = core.discover_timesheet_candidates(root, query_name)
+        this_week = matches.get("this_week", [])
+        last_week = matches.get("last_week", [])
+        lines = [
+            f"Employee: {employee_name}",
+            f"Timesheet discovery name: {query_name}",
+            f"Root: {root}",
+            "",
+            "This week:",
+        ]
+        lines.extend([str(path) for path in this_week] or ["No candidates found."])
+        lines.extend(["", "Last week:"])
+        lines.extend([str(path) for path in last_week] or ["No candidates found."])
+        QMessageBox.information(self, "Timesheet Discovery Preview", "\n".join(lines))
+
     def _persist_ignored_name_typos(self) -> None:
         core.save_ignored_name_typos(self.config_path, self.ignored_name_typos)
 
@@ -4508,6 +4830,8 @@ class DssQtMainWindow(QMainWindow):
                 self.outlook_lookup_cache[resolved_target] = source_cache
         if not self.employee_notes.get(resolved_target, "").strip() and self.employee_notes.get(source, "").strip():
             self.employee_notes[resolved_target] = self.employee_notes[source]
+        if not self.employee_timesheet_names.get(resolved_target, "").strip() and self.employee_timesheet_names.get(source, "").strip():
+            self.employee_timesheet_names[resolved_target] = self.employee_timesheet_names[source]
         if source in self.missing_email_suppressions:
             self.missing_email_suppressions.add(resolved_target)
             self.missing_email_suppressions.discard(source)
@@ -4524,12 +4848,14 @@ class DssQtMainWindow(QMainWindow):
         self.employee_outlook_display_names.pop(source, None)
         self.outlook_lookup_cache.pop(source, None)
         self.employee_notes.pop(source, None)
+        self.employee_timesheet_names.pop(source, None)
         self.ignored_name_typos.add(core.typo_warning_key(source, resolved_target))
         self._persist_employee_name_merges()
         core.save_employee_name_overrides(self.config_path, self.employee_added_names, self.employee_hidden_names)
         core.save_employee_emails(self.config_path, self.employee_emails, self.employee_outlook_display_names)
         core.save_outlook_lookup_cache(self.config_path, self.outlook_lookup_cache)
         core.save_employee_notes(self.config_path, self.employee_notes)
+        core.save_employee_timesheet_names(self.config_path, self.employee_timesheet_names)
         core.save_employee_groups(self.config_path, self.employee_groups)
         core.save_missing_email_suppressions(self.config_path, self.missing_email_suppressions)
         self._persist_ignored_name_typos()

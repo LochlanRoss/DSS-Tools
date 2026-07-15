@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import csv
 import difflib
 import html
 import hashlib
@@ -27,7 +28,7 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Mapping, Sequence
 
 import tkinter as tk
 from tkinter import colorchooser, filedialog, font as tkfont, messagebox, simpledialog, ttk
@@ -769,6 +770,72 @@ class ErrorFinding:
 
 
 @dataclass(frozen=True)
+class TimesheetRecord:
+    source_path: Path
+    source_file: str
+    source_sheet: str
+    source_row: int
+    work_date: date
+    employee: str
+    job_number: str = ""
+    pf_number: str = ""
+    location: str = ""
+    notes: str = ""
+    st: float | None = None
+    ot: float | None = None
+    dt: float | None = None
+    vac: float | None = None
+    well: float | None = None
+    stat: float | None = None
+    total: float | None = None
+
+    @property
+    def total_hours(self) -> float:
+        if self.total is not None:
+            return round(self.total, 2)
+        return round((self.st or 0.0) + (self.ot or 0.0) + (self.dt or 0.0) + (self.vac or 0.0) + (self.well or 0.0) + (self.stat or 0.0), 2)
+
+    @property
+    def dss_comparable_hours(self) -> float:
+        if self.total is not None and self.st is None and self.ot is None and self.dt is None:
+            return round(self.total - self.non_dss_hours, 2)
+        return round((self.st or 0.0) + (self.ot or 0.0) + (self.dt or 0.0), 2)
+
+    @property
+    def non_dss_hours(self) -> float:
+        return round((self.vac or 0.0) + (self.well or 0.0) + (self.stat or 0.0), 2)
+
+
+@dataclass(frozen=True)
+class TimesheetParseWarning:
+    source_file: str
+    source_sheet: str
+    row_number: int
+    details: str
+
+
+@dataclass(frozen=True)
+class TimesheetComparisonFinding:
+    employee: str
+    work_date: date
+    week_start: date
+    week_end: date
+    issue: str
+    summary: str
+    details: str
+    timesheet_file: str = ""
+    dss_source_files: str = ""
+
+
+@dataclass(frozen=True)
+class JobNoteRule:
+    pf_number: str
+    required_text: str
+    min_root_pf_hours: float | None = None
+    description: str = ""
+
+
+@dataclass(frozen=True)
 class OutlookResolution:
     email: str
     display_name: str
@@ -797,6 +864,7 @@ class EmailDraftRequest:
     week_start: date
     week_end: date
     records: list[DailyRecord]
+    notes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1139,6 +1207,7 @@ class AppSettings:
     auto_download_updates_on_unmetered_wifi: bool = True
     signin_hours_check_enabled: bool = True
     dss_library_root: str = ""
+    timesheet_library_root: str = ""
     max_parallel_parse_workers: int = MAX_PARALLEL_PARSE_WORKERS
     partial_preview_enabled: bool = DEFAULT_PARTIAL_PREVIEW_ENABLED
     ui_theme: UiThemeColors = field(default_factory=lambda: DEFAULT_UI_THEME)
@@ -1214,6 +1283,21 @@ def workbook_health_suppression_key(item: WorkbookHealthItem) -> str:
             "source_file": item.source_file,
             "status": item.status,
             "details": item.details,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def timesheet_comparison_suppression_key(finding: TimesheetComparisonFinding) -> str:
+    return json.dumps(
+        {
+            "employee": finding.employee,
+            "work_date": finding.work_date.isoformat(),
+            "issue": finding.issue,
+            "summary": finding.summary,
+            "timesheet_file": finding.timesheet_file,
+            "dss_source_files": finding.dss_source_files,
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -2044,6 +2128,89 @@ def save_employee_notes(config_path: Path, employee_notes: dict[str, str]) -> No
     config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+def load_employee_timesheet_names(config_path: Path) -> dict[str, str]:
+    payload = read_config_payload(config_path)
+    raw_map = payload.get("employee_timesheet_names", {})
+    if not isinstance(raw_map, dict):
+        return {}
+    names: dict[str, str] = {}
+    for name, timesheet_name in raw_map.items():
+        employee = str(name).strip()
+        value = str(timesheet_name).strip()
+        if employee and value:
+            names[employee] = value
+    return names
+
+
+def save_employee_timesheet_names(config_path: Path, employee_timesheet_names: dict[str, str]) -> None:
+    payload = read_config_payload(config_path)
+    payload["employee_timesheet_names"] = {
+        name: value.strip()
+        for name, value in sorted(employee_timesheet_names.items(), key=lambda item: item[0].lower())
+        if name.strip() and value.strip()
+    }
+    config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def parse_job_note_rules_text(raw_text: str) -> list[JobNoteRule]:
+    rules: list[JobNoteRule] = []
+    for line_number, raw_line in enumerate(raw_text.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [part.strip() for part in line.split("|")]
+        if len(parts) < 2:
+            raise ValueError(f"Job note rule line {line_number} must be `PF | required note text | optional min hours | optional description`.")
+        pf_number = normalize_timesheet_job_number(parts[0])
+        required_text = parts[1]
+        if not pf_number or not required_text:
+            raise ValueError(f"Job note rule line {line_number} must include both a PF and required note text.")
+        min_root_pf_hours: float | None = None
+        if len(parts) >= 3 and parts[2]:
+            min_root_pf_hours = float(parts[2])
+        description = parts[3] if len(parts) >= 4 else ""
+        rules.append(
+            JobNoteRule(
+                pf_number=pf_number,
+                required_text=required_text,
+                min_root_pf_hours=min_root_pf_hours,
+                description=description,
+            )
+        )
+    return rules
+
+
+def format_job_note_rules_text(rules: Iterable[JobNoteRule]) -> str:
+    lines: list[str] = []
+    for rule in rules:
+        parts = [rule.pf_number, rule.required_text]
+        if rule.min_root_pf_hours is not None:
+            parts.append(fmt_hours(rule.min_root_pf_hours))
+        elif rule.description:
+            parts.append("")
+        if rule.description:
+            parts.append(rule.description)
+        lines.append(" | ".join(parts))
+    return "\n".join(lines)
+
+
+def load_job_note_rules(config_path: Path) -> list[JobNoteRule]:
+    payload = read_config_payload(config_path)
+    raw_text = str(payload.get("job_note_rules_text", "") or "")
+    if not raw_text.strip():
+        return []
+    try:
+        return parse_job_note_rules_text(raw_text)
+    except ValueError:
+        return []
+
+
+def save_job_note_rules(config_path: Path, rules: Iterable[JobNoteRule]) -> None:
+    payload = read_config_payload(config_path)
+    payload["job_note_rules_text"] = format_job_note_rules_text(rules)
+    config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
 def load_missing_email_suppressions(config_path: Path) -> set[str]:
     payload = read_config_payload(config_path)
     return _load_suppression_values(payload.get("missing_email_suppressions", []))
@@ -2088,6 +2255,7 @@ def default_email_body_template() -> str:
         "<p>Here are your DSS hours for the week of {week_start} to {week_end}. "
         "Please use these details to complete your timesheet.</p>\n"
         "{hours_table}\n"
+        "{notes_html}\n"
         "<p>Thanks.</p>"
     )
 
@@ -2170,6 +2338,7 @@ def load_app_settings(config_path: Path) -> AppSettings:
         auto_download_updates_on_unmetered_wifi=bool(raw_settings.get("auto_download_updates_on_unmetered_wifi", True)),
         signin_hours_check_enabled=bool(raw_settings.get("signin_hours_check_enabled", True)),
         dss_library_root=str(raw_settings.get("dss_library_root", "")).strip(),
+        timesheet_library_root=str(raw_settings.get("timesheet_library_root", "")).strip(),
         max_parallel_parse_workers=max_parallel_parse_workers,
         partial_preview_enabled=bool(raw_settings.get("partial_preview_enabled", DEFAULT_PARTIAL_PREVIEW_ENABLED)),
         ui_theme=parse_ui_theme_payload(raw_settings.get("ui_theme")),
@@ -2189,6 +2358,7 @@ def save_app_settings(config_path: Path, settings: AppSettings) -> None:
         "auto_download_updates_on_unmetered_wifi": settings.auto_download_updates_on_unmetered_wifi,
         "signin_hours_check_enabled": settings.signin_hours_check_enabled,
         "dss_library_root": settings.dss_library_root,
+        "timesheet_library_root": settings.timesheet_library_root,
         "max_parallel_parse_workers": settings.max_parallel_parse_workers,
         "partial_preview_enabled": settings.partial_preview_enabled,
         "ui_theme": asdict(settings.ui_theme),
@@ -2854,6 +3024,585 @@ def normalize_person_name(name: str) -> str:
     return " ".join(name.split()).casefold()
 
 
+TIMESHEET_DISCOVERY_EXTENSIONS = {".xlsx", ".xlsm", ".xls", ".csv"}
+TIMESHEET_HEADER_ALIASES: dict[str, tuple[str, ...]] = {
+    "date": ("date", "work date", "day", "shift date"),
+    "employee": ("employee", "employee name", "name", "worker"),
+    "job_number": ("job", "job number", "ja tech job number", "job #", "pf", "pf number", "dash number"),
+    "location": ("customer location", "customer & location", "location", "customer"),
+    "notes": ("notes", "note", "comments", "comment"),
+    "st": ("st", "straight time", "straight time hours", "regular", "regular hours", "reg"),
+    "ot": ("ot", "o t", "overtime", "overtime hours", "ot hours"),
+    "dt": ("dt", "d t", "double time", "doubletime", "double time hours", "dt hours"),
+    "vac": ("vac", "vacation"),
+    "well": ("well",),
+    "stat": ("stat", "stat holiday", "holiday"),
+    "total": ("hours", "total", "total hours", "hours total"),
+}
+
+
+def _timesheet_name_tokens(name: str) -> list[str]:
+    normalized = normalize_person_name(name)
+    tokens = re.findall(r"[a-z0-9]+", normalized)
+    return [token for token in tokens if token]
+
+
+def _timesheet_candidate_score(path: Path, name_tokens: list[str]) -> int:
+    haystack = normalize_person_name(f"{path.stem} {path.parent.name}")
+    if not haystack:
+        return 0
+    score = 0
+    for token in name_tokens:
+        if token in haystack:
+            score += 2 if len(token) > 2 else 1
+    joined = " ".join(name_tokens)
+    if joined and joined in haystack:
+        score += max(2, len(name_tokens))
+    return score
+
+
+def _timesheet_candidate_date(path: Path) -> date:
+    stem = path.stem
+    for pattern in (
+        r"(20\d{2})[-_](\d{2})[-_](\d{2})",
+        r"(20\d{2})(\d{2})(\d{2})",
+    ):
+        match = re.search(pattern, stem)
+        if match:
+            try:
+                return date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+            except ValueError:
+                continue
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime).date()
+    except OSError:
+        return date.min
+
+
+def discover_timesheet_candidates(
+    root: Path,
+    employee_name: str,
+    *,
+    reference_date: date | None = None,
+    limit_per_week: int = 5,
+) -> dict[str, list[Path]]:
+    resolved_root = Path(root).expanduser()
+    if not resolved_root.exists() or not resolved_root.is_dir():
+        return {"this_week": [], "last_week": []}
+    name_tokens = _timesheet_name_tokens(employee_name)
+    if not name_tokens:
+        return {"this_week": [], "last_week": []}
+    target_date = reference_date or date.today()
+    this_week_start = monday_week_start(target_date)
+    last_week_start = this_week_start - timedelta(days=7)
+    buckets: dict[str, list[tuple[int, date, Path]]] = {"this_week": [], "last_week": []}
+    for path in resolved_root.rglob("*"):
+        if not path.is_file() or path.suffix.lower() not in TIMESHEET_DISCOVERY_EXTENSIONS:
+            continue
+        score = _timesheet_candidate_score(path, name_tokens)
+        if score <= 0:
+            continue
+        candidate_date = _timesheet_candidate_date(path)
+        candidate_week = monday_week_start(candidate_date) if candidate_date != date.min else None
+        if candidate_week == this_week_start:
+            buckets["this_week"].append((score, candidate_date, path))
+        elif candidate_week == last_week_start:
+            buckets["last_week"].append((score, candidate_date, path))
+    results: dict[str, list[Path]] = {}
+    for key, values in buckets.items():
+        ordered = sorted(values, key=lambda item: (item[0], item[1], str(item[2]).casefold()), reverse=True)
+        results[key] = [path for _score, _candidate_date, path in ordered[:limit_per_week]]
+    return results
+
+
+def _normalize_timesheet_header(value: object) -> str:
+    text = str(value or "").strip().casefold()
+    return re.sub(r"[^a-z0-9]+", " ", text).strip()
+
+
+def _find_timesheet_column_indexes(rows: list[list[object]]) -> tuple[int, dict[str, int]] | None:
+    required = {"date", "employee"}
+    optional = {"st", "ot", "dt", "vac", "well", "stat", "total"}
+    for row_index, row in enumerate(rows[:40]):
+        indexes: dict[str, int] = {}
+        for col_index, cell in enumerate(row):
+            normalized = _normalize_timesheet_header(cell)
+            if not normalized:
+                continue
+            for field, aliases in TIMESHEET_HEADER_ALIASES.items():
+                if field in indexes:
+                    continue
+                if normalized in aliases:
+                    indexes[field] = col_index
+                    break
+        if required.issubset(indexes) and optional.intersection(indexes):
+            return row_index, indexes
+    return None
+
+
+def _find_single_employee_timesheet_columns(rows: list[list[object]]) -> tuple[int, dict[str, int]] | None:
+    required = {"date"}
+    optional = {"st", "ot", "dt", "vac", "well", "stat", "total"}
+    for row_index, row in enumerate(rows[:40]):
+        indexes: dict[str, int] = {}
+        for col_index, cell in enumerate(row):
+            normalized = _normalize_timesheet_header(cell)
+            if not normalized:
+                continue
+            for field, aliases in TIMESHEET_HEADER_ALIASES.items():
+                if field == "employee" or field in indexes:
+                    continue
+                if normalized in aliases:
+                    indexes[field] = col_index
+                    break
+        if required.issubset(indexes) and optional.intersection(indexes):
+            return row_index, indexes
+    return None
+
+
+def _parse_timesheet_date_value(value: object) -> date | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%m/%d/%Y", "%m-%d-%Y", "%d-%b-%Y", "%d-%B-%Y", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    iso_match = re.search(r"(20\d{2})[-/](\d{1,2})[-/](\d{1,2})", text)
+    if iso_match:
+        try:
+            return date(int(iso_match.group(1)), int(iso_match.group(2)), int(iso_match.group(3)))
+        except ValueError:
+            return None
+    return None
+
+
+def _parse_timesheet_hours_value(value: object) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return round(float(value), 2)
+    text = str(value).strip()
+    if not text:
+        return None
+    clock_match = re.fullmatch(r"(\d{1,3}):(\d{1,2})", text)
+    if clock_match:
+        hours = int(clock_match.group(1))
+        minutes = int(clock_match.group(2))
+        return round(hours + (minutes / 60.0), 2)
+    normalized = text.replace(",", "")
+    try:
+        return round(float(normalized), 2)
+    except ValueError:
+        return None
+
+
+def normalize_timesheet_job_number(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    normalized = text.replace("\n", " ").replace("\r", " ").strip()
+    match = re.search(r"\b(?:PF)?(\d{5,})(?:\s*-\s*(\d+))?\b", normalized, re.IGNORECASE)
+    if match:
+        base = f"PF{match.group(1)}"
+        phase = str(match.group(2) or "").strip()
+        return f"{base}-{phase}" if phase else base
+    extracted = extract_pf_identifier(normalized)
+    if extracted and extracted != Path(normalized).stem.strip():
+        return extracted
+    return normalized
+
+
+def _iter_timesheet_table_records(
+    source_path: Path,
+    source_sheet: str,
+    rows: list[list[object]],
+    *,
+    employee_name: str | None = None,
+) -> tuple[list[TimesheetRecord], list[TimesheetParseWarning]]:
+    layout = _find_timesheet_column_indexes(rows)
+    if layout is None and employee_name:
+        single_employee_layout = _find_single_employee_timesheet_columns(rows)
+        if single_employee_layout is not None:
+            header_row_index, columns = single_employee_layout
+            columns = dict(columns)
+            columns["employee"] = -1
+            layout = (header_row_index, columns)
+    if layout is None:
+        return [], [
+            TimesheetParseWarning(
+                source_file=source_path.name,
+                source_sheet=source_sheet,
+                row_number=0,
+                details="Could not find a recognizable timesheet header row with date, employee, and hour columns.",
+            )
+        ]
+    header_row_index, columns = layout
+    normalized_target = normalize_person_name(employee_name or "")
+    records: list[TimesheetRecord] = []
+    warnings: list[TimesheetParseWarning] = []
+    for row_offset, row in enumerate(rows[header_row_index + 1 :], start=header_row_index + 2):
+        row_values = [row[idx] if idx < len(row) else None for idx in range(max(columns.values(), default=-1) + 1)]
+        if not any(str(value or "").strip() for value in row_values):
+            continue
+        work_date = _parse_timesheet_date_value(row[columns["date"]] if columns["date"] < len(row) else None)
+        if columns.get("employee", -1) >= 0:
+            employee = str(row[columns["employee"]] if columns["employee"] < len(row) else "").strip()
+        else:
+            employee = str(employee_name or "").strip()
+        if work_date is None or not employee:
+            continue
+        if normalized_target and normalize_person_name(employee) != normalized_target:
+            continue
+        st = _parse_timesheet_hours_value(row[columns["st"]] if "st" in columns and columns["st"] < len(row) else None)
+        ot = _parse_timesheet_hours_value(row[columns["ot"]] if "ot" in columns and columns["ot"] < len(row) else None)
+        dt = _parse_timesheet_hours_value(row[columns["dt"]] if "dt" in columns and columns["dt"] < len(row) else None)
+        vac = _parse_timesheet_hours_value(row[columns["vac"]] if "vac" in columns and columns["vac"] < len(row) else None)
+        well = _parse_timesheet_hours_value(row[columns["well"]] if "well" in columns and columns["well"] < len(row) else None)
+        stat = _parse_timesheet_hours_value(row[columns["stat"]] if "stat" in columns and columns["stat"] < len(row) else None)
+        total = _parse_timesheet_hours_value(row[columns["total"]] if "total" in columns and columns["total"] < len(row) else None)
+        if total is None and st is None and ot is None and dt is None and vac is None and well is None and stat is None:
+            continue
+        records.append(
+            TimesheetRecord(
+                source_path=source_path,
+                source_file=source_path.name,
+                source_sheet=source_sheet,
+                source_row=row_offset,
+                work_date=work_date,
+                employee=employee,
+                job_number=str(row[columns["job_number"]] if "job_number" in columns and columns["job_number"] < len(row) else "").strip(),
+                pf_number=normalize_timesheet_job_number(row[columns["job_number"]] if "job_number" in columns and columns["job_number"] < len(row) else ""),
+                location=str(row[columns["location"]] if "location" in columns and columns["location"] < len(row) else "").strip(),
+                notes=str(row[columns["notes"]] if "notes" in columns and columns["notes"] < len(row) else "").strip(),
+                st=st,
+                ot=ot,
+                dt=dt,
+                vac=vac,
+                well=well,
+                stat=stat,
+                total=total,
+            )
+        )
+    return records, warnings
+
+
+def load_timesheet_records(
+    source_path: Path,
+    *,
+    employee_name: str | None = None,
+) -> tuple[list[TimesheetRecord], list[TimesheetParseWarning]]:
+    path = Path(source_path)
+    suffix = path.suffix.lower()
+    if suffix == ".csv":
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            rows = [list(row) for row in csv.reader(handle)]
+        return _iter_timesheet_table_records(path, path.stem, rows, employee_name=employee_name)
+    if suffix not in {".xlsx", ".xlsm"}:
+        return [], [
+            TimesheetParseWarning(
+                source_file=path.name,
+                source_sheet="",
+                row_number=0,
+                details=f"Unsupported timesheet format for parsing: {path.suffix or '[no extension]'}.",
+            )
+        ]
+    workbook = load_workbook(path, data_only=True, read_only=True)
+    try:
+        all_records: list[TimesheetRecord] = []
+        all_warnings: list[TimesheetParseWarning] = []
+        for sheet_name in workbook.sheetnames:
+            worksheet = workbook[sheet_name]
+            rows = [list(row) for row in worksheet.iter_rows(values_only=True)]
+            records, warnings = _iter_timesheet_table_records(path, sheet_name, rows, employee_name=employee_name)
+            all_records.extend(records)
+            all_warnings.extend(warnings)
+        if all_records:
+            all_warnings = [
+                warning
+                for warning in all_warnings
+                if not (
+                    warning.row_number == 0
+                    and "Could not find a recognizable timesheet header row" in warning.details
+                )
+            ]
+        return all_records, all_warnings
+    finally:
+        workbook.close()
+
+
+def _timesheet_pf_label(value: str) -> str:
+    return display_pf_number(value) if value.strip() else "[missing PF]"
+
+
+def _summarize_hours_by_pf(values: dict[str, float]) -> str:
+    if not values:
+        return "none"
+    parts = [
+        f"{_timesheet_pf_label(pf)} {fmt_hours(hours)}"
+        for pf, hours in sorted(values.items(), key=lambda item: pf_number_sort_key(item[0]))
+        if abs(hours) > 0.0001
+    ]
+    return ", ".join(parts) if parts else "none"
+
+
+def build_timesheet_comparison_findings(
+    employee: str,
+    dss_records: Iterable[DailyRecord],
+    timesheet_records: Iterable[TimesheetRecord],
+    *,
+    timesheet_file: str = "",
+    tolerance: float = 0.05,
+) -> list[TimesheetComparisonFinding]:
+    employee_name = employee.strip()
+    dss_by_date: dict[date, list[DailyRecord]] = {}
+    for record in dss_records:
+        if record.employee.strip().casefold() != employee_name.casefold():
+            continue
+        dss_by_date.setdefault(record.work_date, []).append(record)
+    timesheet_by_date: dict[date, list[TimesheetRecord]] = {}
+    for record in timesheet_records:
+        if record.employee.strip().casefold() != employee_name.casefold():
+            continue
+        timesheet_by_date.setdefault(record.work_date, []).append(record)
+
+    findings: list[TimesheetComparisonFinding] = []
+    for work_date in sorted(set(dss_by_date) | set(timesheet_by_date)):
+        week_start = monday_week_start(work_date)
+        week_end = week_start + timedelta(days=6)
+        dss_day = dss_by_date.get(work_date, [])
+        timesheet_day = timesheet_by_date.get(work_date, [])
+        dss_total = round(sum(record.total for record in dss_day), 2)
+        timesheet_total = round(sum(record.dss_comparable_hours for record in timesheet_day), 2)
+        timesheet_non_dss_total = round(sum(record.non_dss_hours for record in timesheet_day), 2)
+        dss_source_files = ", ".join(sorted({record.source_file for record in dss_day}))
+        dss_pf_hours: dict[str, float] = {}
+        for record in dss_day:
+            dss_pf_hours[record.pf_number] = round(dss_pf_hours.get(record.pf_number, 0.0) + record.total, 2)
+        timesheet_pf_hours: dict[str, float] = {}
+        for record in timesheet_day:
+            pf_number = record.pf_number.strip()
+            timesheet_pf_hours[pf_number] = round(timesheet_pf_hours.get(pf_number, 0.0) + record.dss_comparable_hours, 2)
+
+        if not timesheet_day and dss_day:
+            findings.append(
+                TimesheetComparisonFinding(
+                    employee=employee_name,
+                    work_date=work_date,
+                    week_start=week_start,
+                    week_end=week_end,
+                    issue="No Timesheet Entry",
+                    summary=f"No timesheet hours found for {work_date.isoformat()} but DSS has {fmt_hours(dss_total)} hour(s).",
+                    details=f"DSS PF totals: {_summarize_hours_by_pf(dss_pf_hours)}",
+                    timesheet_file=timesheet_file,
+                    dss_source_files=dss_source_files,
+                )
+            )
+            continue
+
+        if timesheet_day and not dss_day:
+            if timesheet_total > tolerance:
+                findings.append(
+                    TimesheetComparisonFinding(
+                        employee=employee_name,
+                        work_date=work_date,
+                        week_start=week_start,
+                        week_end=week_end,
+                        issue="Unaccounted Timesheet Hours",
+                        summary=f"Timesheet has {fmt_hours(timesheet_total)} DSS-comparable hour(s) on {work_date.isoformat()} but DSS has none.",
+                        details=(
+                            f"Timesheet PF totals: {_summarize_hours_by_pf(timesheet_pf_hours)}"
+                            + (f" | Ignored VAC/WELL/STAT hours: {fmt_hours(timesheet_non_dss_total)}" if timesheet_non_dss_total > tolerance else "")
+                        ),
+                        timesheet_file=timesheet_file,
+                        dss_source_files=dss_source_files,
+                    )
+                )
+            continue
+
+        if abs(timesheet_total - dss_total) > tolerance:
+            if timesheet_total > dss_total:
+                issue = "Unaccounted Timesheet Hours"
+                summary = (
+                    f"Timesheet has {fmt_hours(timesheet_total)} hour(s) on {work_date.isoformat()} but DSS only has {fmt_hours(dss_total)}."
+                )
+            else:
+                issue = "DSS Hours Missing From Timesheet"
+                summary = (
+                    f"DSS has {fmt_hours(dss_total)} hour(s) on {work_date.isoformat()} but the timesheet only has {fmt_hours(timesheet_total)}."
+                )
+            findings.append(
+                TimesheetComparisonFinding(
+                    employee=employee_name,
+                    work_date=work_date,
+                    week_start=week_start,
+                    week_end=week_end,
+                    issue=issue,
+                    summary=summary,
+                    details=(
+                        f"DSS PF totals: {_summarize_hours_by_pf(dss_pf_hours)} | "
+                        f"Timesheet PF totals: {_summarize_hours_by_pf(timesheet_pf_hours)}"
+                        + (f" | Ignored VAC/WELL/STAT hours: {fmt_hours(timesheet_non_dss_total)}" if timesheet_non_dss_total > tolerance else "")
+                    ),
+                    timesheet_file=timesheet_file,
+                    dss_source_files=dss_source_files,
+                )
+            )
+
+        dss_st = round(sum(record.st for record in dss_day), 2)
+        dss_ot = round(sum(record.ot for record in dss_day), 2)
+        dss_dt = round(sum(record.dt for record in dss_day), 2)
+        timesheet_st = round(sum(record.st or 0.0 for record in timesheet_day), 2)
+        timesheet_ot = round(sum(record.ot or 0.0 for record in timesheet_day), 2)
+        timesheet_dt = round(sum(record.dt or 0.0 for record in timesheet_day), 2)
+        bucket_mismatches: list[str] = []
+        for label, dss_value, timesheet_value in (
+            ("ST", dss_st, timesheet_st),
+            ("OT", dss_ot, timesheet_ot),
+            ("DT", dss_dt, timesheet_dt),
+        ):
+            if abs(dss_value - timesheet_value) > tolerance:
+                bucket_mismatches.append(f"{label} DSS {fmt_hours(dss_value)} vs timesheet {fmt_hours(timesheet_value)}")
+        if bucket_mismatches:
+            findings.append(
+                TimesheetComparisonFinding(
+                    employee=employee_name,
+                    work_date=work_date,
+                    week_start=week_start,
+                    week_end=week_end,
+                    issue="ST/OT/DT Bucket Mismatch",
+                    summary=f"Hour type allocation differs on {work_date.isoformat()} even where some totals may match.",
+                    details=" | ".join(bucket_mismatches),
+                    timesheet_file=timesheet_file,
+                    dss_source_files=dss_source_files,
+                )
+            )
+
+        for record in timesheet_day:
+            if not record.pf_number.strip() and record.dss_comparable_hours > tolerance:
+                findings.append(
+                    TimesheetComparisonFinding(
+                        employee=employee_name,
+                        work_date=work_date,
+                        week_start=week_start,
+                        week_end=week_end,
+                        issue="Timesheet Missing PF Number",
+                        summary=f"Timesheet row on {work_date.isoformat()} has {fmt_hours(record.dss_comparable_hours)} DSS-comparable hour(s) without a PF / dash number.",
+                        details=f"Timesheet file {record.source_file} sheet {record.source_sheet} row {record.source_row}.",
+                        timesheet_file=timesheet_file or record.source_file,
+                        dss_source_files=dss_source_files,
+                    )
+                )
+
+        for pf_number in sorted(set(dss_pf_hours) | set(timesheet_pf_hours), key=pf_number_sort_key):
+            dss_hours = round(dss_pf_hours.get(pf_number, 0.0), 2)
+            timesheet_hours = round(timesheet_pf_hours.get(pf_number, 0.0), 2)
+            if abs(dss_hours - timesheet_hours) <= tolerance:
+                continue
+            if pf_number and pf_number not in timesheet_pf_hours:
+                issue = "DSS PF Missing From Timesheet"
+                summary = f"DSS assigns {fmt_hours(dss_hours)} hour(s) to {_timesheet_pf_label(pf_number)} on {work_date.isoformat()} but the timesheet does not."
+            elif pf_number and pf_number not in dss_pf_hours:
+                issue = "Timesheet PF Missing From DSS"
+                summary = f"Timesheet assigns {fmt_hours(timesheet_hours)} hour(s) to {_timesheet_pf_label(pf_number)} on {work_date.isoformat()} but DSS does not."
+            else:
+                issue = "PF / Dash Number Hour Mismatch"
+                summary = (
+                    f"{_timesheet_pf_label(pf_number)} differs on {work_date.isoformat()}: "
+                    f"timesheet {fmt_hours(timesheet_hours)} vs DSS {fmt_hours(dss_hours)}."
+                )
+            findings.append(
+                TimesheetComparisonFinding(
+                    employee=employee_name,
+                    work_date=work_date,
+                    week_start=week_start,
+                    week_end=week_end,
+                    issue=issue,
+                    summary=summary,
+                    details=(
+                        f"DSS PF totals: {_summarize_hours_by_pf(dss_pf_hours)} | "
+                        f"Timesheet PF totals: {_summarize_hours_by_pf(timesheet_pf_hours)}"
+                    ),
+                    timesheet_file=timesheet_file,
+                    dss_source_files=dss_source_files,
+                )
+            )
+    return findings
+
+
+def build_timesheet_required_note_findings(
+    employee: str,
+    timesheet_records: Iterable[TimesheetRecord],
+    rules: Iterable[JobNoteRule],
+    *,
+    timesheet_file: str = "",
+    tolerance: float = 0.05,
+) -> list[TimesheetComparisonFinding]:
+    employee_name = employee.strip()
+    records_by_date: dict[date, list[TimesheetRecord]] = {}
+    for record in timesheet_records:
+        if record.employee.strip().casefold() != employee_name.casefold():
+            continue
+        records_by_date.setdefault(record.work_date, []).append(record)
+    findings: list[TimesheetComparisonFinding] = []
+    normalized_rules = list(rules)
+    if not normalized_rules:
+        return findings
+    for work_date, day_records in sorted(records_by_date.items()):
+        week_start = monday_week_start(work_date)
+        week_end = week_start + timedelta(days=6)
+        root_hours: dict[str, float] = {}
+        notes_by_root_pf: dict[str, list[str]] = {}
+        for record in day_records:
+            root_pf = base_pf_number(record.pf_number)
+            if not root_pf:
+                continue
+            root_hours[root_pf] = round(root_hours.get(root_pf, 0.0) + record.dss_comparable_hours, 2)
+            if record.notes.strip():
+                notes_by_root_pf.setdefault(root_pf, []).append(record.notes.strip())
+        for rule in normalized_rules:
+            root_pf = base_pf_number(rule.pf_number)
+            applicable_hours = root_hours.get(root_pf, 0.0)
+            if applicable_hours <= tolerance:
+                continue
+            if rule.min_root_pf_hours is not None and applicable_hours + tolerance < rule.min_root_pf_hours:
+                continue
+            joined_notes = "\n".join(notes_by_root_pf.get(root_pf, []))
+            if rule.required_text.strip().casefold() in joined_notes.casefold():
+                continue
+            threshold_text = (
+                f" after {fmt_hours(rule.min_root_pf_hours)}+ root-PF hour(s)"
+                if rule.min_root_pf_hours is not None
+                else ""
+            )
+            findings.append(
+                TimesheetComparisonFinding(
+                    employee=employee_name,
+                    work_date=work_date,
+                    week_start=week_start,
+                    week_end=week_end,
+                    issue="Required Job Note Missing",
+                    summary=(
+                        f"{_timesheet_pf_label(root_pf)} requires note text `{rule.required_text}`{threshold_text} on {work_date.isoformat()}."
+                    ),
+                    details=(
+                        f"Applicable root-PF hours: {fmt_hours(applicable_hours)} | "
+                        f"Observed timesheet notes: {joined_notes or '[none]'}"
+                        + (f" | Rule note: {rule.description}" if rule.description.strip() else "")
+                    ),
+                    timesheet_file=timesheet_file,
+                )
+            )
+    return findings
+
+
 def split_normalized_person_name(name: str) -> tuple[str, str]:
     parts = normalize_person_name(name).split()
     if not parts:
@@ -3464,10 +4213,76 @@ def build_employee_email_list_label(employee: str, email: str, suppressed: bool 
     return f"{employee} | {display_email}", missing
 
 
+def build_email_note_lines(
+    records: Iterable[DailyRecord],
+    *,
+    employee_note: str = "",
+    job_note_rules: Iterable[JobNoteRule] = (),
+    tolerance: float = 0.05,
+) -> list[str]:
+    note_lines: list[str] = []
+    employee_note_text = employee_note.strip()
+    if employee_note_text:
+        note_lines.append(employee_note_text)
+
+    normalized_rules = list(job_note_rules)
+    if not normalized_rules:
+        return note_lines
+
+    root_hours_by_date: dict[str, dict[date, float]] = {}
+    for record in records:
+        root_pf = base_pf_number(record.pf_number)
+        if not root_pf:
+            continue
+        date_hours = root_hours_by_date.setdefault(root_pf, {})
+        date_hours[record.work_date] = round(date_hours.get(record.work_date, 0.0) + record.total, 2)
+
+    for rule in normalized_rules:
+        root_pf = base_pf_number(rule.pf_number)
+        if not root_pf:
+            continue
+        date_hours = root_hours_by_date.get(root_pf, {})
+        applicable_dates = [
+            work_date
+            for work_date, hours in sorted(date_hours.items())
+            if hours > tolerance
+            and (rule.min_root_pf_hours is None or hours + tolerance >= rule.min_root_pf_hours)
+        ]
+        if not applicable_dates:
+            continue
+        dates_text = ", ".join(work_date.isoformat() for work_date in applicable_dates)
+        threshold_text = (
+            f" when root-PF hours are {fmt_hours(rule.min_root_pf_hours)}+"
+            if rule.min_root_pf_hours is not None
+            else ""
+        )
+        description_text = f" {rule.description.strip()}" if rule.description.strip() else ""
+        note_lines.append(
+            f"{display_pf_number(root_pf)}: include \"{rule.required_text}\" on {dates_text}{threshold_text}.{description_text}".strip()
+        )
+    return note_lines
+
+
+def format_email_notes_text(notes: Sequence[str]) -> str:
+    cleaned = [note.strip() for note in notes if note.strip()]
+    if not cleaned:
+        return ""
+    return "\n".join(f"- {note}" for note in cleaned)
+
+
+def build_email_notes_html(notes: Sequence[str]) -> str:
+    cleaned = [note.strip() for note in notes if note.strip()]
+    if not cleaned:
+        return ""
+    items = "".join(f"<li>{html.escape(note)}</li>" for note in cleaned)
+    return "<p><strong>Notes:</strong></p><ul>" + items + "</ul>"
+
+
 def build_email_draft_requests(
     records: Iterable[DailyRecord],
     employee_emails: dict[str, str],
     week_start: date,
+    notes_by_employee: Mapping[str, Sequence[str] | str] | None = None,
 ) -> list[EmailDraftRequest]:
     grouped: dict[str, list[DailyRecord]] = {}
     week_records = records_for_week(records, week_start)
@@ -3484,6 +4299,15 @@ def build_email_draft_requests(
                 week_start=week_start,
                 week_end=week_end,
                 records=sorted(grouped[employee], key=lambda item: (item.work_date, item.source_file, item.source_sheet)),
+                notes=tuple(
+                    note.strip()
+                    for note in (
+                        [str(notes_by_employee.get(employee, "")).strip()]
+                        if isinstance((notes_by_employee or {}).get(employee, ""), str)
+                        else [str(note).strip() for note in (notes_by_employee or {}).get(employee, ())]
+                    )
+                    if note.strip()
+                ),
             )
         )
     return requests
@@ -3556,18 +4380,29 @@ def build_email_html(
     week_end: date,
     records: list[DailyRecord],
     body_template: str,
+    notes: Sequence[str] = (),
 ) -> str:
     first_name = employee.strip().split()[0] if employee.strip() else employee
     template = body_template.strip() or default_email_body_template()
     pf_numbers = pf_numbers_for_records(records)
-    return template.format(
+    notes_text = format_email_notes_text(notes)
+    notes_html = build_email_notes_html(notes)
+    rendered = template.format(
         employee=html.escape(employee),
         first_name=html.escape(first_name),
         week_start=html.escape(week_start.isoformat()),
         week_end=html.escape(week_end.isoformat()),
         pf_numbers=html.escape(pf_numbers),
+        notes=html.escape(notes_text),
+        notes_html=notes_html,
         hours_table=build_hours_table_html(records),
     )
+    if notes_html and "{notes_html}" not in template and "{notes}" not in template:
+        thanks_marker = "<p>Thanks.</p>"
+        if thanks_marker in rendered:
+            return rendered.replace(thanks_marker, f"{notes_html}\n{thanks_marker}", 1)
+        return rendered + "\n" + notes_html
+    return rendered
 
 
 def build_bug_report_html(
@@ -3770,6 +4605,7 @@ def create_outlook_drafts(
                 request.week_end,
                 request.records,
                 body_template,
+                request.notes,
             )
             mail_item.Save()
             created += 1
@@ -6492,15 +7328,15 @@ class EmailDraftsFrame(ttk.Frame):
 
         self.preview_table = DataTable(
             self,
-            columns=["employee", "email", "days", "st", "ot", "dt", "total", "expanded"],
-            headings=["Employee", "Email", "Rows", "ST", "OT", "DT", "Total", "Expanded Hours"],
+            columns=["employee", "email", "notes", "days", "st", "ot", "dt", "total", "expanded"],
+            headings=["Employee", "Email", "Notes", "Rows", "ST", "OT", "DT", "Total", "Expanded Hours"],
             ui_theme=self._ui_theme,
         )
         self.preview_table.grid(row=4, column=0, columnspan=5, sticky="nsew")
         self.preview_table.tree.bind("<Double-Button-1>", self._on_preview_double_click)
 
         note = (
-            "Use {employee}, {first_name}, {week_start}, {week_end}, {pf_numbers}, and {hours_table} in the templates. "
+            "Use {employee}, {first_name}, {week_start}, {week_end}, {pf_numbers}, {notes}, {notes_html}, and {hours_table} in the templates. "
             "Drafts are saved in Outlook and are not sent automatically."
         )
         ttk.Label(self, text=note, wraplength=700, justify="left").grid(row=5, column=0, columnspan=5, sticky="w", pady=(8, 0))
@@ -10043,7 +10879,8 @@ class DssToolsApp(tk.Tk):
             self.email_drafts_frame.preview_table.set_rows([])
             return
 
-        requests = build_email_draft_requests(filtered_daily_records, self.employee_emails, week_start)
+        notes_by_employee = self._build_email_notes_by_employee(filtered_daily_records, week_start)
+        requests = build_email_draft_requests(filtered_daily_records, self.employee_emails, week_start, notes_by_employee)
         preview_rows: list[tuple[str, ...]] = []
         preview_tags: list[tuple[str, ...]] = []
         for request in requests:
@@ -10058,6 +10895,7 @@ class DssToolsApp(tk.Tk):
                 (
                     request.employee,
                     email_display,
+                    " | ".join(request.notes),
                     str(len(request.records)),
                     fmt_hours(st_total),
                     fmt_hours(ot_total),
@@ -10081,6 +10919,25 @@ class DssToolsApp(tk.Tk):
             )
         )
 
+    def _build_email_notes_by_employee(
+        self,
+        filtered_daily_records: list[DailyRecord],
+        week_start: date,
+    ) -> dict[str, list[str]]:
+        notes_by_employee: dict[str, list[str]] = {}
+        grouped_records: dict[str, list[DailyRecord]] = {}
+        for record in records_for_week(filtered_daily_records, week_start):
+            grouped_records.setdefault(record.employee, []).append(record)
+        for employee, employee_records in grouped_records.items():
+            note_lines = build_email_note_lines(
+                employee_records,
+                employee_note=self.employee_notes.get(employee, ""),
+                job_note_rules=self.job_note_rules,
+            )
+            if note_lines:
+                notes_by_employee[employee] = note_lines
+        return notes_by_employee
+
     def create_email_drafts(self) -> None:
         if self.current_data is None:
             messagebox.showerror("Email Drafts", "Load DSS data before creating draft emails.")
@@ -10100,7 +10957,8 @@ class DssToolsApp(tk.Tk):
         filtered_daily_records = [
             record for record in self.current_data.daily_records if record.employee in allowed_employees
         ]
-        requests = build_email_draft_requests(filtered_daily_records, self.employee_emails, week_start)
+        notes_by_employee = self._build_email_notes_by_employee(filtered_daily_records, week_start)
+        requests = build_email_draft_requests(filtered_daily_records, self.employee_emails, week_start, notes_by_employee)
         selected_employees = self.email_drafts_frame.selected_employees()
         if selected_employees:
             requests = [request for request in requests if request.employee in selected_employees]

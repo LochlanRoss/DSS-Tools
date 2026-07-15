@@ -14,6 +14,7 @@ import tempfile
 import time
 import unittest
 import json
+import csv
 from datetime import date
 from pathlib import Path
 from unittest import mock
@@ -38,6 +39,8 @@ from dss_hours_tracker import (
     _bug_report_attachment_strings_to_try,
     build_employee_email_list_label,
     build_signin_hours_mismatch_warnings,
+    build_timesheet_comparison_findings,
+    build_timesheet_required_note_findings,
     build_employee_day_pf_rows,
     build_pf_totals,
     query_outlook_emails,
@@ -48,7 +51,10 @@ from dss_hours_tracker import (
     binding_sequence_from_keypress_event,
     az2_revision_matches_sheet_name,
     build_bug_report_html,
+    build_email_draft_requests,
     build_email_html,
+    build_email_note_lines,
+    discover_timesheet_candidates,
     create_bug_report_draft,
     checksum_for_asset_name,
     choose_preferred_outlook_resolution,
@@ -95,9 +101,14 @@ from dss_hours_tracker import (
     load_missing_email_suppressions,
     load_formatting_profiles,
     load_app_settings,
+    load_timesheet_records,
+    JobNoteRule,
     normalize_ui_hex_color,
+    normalize_timesheet_job_number,
+    parse_job_note_rules_text,
     parse_ui_theme_payload,
     DailyRecord,
+    TimesheetRecord,
     _windows_hidden_subprocess_options,
     build_outlook_name_mismatch_findings,
     build_tracker_data_with_status,
@@ -126,6 +137,7 @@ from dss_hours_tracker import (
     save_table_layout,
     select_preferred_dated_sheets,
 )
+from openpyxl import Workbook
 from test_dss_tools_fixtures import DssToolsFixtures
 
 
@@ -903,6 +915,244 @@ class DssToolsTests(DssToolsFixtures):
     def test_normalize_person_name(self) -> None:
         self.assertEqual(normalize_person_name("  Alice   Smith "), "alice smith")
 
+    def test_normalize_timesheet_job_number_adds_pf_prefix(self) -> None:
+        self.assertEqual(normalize_timesheet_job_number("25154-5"), "PF25154-5")
+        self.assertEqual(normalize_timesheet_job_number("PF25154-5"), "PF25154-5")
+
+    def test_parse_job_note_rules_text_supports_threshold_and_description(self) -> None:
+        rules = parse_job_note_rules_text("PF25154 | $86 Travel | 8 | Travel note required\nPF25154 | $70 per diem")
+
+        self.assertEqual(len(rules), 2)
+        self.assertEqual(rules[0].pf_number, "PF25154")
+        self.assertEqual(rules[0].required_text, "$86 Travel")
+        self.assertEqual(rules[0].min_root_pf_hours, 8.0)
+        self.assertEqual(rules[0].description, "Travel note required")
+
+    def test_discover_timesheet_candidates_groups_this_and_last_week(self) -> None:
+        with self.workspace_dir("timesheet_discovery") as root:
+            this_week = root / "2026-07-15_Andrew_Soandso.xlsx"
+            last_week = root / "history" / "2026-07-08_Andrew_Soandso.xlsx"
+            other = root / "2026-07-15_Someone_Else.xlsx"
+            last_week.parent.mkdir(parents=True, exist_ok=True)
+            this_week.write_text("", encoding="utf-8")
+            last_week.write_text("", encoding="utf-8")
+            other.write_text("", encoding="utf-8")
+
+            matches = discover_timesheet_candidates(root, "Andrew Soandso", reference_date=date(2026, 7, 15))
+
+        self.assertEqual([path.name for path in matches["this_week"]], ["2026-07-15_Andrew_Soandso.xlsx"])
+        self.assertEqual([path.name for path in matches["last_week"]], ["2026-07-08_Andrew_Soandso.xlsx"])
+
+    def test_load_timesheet_records_reads_csv_with_total_column(self) -> None:
+        with self.workspace_dir("timesheet_csv") as root:
+            path = root / "Andrew Soandso week.csv"
+            with path.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["Employee Name", "Work Date", "Total Hours"])
+                writer.writerow(["Andrew Soandso", "2026-07-14", "8.5"])
+                writer.writerow(["Someone Else", "2026-07-14", "7"])
+
+            records, warnings = load_timesheet_records(path, employee_name="Andrew Soandso")
+
+        self.assertEqual(len(warnings), 0)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].employee, "Andrew Soandso")
+        self.assertEqual(records[0].work_date, date(2026, 7, 14))
+        self.assertEqual(records[0].total, 8.5)
+        self.assertEqual(records[0].total_hours, 8.5)
+
+    def test_load_timesheet_records_reads_excel_with_st_ot_dt_columns(self) -> None:
+        with self.workspace_dir("timesheet_xlsx") as root:
+            path = root / "timesheet.xlsx"
+            workbook = Workbook()
+            worksheet = workbook.active
+            worksheet.title = "Week 1"
+            worksheet.append(["Employee", "Date", "ST", "OT", "DT"])
+            worksheet.append(["Andrew Soandso", date(2026, 7, 14), 8, 1.5, 0])
+            worksheet.append(["Andrew Soandso", date(2026, 7, 15), "8:30", "", ""])
+            workbook.save(path)
+
+            records, warnings = load_timesheet_records(path, employee_name="Andrew Soandso")
+
+        self.assertEqual(len(warnings), 0)
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0].st, 8.0)
+        self.assertEqual(records[0].ot, 1.5)
+        self.assertEqual(records[0].dt, 0.0)
+        self.assertEqual(records[0].total_hours, 9.5)
+        self.assertEqual(records[1].st, 8.5)
+        self.assertEqual(records[1].total_hours, 8.5)
+
+    def test_load_timesheet_records_warns_for_unsupported_xls(self) -> None:
+        with self.workspace_dir("timesheet_xls") as root:
+            path = root / "legacy_timesheet.xls"
+            path.write_text("placeholder", encoding="utf-8")
+
+            records, warnings = load_timesheet_records(path, employee_name="Andrew Soandso")
+
+        self.assertEqual(records, [])
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("Unsupported timesheet format", warnings[0].details)
+
+    def test_load_timesheet_records_reads_single_employee_weekly_layout(self) -> None:
+        with self.workspace_dir("timesheet_weekly_layout") as root:
+            path = root / "Timesheet wk 29 Jul Lochlan Ross.xlsm"
+            workbook = Workbook()
+            worksheet = workbook.active
+            worksheet.title = "Time"
+            worksheet.cell(row=9, column=4, value="DATE")
+            worksheet.cell(row=9, column=11, value="JA TECH JOB NUMBER")
+            worksheet.cell(row=9, column=25, value="REG")
+            worksheet.cell(row=9, column=27, value="O.T.")
+            worksheet.cell(row=9, column=29, value="D.T.")
+            worksheet.cell(row=12, column=4, value=date(2026, 7, 13))
+            worksheet.cell(row=12, column=11, value="25154-5")
+            worksheet.cell(row=12, column=25, value=8)
+            worksheet.cell(row=12, column=27, value=3)
+            worksheet.cell(row=16, column=4, value=date(2026, 7, 14))
+            worksheet.cell(row=16, column=11, value="25154-5")
+            worksheet.cell(row=16, column=25, value=8)
+            worksheet.cell(row=16, column=27, value=3)
+            worksheet.cell(row=20, column=4, value=date(2026, 7, 15))
+            worksheet.cell(row=20, column=11, value="25154-5")
+            worksheet.cell(row=20, column=25, value=8)
+            worksheet.cell(row=20, column=27, value=3)
+            workbook.save(path)
+
+            records, warnings = load_timesheet_records(path, employee_name="Lochlan Ross")
+
+        self.assertEqual(len(warnings), 0)
+        self.assertEqual(len(records), 3)
+        self.assertEqual(records[0].employee, "Lochlan Ross")
+        self.assertEqual(records[0].work_date, date(2026, 7, 13))
+        self.assertEqual(records[0].pf_number, "PF25154-5")
+        self.assertEqual(records[0].st, 8.0)
+        self.assertEqual(records[0].ot, 3.0)
+        self.assertEqual(records[0].total_hours, 11.0)
+
+    def test_build_timesheet_comparison_findings_flags_missing_hours_and_pf_mismatch(self) -> None:
+        dss_records = [
+            DailyRecord(
+                source_path=Path("dss.xlsx"),
+                source_file="dss.xlsx",
+                work_date=date(2026, 7, 8),
+                source_sheet="2026-07-08",
+                employee="Lochlan Ross",
+                st=8.0,
+                ot=0.0,
+                dt=0.0,
+                source_ranges="AC25:AE25",
+                pf_number="PF25154-4",
+            )
+        ]
+        timesheet_records = [
+            TimesheetRecord(
+                source_path=Path("timesheet.xlsm"),
+                source_file="timesheet.xlsm",
+                source_sheet="Time",
+                source_row=20,
+                work_date=date(2026, 7, 8),
+                employee="Lochlan Ross",
+                pf_number="PF25154-2",
+                st=8.0,
+            ),
+            TimesheetRecord(
+                source_path=Path("timesheet.xlsm"),
+                source_file="timesheet.xlsm",
+                source_sheet="Time",
+                source_row=24,
+                work_date=date(2026, 7, 9),
+                employee="Lochlan Ross",
+                pf_number="PF25154-4",
+                st=2.0,
+            ),
+        ]
+
+        findings = build_timesheet_comparison_findings("Lochlan Ross", dss_records, timesheet_records, timesheet_file="timesheet.xlsm")
+
+        issues = {finding.issue for finding in findings}
+        self.assertIn("DSS PF Missing From Timesheet", issues)
+        self.assertIn("Timesheet PF Missing From DSS", issues)
+        self.assertIn("Unaccounted Timesheet Hours", issues)
+
+    def test_build_timesheet_comparison_findings_flags_bucket_mismatch_even_when_total_matches(self) -> None:
+        dss_records = [
+            DailyRecord(
+                source_path=Path("dss.xlsx"),
+                source_file="dss.xlsx",
+                work_date=date(2026, 7, 8),
+                source_sheet="2026-07-08",
+                employee="Lochlan Ross",
+                st=8.0,
+                ot=3.0,
+                dt=0.0,
+                source_ranges="AC25:AE25",
+                pf_number="PF25154-4",
+            )
+        ]
+        timesheet_records = [
+            TimesheetRecord(
+                source_path=Path("timesheet.xlsm"),
+                source_file="timesheet.xlsm",
+                source_sheet="Time",
+                source_row=20,
+                work_date=date(2026, 7, 8),
+                employee="Lochlan Ross",
+                pf_number="PF25154-4",
+                st=11.0,
+                ot=0.0,
+                dt=0.0,
+            )
+        ]
+
+        findings = build_timesheet_comparison_findings("Lochlan Ross", dss_records, timesheet_records, timesheet_file="timesheet.xlsm")
+
+        issues = {finding.issue for finding in findings}
+        self.assertIn("ST/OT/DT Bucket Mismatch", issues)
+
+    def test_build_timesheet_comparison_findings_ignores_vac_hours_for_missing_dss_warning(self) -> None:
+        dss_records: list[DailyRecord] = []
+        timesheet_records = [
+            TimesheetRecord(
+                source_path=Path("timesheet.xlsm"),
+                source_file="timesheet.xlsm",
+                source_sheet="Time",
+                source_row=20,
+                work_date=date(2026, 7, 8),
+                employee="Lochlan Ross",
+                pf_number="PF25154-4",
+                vac=8.0,
+            )
+        ]
+
+        findings = build_timesheet_comparison_findings("Lochlan Ross", dss_records, timesheet_records, timesheet_file="timesheet.xlsm")
+
+        issues = {finding.issue for finding in findings}
+        self.assertNotIn("Unaccounted Timesheet Hours", issues)
+
+    def test_build_timesheet_required_note_findings_flags_missing_required_text(self) -> None:
+        rules = parse_job_note_rules_text("PF25154 | $86 Travel | 8 | Travel note required")
+        timesheet_records = [
+            TimesheetRecord(
+                source_path=Path("timesheet.xlsm"),
+                source_file="timesheet.xlsm",
+                source_sheet="Time",
+                source_row=20,
+                work_date=date(2026, 7, 8),
+                employee="Lochlan Ross",
+                pf_number="PF25154-4",
+                notes="$70 per diem",
+                st=8.0,
+                ot=3.0,
+            )
+        ]
+
+        findings = build_timesheet_required_note_findings("Lochlan Ross", timesheet_records, rules, timesheet_file="timesheet.xlsm")
+
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].issue, "Required Job Note Missing")
+        self.assertIn("$86 Travel", findings[0].summary)
+
     def test_find_open_excel_workbook_matches_by_full_path_or_unique_name(self) -> None:
         class FakeWorkbook:
             def __init__(self, full_name: str, name: str):
@@ -1454,6 +1704,88 @@ class DssToolsTests(DssToolsFixtures):
         self.assertIn("<td>24</td>", html)
         self.assertIn("<th>PF#</th>", html)
         self.assertNotIn("Source File</th>", html)
+
+    def test_build_email_note_lines_include_employee_and_job_notes(self) -> None:
+        records = [
+            DailyRecord(
+                source_path=Path("C:/data/signin.xlsx"),
+                source_file="PF25154-4 Panel Cable Wire DSS.xlsx",
+                pf_number="PF25154-4",
+                work_date=date(2026, 7, 8),
+                source_sheet="2026-07-08",
+                employee="Lochlan Ross",
+                st=8.0,
+                ot=1.0,
+                dt=0.0,
+                source_ranges="A5:F5",
+            ),
+        ]
+        notes = build_email_note_lines(
+            records,
+            employee_note="Remember Island Falls orientation card.",
+            job_note_rules=[
+                JobNoteRule("PF25154", "$86 Travel", 8.0, "Travel allowance applies."),
+                JobNoteRule("PF99999", "$70 per diem"),
+            ],
+        )
+
+        self.assertEqual(notes[0], "Remember Island Falls orientation card.")
+        self.assertEqual(len(notes), 2)
+        self.assertIn('PF25154: include "$86 Travel" on 2026-07-08', notes[1])
+        self.assertIn("Travel allowance applies.", notes[1])
+
+    def test_build_email_draft_requests_carry_notes(self) -> None:
+        records = [
+            DailyRecord(
+                source_path=Path("C:/data/signin.xlsx"),
+                source_file="PF26005-3 Alpha DSS.xlsx",
+                pf_number="PF26005-3",
+                work_date=date(2026, 6, 8),
+                source_sheet="2026-06-08",
+                employee="Lochlan Ross",
+                st=2.0,
+                ot=0.0,
+                dt=0.0,
+                source_ranges="A5:F5",
+            ),
+        ]
+        requests = build_email_draft_requests(
+            records,
+            {"Lochlan Ross": "lross@example.com"},
+            date(2026, 6, 8),
+            {"Lochlan Ross": ["Remember travel note."]},
+        )
+
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0].notes, ("Remember travel note.",))
+
+    def test_build_email_html_appends_notes_when_template_omits_placeholder(self) -> None:
+        records = [
+            DailyRecord(
+                source_path=Path("C:/data/signin.xlsx"),
+                source_file="Nutrien Vanscoy Sign-in Sheet Week 24.xlsx",
+                pf_number="PF26044-4",
+                work_date=date(2026, 6, 8),
+                source_sheet="2026-06-08",
+                employee="Lochlan Ross",
+                st=8.0,
+                ot=0.0,
+                dt=0.0,
+                source_ranges="A6:F6",
+            ),
+        ]
+        html = build_email_html(
+            "Lochlan Ross",
+            date(2026, 6, 8),
+            date(2026, 6, 14),
+            records,
+            "<p>Hello</p><p>Thanks.</p>",
+            ["Remember travel note."],
+        )
+
+        self.assertIn("<strong>Notes:</strong>", html)
+        self.assertIn("Remember travel note.", html)
+        self.assertIn("<p>Thanks.</p>", html)
 
     def test_email_templates_round_trip(self) -> None:
         with self.workspace_json("email_templates") as path:
