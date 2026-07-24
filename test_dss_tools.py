@@ -54,6 +54,7 @@ from dss_hours_tracker import (
     build_email_draft_requests,
     build_email_html,
     build_email_note_lines,
+    build_email_row_note_lines,
     discover_timesheet_candidates,
     create_bug_report_draft,
     checksum_for_asset_name,
@@ -84,6 +85,9 @@ from dss_hours_tracker import (
     default_formatting_profiles,
     extract_pf_identifier,
     iter_quick_dss_candidate_paths,
+    quick_dss_group_description,
+    quick_dss_group_label,
+    quick_dss_group_root_pf,
     FilterSelection,
     find_open_excel_workbook,
     find_outlook_display_name_typos,
@@ -479,7 +483,7 @@ class DssToolsTests(DssToolsFixtures):
         self.assertEqual(loaded["Bob Jones"].last_checked, "2026-06-10")
         self.assertFalse(loaded["Bob Jones"].matched)
 
-    def test_plan_outlook_query_names_prefers_cache_and_skips_recent_misses(self) -> None:
+    def test_plan_outlook_query_names_prefers_cache_and_retries_cached_misses(self) -> None:
         query_names, cached_resolutions, cached_display_names, skipped_recent_misses = plan_outlook_query_names(
             ["Alice Smith", "Bob Jones", "Cara Dunn", "Doug Hall"],
             employee_emails={"Doug Hall": "doug@example.com"},
@@ -504,12 +508,11 @@ class DssToolsTests(DssToolsFixtures):
                     matched=False,
                 ),
             },
-            checked_on=date(2026, 6, 16),
         )
-        self.assertEqual(query_names, ["Cara Dunn"])
+        self.assertEqual(query_names, ["Bob Jones", "Cara Dunn"])
         self.assertEqual(cached_resolutions["Alice Smith"].email, "alice@example.com")
         self.assertEqual(cached_display_names["Cara Dunn"], "Cara Dunn")
-        self.assertEqual(skipped_recent_misses, {"Bob Jones"})
+        self.assertEqual(skipped_recent_misses, set())
 
     def test_extract_pf_identifier_keeps_dashed_phase_with_spaced_dash(self) -> None:
         self.assertEqual(extract_pf_identifier("PF25119 -14 Cable removal & Rerouting.xlsx"), "PF25119-14")
@@ -559,6 +562,22 @@ class DssToolsTests(DssToolsFixtures):
             results = iter_quick_dss_candidate_paths(root)
 
             self.assertEqual({path.name for path in results}, {first.name, second.name})
+
+    def test_quick_dss_group_label_uses_job_folder_description(self) -> None:
+        path = Path(
+            r"C:\Share\JA Tech SharePoint - PF25153 Nutrien Allan 2026 SD Deficiencies\Field\03 DSS\PF25153-2 DSS.xlsx"
+        )
+
+        self.assertEqual(quick_dss_group_root_pf(path), "PF25153")
+        self.assertEqual(quick_dss_group_description(path), "Nutrien Allan 2026 SD Deficiencies")
+        self.assertEqual(quick_dss_group_label(path), "PF25153 Nutrien Allan 2026 SD Deficiencies")
+
+    def test_quick_dss_group_label_normalizes_underscores(self) -> None:
+        path = Path(
+            r"C:\Share\JA Tech SharePoint - PF25166_Nutrien_Allan_SD Maintenance Scope\Field\03 DSS\PF25166-1 DSS.xlsx"
+        )
+
+        self.assertEqual(quick_dss_group_label(path), "PF25166 Nutrien Allan SD Maintenance Scope")
 
     def test_select_preferred_dated_sheets_prefers_highest_revision(self) -> None:
         selected = select_preferred_dated_sheets(
@@ -1493,6 +1512,7 @@ class DssToolsTests(DssToolsFixtures):
                     auto_update_check_enabled=False,
                     auto_download_updates_on_unmetered_wifi=False,
                     signin_hours_check_enabled=False,
+                    timesheet_review_employee="Lochlan Ross",
                     max_parallel_parse_workers=4,
                     partial_preview_enabled=False,
                 ),
@@ -1509,6 +1529,7 @@ class DssToolsTests(DssToolsFixtures):
             self.assertFalse(loaded.auto_update_check_enabled)
             self.assertFalse(loaded.auto_download_updates_on_unmetered_wifi)
             self.assertFalse(loaded.signin_hours_check_enabled)
+            self.assertEqual(loaded.timesheet_review_employee, "Lochlan Ross")
             self.assertEqual(loaded.max_parallel_parse_workers, 4)
             self.assertFalse(loaded.partial_preview_enabled)
             self.assertEqual(loaded.ui_theme, DEFAULT_UI_THEME)
@@ -1734,6 +1755,43 @@ class DssToolsTests(DssToolsFixtures):
         self.assertIn('PF25154: include "$86 Travel" on 2026-07-08', notes[1])
         self.assertIn("Travel allowance applies.", notes[1])
 
+    def test_build_email_row_note_lines_aligns_notes_to_each_record(self) -> None:
+        records = [
+            DailyRecord(
+                source_path=Path("C:/data/signin.xlsx"),
+                source_file="PF25154-5 DSS.xlsx",
+                pf_number="PF25154-5",
+                work_date=date(2026, 7, 13),
+                source_sheet="2026-07-13",
+                employee="Lochlan Ross",
+                st=8.0,
+                ot=3.0,
+                dt=0.0,
+                source_ranges="A5:F5",
+            ),
+            DailyRecord(
+                source_path=Path("C:/data/signin.xlsx"),
+                source_file="PF25154-5 DSS.xlsx",
+                pf_number="PF25154-5",
+                work_date=date(2026, 7, 14),
+                source_sheet="2026-07-14",
+                employee="Lochlan Ross",
+                st=8.0,
+                ot=3.0,
+                dt=0.0,
+                source_ranges="A6:F6",
+            ),
+        ]
+        row_notes = build_email_row_note_lines(
+            records,
+            job_note_rules=[JobNoteRule("PF25154", "$70 per-diem")],
+        )
+
+        self.assertEqual(
+            row_notes,
+            ["PF25154: $70 per-diem", "PF25154: $70 per-diem"],
+        )
+
     def test_build_email_draft_requests_carry_notes(self) -> None:
         records = [
             DailyRecord(
@@ -1759,7 +1817,37 @@ class DssToolsTests(DssToolsFixtures):
         self.assertEqual(len(requests), 1)
         self.assertEqual(requests[0].notes, ("Remember travel note.",))
 
-    def test_build_email_html_appends_notes_when_template_omits_placeholder(self) -> None:
+    def test_build_email_html_integrates_row_notes_into_hours_table(self) -> None:
+        records = [
+            DailyRecord(
+                source_path=Path("C:/data/signin.xlsx"),
+                source_file="PF25154-5 DSS.xlsx",
+                pf_number="PF25154-5",
+                work_date=date(2026, 7, 13),
+                source_sheet="2026-07-13",
+                employee="Lochlan Ross",
+                st=8.0,
+                ot=3.0,
+                dt=0.0,
+                source_ranges="A5:F5",
+            ),
+        ]
+        html = build_email_html(
+            "Lochlan Ross",
+            date(2026, 7, 13),
+            date(2026, 7, 19),
+            records,
+            "<p>Hello</p>{hours_table}<p>Thanks.</p>",
+            (),
+            ["PF25154: $70 per-diem"],
+        )
+
+        self.assertIn("<th>Notes</th>", html)
+        self.assertIn("PF25154: $70 per-diem", html)
+        self.assertNotIn("<strong>Notes:</strong>", html)
+        self.assertIn("<p>Thanks.</p>", html)
+
+    def test_build_email_html_appends_summary_notes_when_template_omits_placeholder(self) -> None:
         records = [
             DailyRecord(
                 source_path=Path("C:/data/signin.xlsx"),
@@ -1785,7 +1873,6 @@ class DssToolsTests(DssToolsFixtures):
 
         self.assertIn("<strong>Notes:</strong>", html)
         self.assertIn("Remember travel note.", html)
-        self.assertIn("<p>Thanks.</p>", html)
 
     def test_email_templates_round_trip(self) -> None:
         with self.workspace_json("email_templates") as path:

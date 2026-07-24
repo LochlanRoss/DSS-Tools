@@ -922,15 +922,19 @@ class QuickDssPickerDialog(QDialog):
 
     def _format_item_label(self, path: Path) -> str:
         pf = core.extract_pf_identifier(path.name)
+        normalized_name = path.name.replace("_", " ")
         if pf and pf != path.stem.strip():
-            return f"{pf} | {path.name}"
-        return path.name
+            return f"{pf} | {normalized_name}"
+        return normalized_name
 
     def _root_pf_for_path(self, path: Path) -> str:
-        pf = core.extract_pf_identifier(path.name).strip()
-        if pf.upper().startswith("PF"):
-            return pf.split("-", 1)[0]
-        return pf or path.stem.strip()
+        return core.quick_dss_group_root_pf(path)
+
+    def _group_key_for_path(self, path: Path) -> str:
+        return str(core.quick_dss_job_folder_for_path(path))
+
+    def _group_label_for_path(self, path: Path) -> str:
+        return core.quick_dss_group_label(path)
 
     def _populate(self) -> None:
         previous = set(self.selected_file_paths()) | set(self.selected_paths)
@@ -939,25 +943,36 @@ class QuickDssPickerDialog(QDialog):
         self._group_headers.clear()
         candidates = self._iter_candidate_paths()
         grouped: dict[str, list[Path]] = {}
+        group_labels: dict[str, str] = {}
         for path in candidates:
-            grouped.setdefault(self._root_pf_for_path(path), []).append(path)
+            group_key = self._group_key_for_path(path)
+            grouped.setdefault(group_key, []).append(path)
+            group_labels.setdefault(group_key, self._group_label_for_path(path))
         self._syncing_checks = True
         try:
-            for root_pf in sorted(grouped, key=core.pf_number_sort_key):
-                paths = sorted(grouped[root_pf], key=lambda p: core.pf_number_sort_key(core.extract_pf_identifier(p.name)))
-                header = QListWidgetItem(root_pf)
+            sorted_group_keys = sorted(
+                grouped,
+                key=lambda key: (
+                    core.pf_number_sort_key(group_labels.get(key, "")),
+                    core.natural_text_sort_key(group_labels.get(key, "")),
+                ),
+            )
+            for group_key in sorted_group_keys:
+                paths = sorted(grouped[group_key], key=lambda p: core.pf_number_sort_key(core.extract_pf_identifier(p.name)))
+                header_label = group_labels.get(group_key, group_key)
+                header = QListWidgetItem(header_label)
                 header.setData(self.ITEM_KIND_ROLE, "group")
-                header.setData(self.ROOT_PF_ROLE, root_pf)
+                header.setData(self.ROOT_PF_ROLE, group_key)
                 header.setFlags(header.flags() | Qt.ItemIsUserCheckable)
                 self.list_widget.addItem(header)
-                self._group_headers[root_pf] = header
+                self._group_headers[group_key] = header
                 children: list[QListWidgetItem] = []
                 all_checked = True
                 for path in paths:
                     item = QListWidgetItem(f"    {self._format_item_label(path)}")
                     item.setData(self.FILE_PATH_ROLE, str(path))
                     item.setData(self.ITEM_KIND_ROLE, "file")
-                    item.setData(self.ROOT_PF_ROLE, root_pf)
+                    item.setData(self.ROOT_PF_ROLE, group_key)
                     item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
                     checked = str(path) in previous
                     item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
@@ -965,7 +980,7 @@ class QuickDssPickerDialog(QDialog):
                         all_checked = False
                     self.list_widget.addItem(item)
                     children.append(item)
-                self._group_children[root_pf] = children
+                self._group_children[group_key] = children
                 header.setCheckState(Qt.Checked if all_checked and children else Qt.Unchecked)
         finally:
             self._syncing_checks = False
@@ -1183,10 +1198,9 @@ class NameTypoWorker(QObject):
             locally_inferred = {warning.employee for warning in local_cache_warnings}
             remaining_names = [employee for employee in names_to_check if employee not in locally_inferred]
             address_book_names: list[str] = []
-            skipped_recent_misses: set[str] = set()
             cache_updates = dict(self.outlook_lookup_cache)
             if remaining_names:
-                query_names, cached_resolutions, cached_display_names, skipped_recent_misses = core.plan_outlook_query_names(
+                query_names, cached_resolutions, cached_display_names, _skipped_recent_misses = core.plan_outlook_query_names(
                     remaining_names,
                     self.employee_emails,
                     self.employee_outlook_display_names,
@@ -1200,8 +1214,6 @@ class NameTypoWorker(QObject):
                 for employee, display_name in cached_display_names.items():
                     if display_name.strip() and not self.employee_outlook_display_names.get(employee, "").strip():
                         self.employee_outlook_display_names[employee] = display_name.strip()
-                if skipped_recent_misses:
-                    self.progressChanged.emit(0.2, f"Skipping {len(skipped_recent_misses)} recently checked unresolved name(s)...")
                 if query_names:
                     self.progressChanged.emit(0.2, f"Querying Outlook for {len(query_names)} remaining unresolved name(s)...")
                     try:
@@ -1239,7 +1251,7 @@ class NameTypoWorker(QObject):
                 if address_book_names:
                     warnings.extend(
                         core.find_address_book_name_typos(
-                            [employee for employee in remaining_names if employee not in skipped_recent_misses and employee in effective_names_to_check],
+                            [employee for employee in remaining_names if employee in effective_names_to_check],
                             address_book_names,
                             self.daily_records,
                         )
@@ -1272,6 +1284,7 @@ class EmployeesPage(QWidget):
 
     def __init__(self) -> None:
         super().__init__()
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         self.employee_names: list[str] = []
         self.hidden_employee_names: set[str] = set()
         self.employee_emails: dict[str, str] = {}
@@ -1282,11 +1295,15 @@ class EmployeesPage(QWidget):
         self.employee_timesheet_names: dict[str, str] = {}
 
         splitter = QSplitter(self)
+        splitter.setChildrenCollapsible(False)
         left = QWidget()
         left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(6)
         roster_box = QGroupBox("Roster")
         roster_layout = QVBoxLayout(roster_box)
         self.employee_list = QListWidget()
+        self.employee_list.setMinimumHeight(180)
         self.employee_list.setSelectionMode(QListWidget.ExtendedSelection)
         self.add_employee_button = QPushButton("Add Employee")
         self.remove_employee_button = QPushButton("Hide Employee")
@@ -1319,7 +1336,9 @@ class EmployeesPage(QWidget):
         self.preview_timesheets_button = QPushButton("Preview Timesheets")
         self.suppression_box = QCheckBox("Suppress missing email warnings for this employee")
         self.notes_edit = QPlainTextEdit()
+        self.notes_edit.setMaximumHeight(96)
         self.group_list = QListWidget()
+        self.group_list.setMaximumHeight(110)
         self.group_list.setSelectionMode(QListWidget.NoSelection)
         self.alias_target_combo = QComboBox()
         self.alias_target_combo.setEditable(True)
@@ -1352,6 +1371,8 @@ class EmployeesPage(QWidget):
         group_box = QGroupBox("Group Membership")
         group_layout = QVBoxLayout(group_box)
         self.groups_list = QListWidget()
+        self.groups_list.setMinimumHeight(100)
+        self.groups_list.setMaximumHeight(150)
         group_buttons = QHBoxLayout()
         self.add_group_button = QPushButton("Add Group")
         self.remove_group_button = QPushButton("Remove Group")
@@ -1369,7 +1390,9 @@ class EmployeesPage(QWidget):
         splitter.setStretchFactor(1, 4)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(splitter, 1)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(splitter)
 
         self.employee_list.currentItemChanged.connect(self._populate_details)
         self.employee_list.itemSelectionChanged.connect(self._update_employee_action_states)
@@ -1737,10 +1760,13 @@ class FormattingRulesPage(QWidget):
 
     def __init__(self) -> None:
         super().__init__()
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         self.profiles: dict[str, core.FormattingProfile] = {}
         self.current_profile_name = core.DEFAULT_PROFILE_NAME
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
         form_box = QGroupBox("Formatting Rules")
         form = QFormLayout(form_box)
         self.profile_combo = QComboBox()
@@ -1767,7 +1793,6 @@ class FormattingRulesPage(QWidget):
 
         layout.addWidget(form_box)
         layout.addLayout(buttons)
-        layout.addStretch(1)
 
         self.profile_combo.currentTextChanged.connect(self._profile_changed)
         self.new_button.clicked.connect(self._new_profile)
@@ -1864,7 +1889,10 @@ class ConfigurationPage(QWidget):
 
     def __init__(self) -> None:
         super().__init__()
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
         self.disable_typo_box = QCheckBox()
         self.show_daily_raw_box = QCheckBox()
         self.quickload_box = QCheckBox()
@@ -1885,7 +1913,13 @@ class ConfigurationPage(QWidget):
         self.library_root_browse_button = QPushButton("Browse...")
         self.timesheet_root_edit = QLineEdit()
         self.timesheet_root_browse_button = QPushButton("Browse...")
+        self.timesheet_review_employee_combo = QComboBox()
+        self.timesheet_review_employee_combo.setEditable(True)
+        self.timesheet_review_employee_combo.setInsertPolicy(QComboBox.NoInsert)
+        if self.timesheet_review_employee_combo.lineEdit() is not None:
+            self.timesheet_review_employee_combo.lineEdit().setPlaceholderText("All loaded employees")
         self.job_note_rules_edit = QPlainTextEdit()
+        self.job_note_rules_edit.setMaximumHeight(110)
         self.job_note_rules_edit.setPlaceholderText("PF25154 | $70 per diem\nPF25154 | $86 Travel | 8 | Requires 8+ root PF hours")
         self.version_label = QLabel(f"Application version: {core.APP_VERSION}")
         library_root_row = QWidget()
@@ -1914,6 +1948,7 @@ class ConfigurationPage(QWidget):
         loading_form.addRow("Show partial results while loading", self.partial_preview_box)
         loading_form.addRow("DSS library root folder", library_root_row)
         loading_form.addRow("Timesheet discovery root folder", timesheet_root_row)
+        loading_form.addRow("Timesheet review employee (blank = all)", self.timesheet_review_employee_combo)
 
         warnings_box = QGroupBox("Warnings")
         warnings_form = QFormLayout(warnings_box)
@@ -1981,6 +2016,8 @@ class ConfigurationPage(QWidget):
 
         maintenance = QGroupBox("Maintenance")
         maintenance_layout = QGridLayout(maintenance)
+        maintenance_layout.setHorizontalSpacing(6)
+        maintenance_layout.setVerticalSpacing(4)
         self.reset_button = QPushButton("Reset All Settings to Default")
         self.clear_cache_button = QPushButton("Clear Cached DSSs")
         self.clear_emails_button = QPushButton("Clear Stored Emails")
@@ -1998,6 +2035,8 @@ class ConfigurationPage(QWidget):
 
         diagnostics = QGroupBox("Diagnostics")
         diagnostics_layout = QGridLayout(diagnostics)
+        diagnostics_layout.setHorizontalSpacing(6)
+        diagnostics_layout.setVerticalSpacing(4)
         self.export_diagnostic_button = QPushButton("Export Diagnostic Snapshot")
         self.test_outlook_button = QPushButton("Test Outlook Connection")
         self.show_loaded_status_button = QPushButton("Show Loaded DSS Status")
@@ -2029,7 +2068,6 @@ class ConfigurationPage(QWidget):
         layout.addWidget(self.apply_button, 0, Qt.AlignLeft)
         layout.addWidget(maintenance)
         layout.addWidget(diagnostics)
-        layout.addStretch(1)
 
         self.disable_typo_box.toggled.connect(self.settingsChanged.emit)
         self.show_daily_raw_box.toggled.connect(self.settingsChanged.emit)
@@ -2044,6 +2082,7 @@ class ConfigurationPage(QWidget):
         self.signin_hours_check_box.toggled.connect(self.settingsChanged.emit)
         self.library_root_edit.editingFinished.connect(self.settingsChanged.emit)
         self.timesheet_root_edit.editingFinished.connect(self.settingsChanged.emit)
+        self.timesheet_review_employee_combo.editTextChanged.connect(self.settingsChanged.emit)
         self.job_note_rules_edit.textChanged.connect(self.settingsChanged.emit)
         for edit in self._theme_line_edits.values():
             edit.editingFinished.connect(self.settingsChanged.emit)
@@ -2150,12 +2189,23 @@ class ConfigurationPage(QWidget):
         self.signin_hours_check_box.setChecked(settings.signin_hours_check_enabled)
         self.library_root_edit.setText(settings.dss_library_root)
         self.timesheet_root_edit.setText(settings.timesheet_library_root)
+        self.timesheet_review_employee_combo.setCurrentText(settings.timesheet_review_employee)
         for _label, attr in core.UI_THEME_CONFIG_FIELDS:
             edit = self._theme_line_edits.get(attr)
             if edit is not None:
                 edit.setText(getattr(settings.ui_theme, attr))
                 self._apply_theme_edit_preview(edit)
         self.appearance_preset_combo.setCurrentText(core.ui_theme_preset_name(settings.ui_theme))
+
+    def set_timesheet_review_employee_choices(self, employees: Iterable[str], selected_employee: str) -> None:
+        current_text = selected_employee.strip() or self.timesheet_review_employee_combo.currentText().strip()
+        self.timesheet_review_employee_combo.blockSignals(True)
+        self.timesheet_review_employee_combo.clear()
+        self.timesheet_review_employee_combo.addItem("")
+        for employee in sorted({str(employee).strip() for employee in employees if str(employee).strip()}, key=str.casefold):
+            self.timesheet_review_employee_combo.addItem(employee)
+        self.timesheet_review_employee_combo.setCurrentText(current_text)
+        self.timesheet_review_employee_combo.blockSignals(False)
 
     def set_job_note_rules_text(self, text: str) -> None:
         self.job_note_rules_edit.blockSignals(True)
@@ -2192,6 +2242,7 @@ class ConfigurationPage(QWidget):
             signin_hours_check_enabled=self.signin_hours_check_box.isChecked(),
             dss_library_root=self.library_root_edit.text().strip(),
             timesheet_library_root=self.timesheet_root_edit.text().strip(),
+            timesheet_review_employee=self.timesheet_review_employee_combo.currentText().strip(),
             max_parallel_parse_workers=int(self.max_parallel_spin.value()),
             partial_preview_enabled=self.partial_preview_box.isChecked(),
             ui_theme=core.parse_ui_theme_payload(theme_payload, defaults=current.ui_theme),
@@ -2205,6 +2256,7 @@ class EmailDraftsPage(QWidget):
 
     def __init__(self, theme: core.UiThemeColors, config_path: Path) -> None:
         super().__init__()
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         self._selected_week_start: date | None = None
         self.preview_table = DataTablePage(
             TableSpec(
@@ -2227,6 +2279,8 @@ class EmailDraftsPage(QWidget):
             config_path,
         )
         top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(6)
         self.week_combo = QComboBox()
         self.sync_button = QPushButton("Sync Outlook Emails")
         self.create_button = QPushButton("Create Outlook Drafts")
@@ -2239,26 +2293,32 @@ class EmailDraftsPage(QWidget):
         top.addStretch(1)
 
         templates = QSplitter(Qt.Vertical)
+        templates.setChildrenCollapsible(False)
+        templates.setHandleWidth(6)
         subject_box = QGroupBox("Subject Template")
         subject_layout = QVBoxLayout(subject_box)
         self.subject_edit = QTextEdit()
-        self.subject_edit.setMaximumHeight(90)
+        self.subject_edit.setMaximumHeight(68)
         subject_layout.addWidget(self.subject_edit)
 
         body_box = QGroupBox("Body Template (HTML)")
         body_layout = QVBoxLayout(body_box)
         self.body_edit = QPlainTextEdit()
+        self.body_edit.setMaximumHeight(130)
         body_layout.addWidget(self.body_edit)
 
         templates.addWidget(subject_box)
         templates.addWidget(body_box)
-        templates.setStretchFactor(0, 1)
-        templates.setStretchFactor(1, 2)
+        templates.setStretchFactor(0, 0)
+        templates.setStretchFactor(1, 0)
+        templates.setSizes([68, 130])
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
         layout.addLayout(top)
-        layout.addWidget(templates, 1)
-        layout.addWidget(self.preview_table, 2)
+        layout.addWidget(templates)
+        layout.addWidget(self.preview_table, 1)
 
         self.sync_button.clicked.connect(self.syncRequested.emit)
         self.create_button.clicked.connect(self.createDraftsRequested.emit)
@@ -2389,12 +2449,14 @@ class DssQtMainWindow(QMainWindow):
         self.main_scroll = QScrollArea()
         self.main_scroll.setWidgetResizable(True)
         self.main_scroll.setFrameShape(QScrollArea.NoFrame)
+        self.main_scroll.setAlignment(Qt.AlignTop)
         self.setCentralWidget(self.main_scroll)
         root = QWidget()
+        root.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         self.main_scroll.setWidget(root)
         root_layout = QVBoxLayout(root)
-        root_layout.setContentsMargins(10, 10, 10, 10)
-        root_layout.setSpacing(10)
+        root_layout.setContentsMargins(8, 8, 8, 8)
+        root_layout.setSpacing(6)
 
         self.add_button = QPushButton("Add DSSs")
         self.quick_add_button = QPushButton("Quick Add")
@@ -2429,9 +2491,9 @@ class DssQtMainWindow(QMainWindow):
         for widget in self._top_control_buttons:
             widget.setFont(top_button_font)
             widget.setMinimumWidth(0)
-            widget.setMinimumHeight(34)
+            widget.setMinimumHeight(30)
             widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-            widget.setStyleSheet("padding: 4px 6px;")
+            widget.setStyleSheet("padding: 3px 6px;")
         self.controls_box = controls_box
         self.controls_layout = controls_layout
         self.add_button.setToolTip("Add DSS workbooks to the current session without clearing existing ones.")
@@ -2442,7 +2504,8 @@ class DssQtMainWindow(QMainWindow):
 
         filters_box = QGroupBox("Filters")
         filters_layout = QHBoxLayout(filters_box)
-        filters_layout.setSpacing(8)
+        filters_layout.setContentsMargins(6, 6, 6, 6)
+        filters_layout.setSpacing(6)
         filters_layout.addWidget(QLabel("Employee"))
         filters_layout.addWidget(self.employee_filter)
         filters_layout.addWidget(QLabel("PF"))
@@ -2453,7 +2516,8 @@ class DssQtMainWindow(QMainWindow):
 
         load_box = QGroupBox("Load Status")
         load_layout = QHBoxLayout(load_box)
-        load_layout.setSpacing(8)
+        load_layout.setContentsMargins(6, 6, 6, 6)
+        load_layout.setSpacing(6)
         load_layout.addWidget(self.source_label, 1)
         load_layout.addWidget(self.loading_label)
         load_layout.addWidget(self.progress_bar, 2)
@@ -2463,6 +2527,8 @@ class DssQtMainWindow(QMainWindow):
 
         overview_box = QGroupBox("Overview")
         overview_layout = QHBoxLayout(overview_box)
+        overview_layout.setContentsMargins(6, 6, 6, 6)
+        overview_layout.setSpacing(8)
         self.loaded_files_summary_label = QLabel("Files: 0")
         self.loaded_employees_summary_label = QLabel("Employees: 0")
         self.loaded_pfs_summary_label = QLabel("PFs: 0")
@@ -2485,7 +2551,7 @@ class DssQtMainWindow(QMainWindow):
         self.overview_layout = overview_layout
 
         top_groups = QHBoxLayout()
-        top_groups.setSpacing(10)
+        top_groups.setSpacing(8)
         top_groups.addWidget(controls_box, 3)
         top_groups.addWidget(filters_box, 2)
         top_groups.addWidget(load_box, 3)
@@ -2494,6 +2560,8 @@ class DssQtMainWindow(QMainWindow):
         root_layout.addWidget(overview_box)
 
         status_row = QHBoxLayout()
+        status_row.setContentsMargins(0, 0, 0, 0)
+        status_row.setSpacing(6)
         self.status_label = QLabel("Load a DSS workbook to view daily and weekly labour summaries.")
         self.status_label.setWordWrap(True)
         self.quickload_hint_label = QLabel("")
@@ -2504,6 +2572,7 @@ class DssQtMainWindow(QMainWindow):
         root_layout.addLayout(status_row)
 
         self.group_tabs = QTabWidget()
+        self.group_tabs.setMinimumHeight(0)
         root_layout.addWidget(self.group_tabs, 1)
 
         self.data_tabs = QTabWidget()
@@ -2967,6 +3036,7 @@ class DssQtMainWindow(QMainWindow):
             self.employee_name_merges,
             self.employee_timesheet_names,
         )
+        self.configuration_page.set_timesheet_review_employee_choices(employee_names, self.app_settings.timesheet_review_employee)
 
     def _set_update_status(self, text: str) -> None:
         self._update_status_text = text
@@ -3121,9 +3191,36 @@ class DssQtMainWindow(QMainWindow):
         root = Path(self.app_settings.timesheet_library_root.strip()).expanduser() if self.app_settings.timesheet_library_root.strip() else None
         if root is None or not root.exists() or not root.is_dir():
             return []
+        selected_employee = self.app_settings.timesheet_review_employee.strip().casefold()
         records_by_employee_week: dict[tuple[str, date], list[core.DailyRecord]] = {}
+        matched_selected_employee = not selected_employee
         for record in filtered_records:
+            display_employee = self._display_employee_name(record.employee).strip()
+            if selected_employee and display_employee.casefold() != selected_employee:
+                continue
+            matched_selected_employee = True
             records_by_employee_week.setdefault((record.employee, core.monday_week_start(record.work_date)), []).append(record)
+        if selected_employee and not matched_selected_employee:
+            reference_date = min((record.work_date for record in filtered_records), default=date.today())
+            week_start = core.monday_week_start(reference_date)
+            week_end = week_start + timedelta(days=6)
+            return [
+                core.TimesheetComparisonFinding(
+                    employee=self.app_settings.timesheet_review_employee.strip(),
+                    work_date=reference_date,
+                    week_start=week_start,
+                    week_end=week_end,
+                    issue="Timesheet Review Employee Not Present",
+                    summary=(
+                        f"Selected timesheet review employee `{self.app_settings.timesheet_review_employee.strip()}` "
+                        "does not match any currently loaded DSS employee rows."
+                    ),
+                    details=(
+                        "Check the selected employee name, current employee merges, and any active employee filters. "
+                        "Leaving the setting blank checks all loaded employees."
+                    ),
+                )
+            ]
         if not records_by_employee_week:
             return []
 
@@ -3777,8 +3874,14 @@ class DssQtMainWindow(QMainWindow):
         if week_start is None:
             self.email_drafts_page.preview_table.set_rows([])
             return
-        notes_by_employee = self._build_email_notes_by_employee(filtered_records, week_start)
-        requests = core.build_email_draft_requests(filtered_records, self.employee_emails, week_start, notes_by_employee)
+        summary_notes_by_employee, row_notes_by_employee = self._build_email_notes_by_employee(filtered_records, week_start)
+        requests = core.build_email_draft_requests(
+            filtered_records,
+            self.employee_emails,
+            week_start,
+            summary_notes_by_employee,
+            row_notes_by_employee,
+        )
         rows: list[dict[str, Any]] = []
         for request in requests:
             st_total = round(sum(record.st for record in request.records), 2)
@@ -3793,7 +3896,7 @@ class DssQtMainWindow(QMainWindow):
                     "employee": request.employee,
                     "email": display_email,
                     "pf_numbers": pf_numbers or core.display_pf_number(""),
-                    "notes": " | ".join(request.notes),
+                    "notes": " | ".join(dict.fromkeys([*request.row_notes, *request.notes])),
                     "days": str(len(request.records)),
                     "st": core.fmt_hours(st_total),
                     "ot": core.fmt_hours(ot_total),
@@ -3809,20 +3912,27 @@ class DssQtMainWindow(QMainWindow):
         self,
         filtered_records: list[core.DailyRecord],
         week_start: date,
-    ) -> dict[str, list[str]]:
-        notes_by_employee: dict[str, list[str]] = {}
+    ) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+        summary_notes_by_employee: dict[str, list[str]] = {}
+        row_notes_by_employee: dict[str, list[str]] = {}
         grouped_records: dict[str, list[core.DailyRecord]] = {}
         for record in core.records_for_week(filtered_records, week_start):
             grouped_records.setdefault(record.employee, []).append(record)
         for employee, employee_records in grouped_records.items():
-            note_lines = core.build_email_note_lines(
+            summary_note_lines = core.build_email_note_lines(
                 employee_records,
                 employee_note=self.employee_notes.get(employee, ""),
+                job_note_rules=[],
+            )
+            row_note_lines = core.build_email_row_note_lines(
+                employee_records,
                 job_note_rules=self.job_note_rules,
             )
-            if note_lines:
-                notes_by_employee[employee] = note_lines
-        return notes_by_employee
+            if summary_note_lines:
+                summary_notes_by_employee[employee] = summary_note_lines
+            if any(note.strip() for note in row_note_lines):
+                row_notes_by_employee[employee] = row_note_lines
+        return summary_notes_by_employee, row_notes_by_employee
 
     def _save_table_layout(self, table_id: str, visible_columns: list[str], widths: dict[str, int], sort_column: str, sort_descending: bool) -> None:
         core.save_table_layout(
@@ -4301,7 +4411,7 @@ class DssQtMainWindow(QMainWindow):
         if not employee_names:
             QMessageBox.information(self, "Outlook Email Sync", "No missing employee emails need syncing right now.")
             return
-        query_names, cached_resolutions, cached_display_names, skipped_recent_misses = core.plan_outlook_query_names(
+        query_names, cached_resolutions, cached_display_names, _skipped_recent_misses = core.plan_outlook_query_names(
             employee_names,
             self.employee_emails,
             self.employee_outlook_display_names,
@@ -4336,7 +4446,6 @@ class DssQtMainWindow(QMainWindow):
                 self,
                 "Outlook Email Sync",
                 f"Used cached Outlook results for {cache_applied} employee(s).\n"
-                f"Skipped {len(skipped_recent_misses)} recently checked unresolved name(s).\n"
                 f"Still missing: {still_missing}",
             )
             return
@@ -4358,8 +4467,8 @@ class DssQtMainWindow(QMainWindow):
             )
         )
         worker.finished.connect(
-            lambda results, address_book_names, current_token=token, query_names=query_names, cache_applied=cache_applied, skipped_recent_misses=skipped_recent_misses:
-            self._on_outlook_sync_finished(current_token, results, address_book_names, query_names, cache_applied, skipped_recent_misses)
+            lambda results, address_book_names, current_token=token, query_names=query_names, cache_applied=cache_applied:
+            self._on_outlook_sync_finished(current_token, results, address_book_names, query_names, cache_applied)
         )
         worker.failed.connect(lambda message, current_token=token: self._on_outlook_sync_failed(current_token, message))
         worker.cancelled.connect(lambda current_token=token: self._on_outlook_sync_cancelled(current_token))
@@ -4434,7 +4543,6 @@ class DssQtMainWindow(QMainWindow):
         address_book_names: list[str],
         queried_names: list[str],
         cache_applied: int,
-        skipped_recent_misses: set[str],
     ) -> None:
         if token != self._active_outlook_token:
             return
@@ -4479,7 +4587,6 @@ class DssQtMainWindow(QMainWindow):
         message = (
             f"Matched emails from Outlook: {updated}\n"
             f"Matched emails from cache: {cache_applied}\n"
-            f"Skipped recent unresolved names: {len(skipped_recent_misses)}\n"
             f"Still missing: {missing_after}"
         )
         if unsuppressed_warnings and not self.app_settings.disable_name_typo_notifications:
@@ -4516,8 +4623,14 @@ class DssQtMainWindow(QMainWindow):
             QMessageBox.information(self, "Email Drafts", "Load DSS data and choose a week first.")
             return
         filtered_records = self._current_filtered_records()
-        notes_by_employee = self._build_email_notes_by_employee(filtered_records, week_start)
-        requests = core.build_email_draft_requests(filtered_records, self.employee_emails, week_start, notes_by_employee)
+        summary_notes_by_employee, row_notes_by_employee = self._build_email_notes_by_employee(filtered_records, week_start)
+        requests = core.build_email_draft_requests(
+            filtered_records,
+            self.employee_emails,
+            week_start,
+            summary_notes_by_employee,
+            row_notes_by_employee,
+        )
         selected_preview_rows = self.email_drafts_page.preview_table.selected_rows()
         selected_employees = {row.get("employee", "") for row in selected_preview_rows}
         if selected_employees:

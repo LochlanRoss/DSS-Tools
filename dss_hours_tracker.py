@@ -865,6 +865,7 @@ class EmailDraftRequest:
     week_end: date
     records: list[DailyRecord]
     notes: tuple[str, ...] = ()
+    row_notes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1208,6 +1209,7 @@ class AppSettings:
     signin_hours_check_enabled: bool = True
     dss_library_root: str = ""
     timesheet_library_root: str = ""
+    timesheet_review_employee: str = ""
     max_parallel_parse_workers: int = MAX_PARALLEL_PARSE_WORKERS
     partial_preview_enabled: bool = DEFAULT_PARTIAL_PREVIEW_ENABLED
     ui_theme: UiThemeColors = field(default_factory=lambda: DEFAULT_UI_THEME)
@@ -1643,6 +1645,61 @@ def iter_quick_dss_candidate_paths(root_folder: Path) -> list[Path]:
     return candidates
 
 
+def quick_dss_job_folder_for_path(path: Path) -> Path:
+    try:
+        return path.expanduser().resolve().parents[2]
+    except IndexError:
+        return path.parent
+
+
+def quick_dss_group_root_pf(path: Path) -> str:
+    job_dir = quick_dss_job_folder_for_path(path)
+    normalized_job_name = (
+        str(job_dir.name)
+        .replace("\u2010", "-")
+        .replace("\u2011", "-")
+        .replace("\u2012", "-")
+        .replace("\u2013", "-")
+        .replace("\u2014", "-")
+        .replace("\u2212", "-")
+    )
+    job_match = re.search(r"PF\d+(?:\s*-\s*\d+)?", normalized_job_name, re.IGNORECASE)
+    pf = normalize_timesheet_job_number(job_match.group(0)) if job_match else ""
+    if not pf:
+        pf = extract_pf_identifier(path.name).strip()
+    if pf.upper().startswith("PF"):
+        return pf.split("-", 1)[0]
+    return pf or job_dir.name.strip() or path.stem.strip()
+
+
+def quick_dss_group_description(path: Path) -> str:
+    job_dir = quick_dss_job_folder_for_path(path)
+    job_name = str(job_dir.name).strip()
+    normalized = (
+        job_name
+        .replace("\u2010", "-")
+        .replace("\u2011", "-")
+        .replace("\u2012", "-")
+        .replace("\u2013", "-")
+        .replace("\u2014", "-")
+        .replace("\u2212", "-")
+    )
+    match = re.search(r"PF\d+(?:\s*-\s*\d+)?", normalized, re.IGNORECASE)
+    if not match:
+        return ""
+    tail = job_name[match.end():].strip()
+    tail = tail.lstrip(" _-")
+    tail = tail.replace("_", " ")
+    tail = re.sub(r"\s+", " ", tail).strip(" -")
+    return tail
+
+
+def quick_dss_group_label(path: Path) -> str:
+    root_pf = quick_dss_group_root_pf(path)
+    description = quick_dss_group_description(path)
+    return f"{root_pf} {description}".strip()
+
+
 _QUICKLOAD_CANCEL_MODIFIER_KEYSYMS: frozenset[str] = frozenset(
     {
         "Shift_L",
@@ -1824,9 +1881,6 @@ def plan_outlook_query_names(
     employee_emails: dict[str, str],
     employee_outlook_display_names: dict[str, str],
     lookup_cache: dict[str, OutlookLookupCacheEntry],
-    *,
-    checked_on: date | None = None,
-    miss_ttl_days: int = OUTLOOK_LOOKUP_MISS_TTL_DAYS,
 ) -> tuple[list[str], dict[str, OutlookResolution], dict[str, str], set[str]]:
     query_names: list[str] = []
     cached_resolutions: dict[str, OutlookResolution] = {}
@@ -1848,9 +1902,6 @@ def plan_outlook_query_names(
             cached_display_names[employee] = entry.display_name.strip()
         if entry.email.strip():
             cached_resolutions[employee] = OutlookResolution(entry.email.strip(), entry.display_name.strip() or employee)
-            continue
-        if is_outlook_lookup_cache_entry_fresh(entry, checked_on=checked_on, miss_ttl_days=miss_ttl_days):
-            skipped_recent_misses.add(employee)
             continue
         query_names.append(employee)
     return query_names, cached_resolutions, cached_display_names, skipped_recent_misses
@@ -2339,6 +2390,7 @@ def load_app_settings(config_path: Path) -> AppSettings:
         signin_hours_check_enabled=bool(raw_settings.get("signin_hours_check_enabled", True)),
         dss_library_root=str(raw_settings.get("dss_library_root", "")).strip(),
         timesheet_library_root=str(raw_settings.get("timesheet_library_root", "")).strip(),
+        timesheet_review_employee=str(raw_settings.get("timesheet_review_employee", "")).strip(),
         max_parallel_parse_workers=max_parallel_parse_workers,
         partial_preview_enabled=bool(raw_settings.get("partial_preview_enabled", DEFAULT_PARTIAL_PREVIEW_ENABLED)),
         ui_theme=parse_ui_theme_payload(raw_settings.get("ui_theme")),
@@ -2359,6 +2411,7 @@ def save_app_settings(config_path: Path, settings: AppSettings) -> None:
         "signin_hours_check_enabled": settings.signin_hours_check_enabled,
         "dss_library_root": settings.dss_library_root,
         "timesheet_library_root": settings.timesheet_library_root,
+        "timesheet_review_employee": settings.timesheet_review_employee,
         "max_parallel_parse_workers": settings.max_parallel_parse_workers,
         "partial_preview_enabled": settings.partial_preview_enabled,
         "ui_theme": asdict(settings.ui_theme),
@@ -4263,6 +4316,49 @@ def build_email_note_lines(
     return note_lines
 
 
+def build_email_row_note_lines(
+    records: Sequence[DailyRecord],
+    *,
+    job_note_rules: Iterable[JobNoteRule] = (),
+    tolerance: float = 0.05,
+) -> list[str]:
+    normalized_rules = list(job_note_rules)
+    if not normalized_rules:
+        return [""] * len(records)
+
+    root_hours_by_date: dict[str, dict[date, float]] = {}
+    for record in records:
+        root_pf = base_pf_number(record.pf_number)
+        if not root_pf:
+            continue
+        date_hours = root_hours_by_date.setdefault(root_pf, {})
+        date_hours[record.work_date] = round(date_hours.get(record.work_date, 0.0) + record.total, 2)
+
+    note_texts_by_root_date: dict[tuple[str, date], list[str]] = {}
+    for rule in normalized_rules:
+        root_pf = base_pf_number(rule.pf_number)
+        if not root_pf:
+            continue
+        for work_date, hours in sorted(root_hours_by_date.get(root_pf, {}).items()):
+            if hours <= tolerance:
+                continue
+            if rule.min_root_pf_hours is not None and hours + tolerance < rule.min_root_pf_hours:
+                continue
+            note_texts_by_root_date.setdefault((root_pf, work_date), []).append(rule.required_text.strip())
+
+    row_notes: list[str] = []
+    for record in records:
+        root_pf = base_pf_number(record.pf_number)
+        key = (root_pf, record.work_date)
+        raw_notes = [text for text in note_texts_by_root_date.get(key, []) if text]
+        if not raw_notes or not root_pf:
+            row_notes.append("")
+            continue
+        deduped_notes = list(dict.fromkeys(raw_notes))
+        row_notes.append(f"{display_pf_number(root_pf)}: {' | '.join(deduped_notes)}")
+    return row_notes
+
+
 def format_email_notes_text(notes: Sequence[str]) -> str:
     cleaned = [note.strip() for note in notes if note.strip()]
     if not cleaned:
@@ -4283,6 +4379,7 @@ def build_email_draft_requests(
     employee_emails: dict[str, str],
     week_start: date,
     notes_by_employee: Mapping[str, Sequence[str] | str] | None = None,
+    row_notes_by_employee: Mapping[str, Sequence[str] | str] | None = None,
 ) -> list[EmailDraftRequest]:
     grouped: dict[str, list[DailyRecord]] = {}
     week_records = records_for_week(records, week_start)
@@ -4291,6 +4388,8 @@ def build_email_draft_requests(
 
     requests: list[EmailDraftRequest] = []
     week_end = week_start + timedelta(days=6)
+    notes_lookup = notes_by_employee or {}
+    row_notes_lookup = row_notes_by_employee or {}
     for employee in sorted(grouped):
         requests.append(
             EmailDraftRequest(
@@ -4302,11 +4401,19 @@ def build_email_draft_requests(
                 notes=tuple(
                     note.strip()
                     for note in (
-                        [str(notes_by_employee.get(employee, "")).strip()]
-                        if isinstance((notes_by_employee or {}).get(employee, ""), str)
-                        else [str(note).strip() for note in (notes_by_employee or {}).get(employee, ())]
+                        [str(notes_lookup.get(employee, "")).strip()]
+                        if isinstance(notes_lookup.get(employee, ""), str)
+                        else [str(note).strip() for note in notes_lookup.get(employee, ())]
                     )
                     if note.strip()
+                ),
+                row_notes=tuple(
+                    str(note).strip()
+                    for note in (
+                        [str(row_notes_lookup.get(employee, "")).strip()]
+                        if isinstance(row_notes_lookup.get(employee, ""), str)
+                        else [str(note).strip() for note in row_notes_lookup.get(employee, ())]
+                    )
                 ),
             )
         )
@@ -4334,14 +4441,15 @@ def format_email_subject(
     )
 
 
-def build_hours_table_html(records: list[DailyRecord]) -> str:
+def build_hours_table_html(records: list[DailyRecord], row_notes: Sequence[str] = ()) -> str:
     total_st = round(sum(record.st for record in records), 2)
     total_ot = round(sum(record.ot for record in records), 2)
     total_dt = round(sum(record.dt for record in records), 2)
     total_hours = round(total_st + total_ot + total_dt, 2)
 
     rows = []
-    for record in records:
+    for index, record in enumerate(records):
+        row_note = str(row_notes[index]).strip() if index < len(row_notes) else ""
         rows.append(
             "<tr>"
             f"<td>{html.escape(str(reference_week_number(record.work_date)))}</td>"
@@ -4353,14 +4461,15 @@ def build_hours_table_html(records: list[DailyRecord]) -> str:
             f"<td>{html.escape(fmt_hours(record.ot))}</td>"
             f"<td>{html.escape(fmt_hours(record.dt))}</td>"
             f"<td>{html.escape(fmt_hours(record.total))}</td>"
+            f"<td style='white-space:normal; word-break:break-word; min-width:180px; max-width:240px;'>{html.escape(row_note)}</td>"
             "</tr>"
         )
     rows_html = "".join(rows)
 
     return (
-        "<table border='1' cellspacing='0' cellpadding='4' style='border-collapse:collapse;'>"
+        "<table border='1' cellspacing='0' cellpadding='4' style='border-collapse:collapse; table-layout:auto;'>"
         "<thead><tr>"
-        "<th>Week #</th><th>Date</th><th>Day</th><th>PF#</th><th>Source Sheet</th><th>ST</th><th>OT</th><th>DT</th><th>Total</th>"
+        "<th>Week #</th><th>Date</th><th>Day</th><th>PF#</th><th>Source Sheet</th><th>ST</th><th>OT</th><th>DT</th><th>Total</th><th>Notes</th>"
         "</tr></thead>"
         f"<tbody>{rows_html}</tbody>"
         "<tfoot><tr>"
@@ -4369,6 +4478,7 @@ def build_hours_table_html(records: list[DailyRecord]) -> str:
         f"<th>{html.escape(fmt_hours(total_ot))}</th>"
         f"<th>{html.escape(fmt_hours(total_dt))}</th>"
         f"<th>{html.escape(fmt_hours(total_hours))}</th>"
+        "<th></th>"
         "</tr></tfoot>"
         "</table>"
     )
@@ -4381,6 +4491,7 @@ def build_email_html(
     records: list[DailyRecord],
     body_template: str,
     notes: Sequence[str] = (),
+    row_notes: Sequence[str] = (),
 ) -> str:
     first_name = employee.strip().split()[0] if employee.strip() else employee
     template = body_template.strip() or default_email_body_template()
@@ -4395,7 +4506,7 @@ def build_email_html(
         pf_numbers=html.escape(pf_numbers),
         notes=html.escape(notes_text),
         notes_html=notes_html,
-        hours_table=build_hours_table_html(records),
+        hours_table=build_hours_table_html(records, row_notes),
     )
     if notes_html and "{notes_html}" not in template and "{notes}" not in template:
         thanks_marker = "<p>Thanks.</p>"
@@ -4606,6 +4717,7 @@ def create_outlook_drafts(
                 request.records,
                 body_template,
                 request.notes,
+                request.row_notes,
             )
             mail_item.Save()
             created += 1
@@ -9778,7 +9890,7 @@ class DssToolsApp(tk.Tk):
                 messagebox.showinfo("Outlook Email Sync", "All loaded employees already have email addresses saved.")
             return
 
-        query_names, cached_resolutions, cached_display_names, skipped_recent_misses = plan_outlook_query_names(
+        query_names, cached_resolutions, cached_display_names, _skipped_recent_misses = plan_outlook_query_names(
             missing_names,
             self.employee_emails,
             self.employee_outlook_display_names,
@@ -9812,7 +9924,6 @@ class DssToolsApp(tk.Tk):
                 messagebox.showinfo(
                     "Outlook Email Sync",
                     f"Used cached Outlook results for {cache_applied} employee(s).\n"
-                    f"Skipped {len(skipped_recent_misses)} recently checked unresolved name(s).\n"
                     f"Still missing: {still_missing}",
                 )
             return
@@ -9823,7 +9934,7 @@ class DssToolsApp(tk.Tk):
         self._refresh_outlook_sync_button()
         worker = threading.Thread(
             target=self._sync_outlook_emails_worker,
-            args=(query_names, manual, cancel_event, cache_applied, skipped_recent_misses),
+            args=(query_names, manual, cancel_event, cache_applied),
             daemon=True,
         )
         worker.start()
@@ -9834,7 +9945,6 @@ class DssToolsApp(tk.Tk):
         manual: bool,
         cancel_event: threading.Event,
         cache_applied: int,
-        skipped_recent_misses: set[str],
     ) -> None:
         try:
             results, address_book_names = query_outlook_emails(
@@ -9857,7 +9967,6 @@ class DssToolsApp(tk.Tk):
                 manual,
                 cancel_event,
                 cache_applied,
-                skipped_recent_misses,
             ),
         )
 
@@ -9883,7 +9992,6 @@ class DssToolsApp(tk.Tk):
         manual: bool,
         cancel_event: threading.Event | None = None,
         cache_applied: int = 0,
-        skipped_recent_misses: set[str] | None = None,
     ) -> None:
         self._outlook_sync_in_progress = False
         self._end_cancellable_action(cancel_event)
@@ -9962,7 +10070,6 @@ class DssToolsApp(tk.Tk):
                 "Outlook Email Sync",
                 f"Matched emails from Outlook: {updated}\n"
                 f"Matched emails from cache: {cache_applied}\n"
-                f"Skipped recent unresolved names: {len(skipped_recent_misses or set())}\n"
                 f"Still missing: {missing_after}",
             )
         if typo_warnings and not self.app_settings.disable_name_typo_notifications:
@@ -10879,8 +10986,14 @@ class DssToolsApp(tk.Tk):
             self.email_drafts_frame.preview_table.set_rows([])
             return
 
-        notes_by_employee = self._build_email_notes_by_employee(filtered_daily_records, week_start)
-        requests = build_email_draft_requests(filtered_daily_records, self.employee_emails, week_start, notes_by_employee)
+        summary_notes_by_employee, row_notes_by_employee = self._build_email_notes_by_employee(filtered_daily_records, week_start)
+        requests = build_email_draft_requests(
+            filtered_daily_records,
+            self.employee_emails,
+            week_start,
+            summary_notes_by_employee,
+            row_notes_by_employee,
+        )
         preview_rows: list[tuple[str, ...]] = []
         preview_tags: list[tuple[str, ...]] = []
         for request in requests:
@@ -10895,7 +11008,7 @@ class DssToolsApp(tk.Tk):
                 (
                     request.employee,
                     email_display,
-                    " | ".join(request.notes),
+                    " | ".join(dict.fromkeys([*request.row_notes, *request.notes])),
                     str(len(request.records)),
                     fmt_hours(st_total),
                     fmt_hours(ot_total),
@@ -10923,20 +11036,27 @@ class DssToolsApp(tk.Tk):
         self,
         filtered_daily_records: list[DailyRecord],
         week_start: date,
-    ) -> dict[str, list[str]]:
-        notes_by_employee: dict[str, list[str]] = {}
+    ) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+        summary_notes_by_employee: dict[str, list[str]] = {}
+        row_notes_by_employee: dict[str, list[str]] = {}
         grouped_records: dict[str, list[DailyRecord]] = {}
         for record in records_for_week(filtered_daily_records, week_start):
             grouped_records.setdefault(record.employee, []).append(record)
         for employee, employee_records in grouped_records.items():
-            note_lines = build_email_note_lines(
+            summary_note_lines = build_email_note_lines(
                 employee_records,
                 employee_note=self.employee_notes.get(employee, ""),
+                job_note_rules=[],
+            )
+            row_note_lines = build_email_row_note_lines(
+                employee_records,
                 job_note_rules=self.job_note_rules,
             )
-            if note_lines:
-                notes_by_employee[employee] = note_lines
-        return notes_by_employee
+            if summary_note_lines:
+                summary_notes_by_employee[employee] = summary_note_lines
+            if any(note.strip() for note in row_note_lines):
+                row_notes_by_employee[employee] = row_note_lines
+        return summary_notes_by_employee, row_notes_by_employee
 
     def create_email_drafts(self) -> None:
         if self.current_data is None:
@@ -10957,8 +11077,14 @@ class DssToolsApp(tk.Tk):
         filtered_daily_records = [
             record for record in self.current_data.daily_records if record.employee in allowed_employees
         ]
-        notes_by_employee = self._build_email_notes_by_employee(filtered_daily_records, week_start)
-        requests = build_email_draft_requests(filtered_daily_records, self.employee_emails, week_start, notes_by_employee)
+        summary_notes_by_employee, row_notes_by_employee = self._build_email_notes_by_employee(filtered_daily_records, week_start)
+        requests = build_email_draft_requests(
+            filtered_daily_records,
+            self.employee_emails,
+            week_start,
+            summary_notes_by_employee,
+            row_notes_by_employee,
+        )
         selected_employees = self.email_drafts_frame.selected_employees()
         if selected_employees:
             requests = [request for request in requests if request.employee in selected_employees]
